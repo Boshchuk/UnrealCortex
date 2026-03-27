@@ -2,6 +2,7 @@
 
 #include "CortexLevelUtils.h"
 #include "CortexTypes.h"
+#include "EngineUtils.h"
 #include "DataLayer/DataLayerEditorSubsystem.h"
 #include "Dom/JsonValue.h"
 #include "Engine/LevelStreaming.h"

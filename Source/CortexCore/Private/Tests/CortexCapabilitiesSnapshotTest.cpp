@@ -1,3 +1,4 @@
+#include "CortexCommandRouter.h"
 #include "Misc/AutomationTest.h"
 #include "CortexCoreModule.h"
 #include "Misc/FileHelper.h"

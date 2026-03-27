@@ -14,6 +14,9 @@ class FCortexCommandRouter;
 class CORTEXCORE_API FCortexCoreModule : public IModuleInterface
 {
 public:
+	FCortexCoreModule();
+	~FCortexCoreModule();
+
 	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
 

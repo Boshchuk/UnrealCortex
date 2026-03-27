@@ -39,6 +39,22 @@ def find_project_root() -> pathlib.Path:
     raise FileNotFoundError("Cannot find .uproject file. Set CORTEX_PROJECT_DIR env var.")
 
 
+def find_uproject_file(project_root: pathlib.Path | None = None) -> pathlib.Path:
+    """Find the project's .uproject file so schema metadata follows the UE project identity."""
+    resolved_root = project_root or find_project_root()
+    uproject_files = sorted(resolved_root.glob("*.uproject"))
+    if not uproject_files:
+        raise FileNotFoundError(
+            f"Cannot find .uproject file in project root: {resolved_root}"
+        )
+    return uproject_files[0]
+
+
+def get_project_name(project_root: pathlib.Path | None = None) -> str:
+    """Use the .uproject stem instead of the folder name to avoid workspace alias drift."""
+    return find_uproject_file(project_root).stem
+
+
 def get_schema_dir() -> pathlib.Path:
     """Get the .cortex/schema/ directory path."""
     return find_project_root() / ".cortex" / "schema"

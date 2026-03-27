@@ -8,6 +8,7 @@ from cortex_mcp.schema_generator import (
     find_project_root,
     generate_schema,
     get_schema_dir,
+    get_project_name,
     read_meta_from_file,
     SCHEMA_VERSION,
 )
@@ -38,7 +39,8 @@ def register_schema_tools(mcp, connection: UEConnection):
         """
         try:
             schema_dir = get_schema_dir()
-            project_name = find_project_root().stem
+            # Schema metadata should match the Unreal project name even when the workspace folder is renamed.
+            project_name = get_project_name(find_project_root())
             start = time.time()
 
             result = generate_schema(

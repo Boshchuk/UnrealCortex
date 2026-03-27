@@ -6,6 +6,9 @@
 
 DEFINE_LOG_CATEGORY(LogCortex);
 
+FCortexCoreModule::FCortexCoreModule() = default;
+FCortexCoreModule::~FCortexCoreModule() = default;
+
 void FCortexCoreModule::StartupModule()
 {
     UE_LOG(LogCortex, Log, TEXT("CortexCore module starting up"));
