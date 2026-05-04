@@ -136,6 +136,12 @@ namespace CortexBPComponentOpsPrivate
 
 	FCortexBatchPreflightResult PreflightSetComponentDefaults(const FCortexBatchMutationItem& Item)
 	{
+		FString ValidationError;
+		if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(Item.Target, ValidationError))
+		{
+			return FCortexBatchPreflightResult::Error(CortexErrorCodes::InvalidField, ValidationError);
+		}
+
 		FString LoadError;
 		UBlueprint* Blueprint = FCortexBPAssetOps::LoadBlueprint(Item.Target, LoadError);
 		if (!Blueprint)
@@ -361,8 +367,6 @@ FCortexCommandResult FCortexBPComponentOps::ListSCSComponents(const TSharedPtr<F
 		return FCortexCommandRouter::Error(CortexErrorCodes::BlueprintNotFound, LoadError);
 	}
 
-	FKismetEditorUtilities::CompileBlueprint(Blueprint);
-
 	TArray<TSharedPtr<FJsonValue>> ComponentsArray;
 	if (USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript)
 	{
@@ -435,6 +439,12 @@ FCortexCommandResult FCortexBPComponentOps::SetComponentDefaults(const TSharedPt
 			CortexErrorCodes::InvalidField,
 			TEXT("Missing required param: properties")
 		);
+	}
+
+	FString ValidationError;
+	if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(AssetPath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
 	}
 
 	FString LoadError;
@@ -605,6 +615,12 @@ FCortexCommandResult FCortexBPComponentOps::AddSCSComponent(const TSharedPtr<FJs
 		return FCortexCommandRouter::Error(
 			CortexErrorCodes::InvalidField,
 			TEXT("Missing required params: asset_path, component_class"));
+	}
+
+	FString ValidationError;
+	if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(AssetPath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
 	}
 
 	FString LoadError;

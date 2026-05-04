@@ -422,6 +422,12 @@ namespace
 
 	static FCortexBatchPreflightResult PreflightBatchSetClassDefaults(const FCortexBatchMutationItem& Item)
 	{
+		FString ValidationError;
+		if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(Item.Target, ValidationError))
+		{
+			return FCortexBatchPreflightResult::Error(CortexErrorCodes::InvalidField, ValidationError);
+		}
+
 		FString LoadError;
 		UBlueprint* Blueprint = FCortexBPAssetOps::LoadBlueprint(Item.Target, LoadError);
 		if (!Blueprint)
@@ -972,6 +978,12 @@ FCortexCommandResult FCortexBPClassDefaultsOps::SetClassDefaults(const TSharedPt
 
 	bool bSave = true;
 	Params->TryGetBoolField(TEXT("save"), bSave);
+
+	FString ValidationError;
+	if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(BlueprintPath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
+	}
 
 	FString LoadError;
 	UBlueprint* Blueprint = FCortexBPAssetOps::LoadBlueprint(BlueprintPath, LoadError);
