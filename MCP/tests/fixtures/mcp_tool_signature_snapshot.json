@@ -204,7 +204,11 @@
       "params": [
         "asset_path",
         "component_name",
-        "properties"
+        "properties",
+        "compile",
+        "save",
+        "expected_fingerprint",
+        "items"
       ]
     }
   },
