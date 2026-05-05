@@ -291,6 +291,43 @@ bool FCortexBPComponentDefaultsJsonValuesTest::RunTest(const FString& Parameters
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexBPComponentDefaultsSingleStaleFingerprintTest,
+	"Cortex.Blueprint.SetComponentDefaults.SingleStaleFingerprint",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexBPComponentDefaultsSingleStaleFingerprintTest::RunTest(const FString& Parameters)
+{
+	using namespace CortexBPComponentDefaultsTest;
+
+	FFixture Fixture;
+	if (!ValidateFixture(*this, Fixture))
+	{
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> Properties = MakeShared<FJsonObject>();
+	Properties->SetBoolField(TEXT("bVisible"), false);
+
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("asset_path"), Fixture.AssetPath);
+	Params->SetStringField(TEXT("component_name"), Fixture.ComponentName);
+	Params->SetObjectField(TEXT("properties"), Properties);
+	Params->SetObjectField(TEXT("expected_fingerprint"), MakeShared<FJsonObject>());
+
+	FCortexCommandResult Result = Fixture.Handler.Execute(TEXT("set_component_defaults"), Params);
+	TestFalse(TEXT("single stale fingerprint rejects write"), Result.bSuccess);
+	TestEqual(TEXT("single stale fingerprint error code"), Result.ErrorCode, CortexErrorCodes::StalePrecondition);
+
+	UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *Fixture.AssetPath);
+	UStaticMeshComponent* Template = FindStaticMeshTemplate(Blueprint, Fixture.ComponentName);
+	TestNotNull(TEXT("template exists"), Template);
+	TestTrue(TEXT("rejected stale write does not mutate template"), Template ? Template->GetVisibleFlag() : false);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexBPComponentDefaultsPartialFailureTest,
 	"Cortex.Blueprint.SetComponentDefaults.PartialFailure",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter

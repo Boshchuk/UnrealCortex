@@ -547,6 +547,29 @@ FCortexCommandResult FCortexBPComponentOps::SetComponentDefaults(const TSharedPt
 			CortexBPComponentOpsPrivate::CommitSetComponentDefaults));
 	}
 
+	if (Params.IsValid() && Params->HasField(TEXT("expected_fingerprint")))
+	{
+		FCortexBatchMutationRequest Request;
+		FCortexCommandResult ParseError;
+		if (!FCortexBatchMutation::ParseRequest(Params, TEXT("asset_path"), Request, ParseError))
+		{
+			return ParseError;
+		}
+
+		const FCortexBatchMutationResult BatchResult = FCortexBatchMutation::Run(
+			Request,
+			CortexBPComponentOpsPrivate::PreflightSetComponentDefaults,
+			CortexBPComponentOpsPrivate::CommitSetComponentDefaults);
+		if (BatchResult.PerItem.Num() > 0)
+		{
+			return BatchResult.PerItem[0].Result;
+		}
+
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidField,
+			TEXT("No set_component_defaults target was parsed"));
+	}
+
 	FString AssetPath;
 	FString ComponentName;
 	if (!Params.IsValid()
