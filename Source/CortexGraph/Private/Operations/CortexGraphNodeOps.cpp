@@ -85,6 +85,38 @@ bool ValidateWritableGraphNodeBlueprintAssetPath(const FString& AssetPath, FCort
 
 	return true;
 }
+
+bool ResolveMutableNodeGraph(
+	UBlueprint* Blueprint,
+	const FString& GraphName,
+	UEdGraph*& OutGraph,
+	FCortexCommandResult& OutError)
+{
+	FCortexGraphEntry Entry;
+	if (!FCortexGraphNodeOps::FindGraphEntry(Blueprint, GraphName, Entry))
+	{
+		const FString TargetName = GraphName.IsEmpty() ? TEXT("EventGraph") : GraphName;
+		OutError = FCortexCommandRouter::Error(
+			CortexErrorCodes::GraphNotFound,
+			FString::Printf(TEXT("Graph not found: %s"), *TargetName)
+		);
+		return false;
+	}
+
+	if (!FCortexGraphNodeOps::IsMutableGraphKind(Entry.Kind))
+	{
+		OutError = FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidOperation,
+			FString::Printf(
+				TEXT("Graph kind is not mutable through graph_cmd: %s"),
+				*FCortexGraphNodeOps::GraphKindToString(Entry.Kind))
+		);
+		return false;
+	}
+
+	OutGraph = Entry.Graph;
+	return true;
+}
 }
 
 UBlueprint* FCortexGraphNodeOps::LoadBlueprint(const FString& AssetPath, FCortexCommandResult& OutError)
@@ -166,25 +198,103 @@ UBlueprint* FCortexGraphNodeOps::LoadBlueprint(const FString& AssetPath, FCortex
 	return Blueprint;
 }
 
+void FCortexGraphNodeOps::EnumerateUserGraphs(UBlueprint* Blueprint, TArray<FCortexGraphEntry>& OutEntries)
+{
+	OutEntries.Reset();
+	if (Blueprint == nullptr)
+	{
+		return;
+	}
+
+	auto AppendGraphs = [&OutEntries](const TArray<TObjectPtr<UEdGraph>>& Graphs, ECortexGraphKind Kind, FName OwningInterface)
+	{
+		for (const TObjectPtr<UEdGraph>& GraphPtr : Graphs)
+		{
+			if (UEdGraph* Graph = GraphPtr.Get())
+			{
+				FCortexGraphEntry Entry;
+				Entry.Graph = Graph;
+				Entry.Kind = Kind;
+				Entry.OwningInterface = OwningInterface;
+				OutEntries.Add(Entry);
+			}
+		}
+	};
+
+	AppendGraphs(Blueprint->UbergraphPages, ECortexGraphKind::Ubergraph, NAME_None);
+	AppendGraphs(Blueprint->FunctionGraphs, ECortexGraphKind::Function, NAME_None);
+	AppendGraphs(Blueprint->MacroGraphs, ECortexGraphKind::Macro, NAME_None);
+	AppendGraphs(Blueprint->DelegateSignatureGraphs, ECortexGraphKind::Delegate, NAME_None);
+
+	for (const FBPInterfaceDescription& InterfaceDesc : Blueprint->ImplementedInterfaces)
+	{
+		const FName OwningInterfaceName = InterfaceDesc.Interface ? InterfaceDesc.Interface->GetFName() : NAME_None;
+		AppendGraphs(InterfaceDesc.Graphs, ECortexGraphKind::InterfaceImpl, OwningInterfaceName);
+	}
+}
+
+FString FCortexGraphNodeOps::GraphKindToString(ECortexGraphKind Kind)
+{
+	switch (Kind)
+	{
+		case ECortexGraphKind::Ubergraph:
+			return TEXT("ubergraph");
+		case ECortexGraphKind::Function:
+			return TEXT("function");
+		case ECortexGraphKind::Macro:
+			return TEXT("macro");
+		case ECortexGraphKind::Delegate:
+			return TEXT("delegate");
+		case ECortexGraphKind::InterfaceImpl:
+			return TEXT("interface_impl");
+	}
+
+	return TEXT("function");
+}
+
+bool FCortexGraphNodeOps::FindGraphEntry(UBlueprint* Blueprint, const FString& GraphName, FCortexGraphEntry& OutEntry)
+{
+	const FString TargetName = GraphName.IsEmpty() ? TEXT("EventGraph") : GraphName;
+
+	TArray<FCortexGraphEntry> Entries;
+	EnumerateUserGraphs(Blueprint, Entries);
+	for (const FCortexGraphEntry& Entry : Entries)
+	{
+		if (Entry.Graph && Entry.Graph->GetName() == TargetName)
+		{
+			OutEntry = Entry;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool FCortexGraphNodeOps::IsMutableGraphKind(ECortexGraphKind Kind)
+{
+	switch (Kind)
+	{
+		case ECortexGraphKind::Ubergraph:
+		case ECortexGraphKind::Function:
+		case ECortexGraphKind::Macro:
+		case ECortexGraphKind::InterfaceImpl:
+			return true;
+		case ECortexGraphKind::Delegate:
+			return false;
+	}
+
+	return false;
+}
+
 UEdGraph* FCortexGraphNodeOps::FindGraph(UBlueprint* Blueprint, const FString& GraphName, FCortexCommandResult& OutError)
 {
-	FString TargetName = GraphName.IsEmpty() ? TEXT("EventGraph") : GraphName;
-
-	for (UEdGraph* Graph : Blueprint->UbergraphPages)
+	FCortexGraphEntry Entry;
+	if (FindGraphEntry(Blueprint, GraphName, Entry))
 	{
-		if (Graph && Graph->GetName() == TargetName)
-		{
-			return Graph;
-		}
-	}
-	for (UEdGraph* Graph : Blueprint->FunctionGraphs)
-	{
-		if (Graph && Graph->GetName() == TargetName)
-		{
-			return Graph;
-		}
+		return Entry.Graph;
 	}
 
+	const FString TargetName = GraphName.IsEmpty() ? TEXT("EventGraph") : GraphName;
 	OutError = FCortexCommandRouter::Error(
 		CortexErrorCodes::GraphNotFound,
 		FString::Printf(TEXT("Graph not found: %s"), *TargetName)
@@ -344,8 +454,11 @@ FCortexCommandResult FCortexGraphNodeOps::ListGraphs(const TSharedPtr<FJsonObjec
 
 	TArray<TSharedPtr<FJsonValue>> GraphsArray;
 
-	for (UEdGraph* Graph : Blueprint->UbergraphPages)
+	TArray<FCortexGraphEntry> Entries;
+	EnumerateUserGraphs(Blueprint, Entries);
+	for (const FCortexGraphEntry& GraphEntry : Entries)
 	{
+		UEdGraph* Graph = GraphEntry.Graph;
 		if (Graph == nullptr)
 		{
 			continue;
@@ -354,19 +467,11 @@ FCortexCommandResult FCortexGraphNodeOps::ListGraphs(const TSharedPtr<FJsonObjec
 		Entry->SetStringField(TEXT("name"), Graph->GetName());
 		Entry->SetStringField(TEXT("class"), Graph->GetClass()->GetName());
 		Entry->SetNumberField(TEXT("node_count"), Graph->Nodes.Num());
-		GraphsArray.Add(MakeShared<FJsonValueObject>(Entry));
-	}
-
-	for (UEdGraph* Graph : Blueprint->FunctionGraphs)
-	{
-		if (Graph == nullptr)
+		Entry->SetStringField(TEXT("kind"), GraphKindToString(GraphEntry.Kind));
+		if (GraphEntry.Kind == ECortexGraphKind::InterfaceImpl && GraphEntry.OwningInterface != NAME_None)
 		{
-			continue;
+			Entry->SetStringField(TEXT("owning_interface"), GraphEntry.OwningInterface.ToString());
 		}
-		TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
-		Entry->SetStringField(TEXT("name"), Graph->GetName());
-		Entry->SetStringField(TEXT("class"), Graph->GetClass()->GetName());
-		Entry->SetNumberField(TEXT("node_count"), Graph->Nodes.Num());
 		GraphsArray.Add(MakeShared<FJsonValueObject>(Entry));
 	}
 
@@ -375,18 +480,11 @@ FCortexCommandResult FCortexGraphNodeOps::ListGraphs(const TSharedPtr<FJsonObjec
 	Params->TryGetBoolField(TEXT("include_subgraphs"), bIncludeSubgraphs);
 	if (bIncludeSubgraphs)
 	{
-		for (UEdGraph* Graph : Blueprint->UbergraphPages)
+		for (const FCortexGraphEntry& GraphEntry : Entries)
 		{
-			if (Graph)
+			if (GraphEntry.Graph)
 			{
-				CollectSubgraphsRecursive(Graph, Graph->GetName(), TEXT(""), GraphsArray, 0);
-			}
-		}
-		for (UEdGraph* Graph : Blueprint->FunctionGraphs)
-		{
-			if (Graph)
-			{
-				CollectSubgraphsRecursive(Graph, Graph->GetName(), TEXT(""), GraphsArray, 0);
+				CollectSubgraphsRecursive(GraphEntry.Graph, GraphEntry.Graph->GetName(), TEXT(""), GraphsArray, 0);
 			}
 		}
 	}
@@ -667,17 +765,11 @@ FCortexCommandResult FCortexGraphNodeOps::SearchNodes(const TSharedPtr<FJsonObje
 	else
 	{
 		// Search all top-level graphs, recursively descending into composites
-		for (UEdGraph* Graph : Blueprint->UbergraphPages)
+		TArray<FCortexGraphEntry> Entries;
+		EnumerateUserGraphs(Blueprint, Entries);
+		for (const FCortexGraphEntry& Entry : Entries)
 		{
-			SearchGraphRecursive(Graph, TEXT(""), 0);
-		}
-		for (UEdGraph* Graph : Blueprint->FunctionGraphs)
-		{
-			SearchGraphRecursive(Graph, TEXT(""), 0);
-		}
-		for (UEdGraph* Graph : Blueprint->MacroGraphs)
-		{
-			SearchGraphRecursive(Graph, TEXT(""), 0);
+			SearchGraphRecursive(Entry.Graph, TEXT(""), 0);
 		}
 	}
 
@@ -731,8 +823,8 @@ FCortexCommandResult FCortexGraphNodeOps::AddNode(const TSharedPtr<FJsonObject>&
 		return LoadError;
 	}
 
-	UEdGraph* Graph = FindGraph(Blueprint, GraphName, LoadError);
-	if (Graph == nullptr)
+	UEdGraph* Graph = nullptr;
+	if (!ResolveMutableNodeGraph(Blueprint, GraphName, Graph, LoadError))
 	{
 		return LoadError;
 	}
@@ -1339,8 +1431,8 @@ FCortexCommandResult FCortexGraphNodeOps::RemoveNode(const TSharedPtr<FJsonObjec
 	FString GraphName;
 	Params->TryGetStringField(TEXT("graph_name"), GraphName);
 
-	UEdGraph* Graph = FindGraph(Blueprint, GraphName, LoadError);
-	if (Graph == nullptr)
+	UEdGraph* Graph = nullptr;
+	if (!ResolveMutableNodeGraph(Blueprint, GraphName, Graph, LoadError))
 	{
 		return LoadError;
 	}
@@ -1432,8 +1524,8 @@ FCortexCommandResult FCortexGraphNodeOps::SetPinValue(const TSharedPtr<FJsonObje
 	FString GraphName;
 	Params->TryGetStringField(TEXT("graph_name"), GraphName);
 
-	UEdGraph* Graph = FindGraph(Blueprint, GraphName, LoadError);
-	if (Graph == nullptr)
+	UEdGraph* Graph = nullptr;
+	if (!ResolveMutableNodeGraph(Blueprint, GraphName, Graph, LoadError))
 	{
 		return LoadError;
 	}
@@ -1571,8 +1663,11 @@ FCortexCommandResult FCortexGraphNodeOps::AutoLayout(const TSharedPtr<FJsonObjec
 	TArray<UEdGraph*> Graphs;
 	if (!GraphFilter.IsEmpty())
 	{
-		UEdGraph* Graph = FindGraph(Blueprint, GraphFilter, LoadError);
-		if (!Graph) return LoadError;
+		UEdGraph* Graph = nullptr;
+		if (!ResolveMutableNodeGraph(Blueprint, GraphFilter, Graph, LoadError))
+		{
+			return LoadError;
+		}
 
 		// Resolve subgraph path if provided
 		if (!SubgraphPath.IsEmpty())
@@ -1588,9 +1683,15 @@ FCortexCommandResult FCortexGraphNodeOps::AutoLayout(const TSharedPtr<FJsonObjec
 	}
 	else
 	{
-		for (UEdGraph* G : Blueprint->UbergraphPages) { if (G) Graphs.Add(G); }
-		for (UEdGraph* G : Blueprint->FunctionGraphs) { if (G) Graphs.Add(G); }
-		for (UEdGraph* G : Blueprint->MacroGraphs) { if (G) Graphs.Add(G); }
+		TArray<FCortexGraphEntry> Entries;
+		EnumerateUserGraphs(Blueprint, Entries);
+		for (const FCortexGraphEntry& Entry : Entries)
+		{
+			if (Entry.Graph && IsMutableGraphKind(Entry.Kind))
+			{
+				Graphs.Add(Entry.Graph);
+			}
+		}
 	}
 
 	int32 TotalNodesProcessed = 0;

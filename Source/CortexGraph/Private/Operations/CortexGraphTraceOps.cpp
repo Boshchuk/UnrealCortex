@@ -65,17 +65,11 @@ void GetAllCandidateGraphs(
 	UBlueprint* Blueprint,
 	TArray<TPair<UEdGraph*, FString>>& OutGraphs)
 {
-	for (UEdGraph* Graph : Blueprint->UbergraphPages)
+	TArray<FCortexGraphEntry> Entries;
+	FCortexGraphNodeOps::EnumerateUserGraphs(Blueprint, Entries);
+	for (const FCortexGraphEntry& Entry : Entries)
 	{
-		CollectGraphsRecursive(Graph, TEXT(""), OutGraphs, 0);
-	}
-	for (UEdGraph* Graph : Blueprint->FunctionGraphs)
-	{
-		CollectGraphsRecursive(Graph, TEXT(""), OutGraphs, 0);
-	}
-	for (UEdGraph* Graph : Blueprint->MacroGraphs)
-	{
-		CollectGraphsRecursive(Graph, TEXT(""), OutGraphs, 0);
+		CollectGraphsRecursive(Entry.Graph, TEXT(""), OutGraphs, 0);
 	}
 }
 
