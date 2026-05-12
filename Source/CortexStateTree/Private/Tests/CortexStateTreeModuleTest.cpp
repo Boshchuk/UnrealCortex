@@ -59,6 +59,28 @@ bool HasParam(
 
 	return false;
 }
+
+bool HasParamNamed(
+	const TArray<TSharedPtr<FJsonValue>>& Params,
+	const FString& ParamName)
+{
+	for (const TSharedPtr<FJsonValue>& ParamValue : Params)
+	{
+		const TSharedPtr<FJsonObject>* ParamObject = nullptr;
+		if (!ParamValue.IsValid() || !ParamValue->TryGetObject(ParamObject) || ParamObject == nullptr)
+		{
+			continue;
+		}
+
+		FString Name;
+		if ((*ParamObject)->TryGetStringField(TEXT("name"), Name) && Name == ParamName)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -191,8 +213,8 @@ bool FCortexStateTreeModuleRegistrationTest::RunTest(const FString& Parameters)
 
 	TestTrue(TEXT("rename_state uses required name"),
 		HasParam(*RenameStateParams, TEXT("name"), TEXT("string"), true));
-	TestFalse(TEXT("rename_state does not expose new_name"),
-		HasParam(*RenameStateParams, TEXT("new_name"), TEXT("string"), true));
+	TestFalse(TEXT("rename_state does not expose new_name at all"),
+		HasParamNamed(*RenameStateParams, TEXT("new_name")));
 	TestTrue(TEXT("rename_state exposes compile"),
 		HasParam(*RenameStateParams, TEXT("compile"), TEXT("boolean"), false));
 	TestTrue(TEXT("rename_state exposes save"),
@@ -215,6 +237,10 @@ bool FCortexStateTreeModuleRegistrationTest::RunTest(const FString& Parameters)
 		HasParam(*AddTransitionParams, TEXT("source_state_id"), TEXT("string"), true));
 	TestFalse(TEXT("add_transition does not require target_state_id"),
 		HasParam(*AddTransitionParams, TEXT("target_state_id"), TEXT("string"), true));
+	TestTrue(TEXT("add_transition exposes optional source_state_id"),
+		HasParam(*AddTransitionParams, TEXT("source_state_id"), TEXT("string"), false));
+	TestTrue(TEXT("add_transition exposes optional target_state_id"),
+		HasParam(*AddTransitionParams, TEXT("target_state_id"), TEXT("string"), false));
 	TestTrue(TEXT("add_transition exposes source_state_path"),
 		HasParam(*AddTransitionParams, TEXT("source_state_path"), TEXT("string"), false));
 	TestTrue(TEXT("add_transition exposes target_state_path"),
