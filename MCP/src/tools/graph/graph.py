@@ -15,9 +15,12 @@ def register_graph_tools(mcp, connection: UEConnection):
 
     @mcp.tool()
     def graph_list_graphs(asset_path: str, include_subgraphs: bool = False) -> str:
-        """List all graphs in a Blueprint asset.
+        """List user-visible graphs in a Blueprint asset.
 
-        Returns all graphs including EventGraph, ConstructionScript, and function graphs.
+        Returns EventGraph/ubergraph, function, macro, delegate signature, and
+        interface implementation graphs. Each top-level entry includes name,
+        class, node_count, and kind. Interface implementation entries also
+        include owning_interface.
 
         Workflow for composites: call with include_subgraphs=True to discover
         composite subgraphs, then use the returned subgraph_path with other tools.
@@ -32,6 +35,9 @@ def register_graph_tools(mcp, connection: UEConnection):
             - name: Graph name (e.g., 'EventGraph', 'ReceiveBeginPlay')
             - class: Graph class (e.g., 'UEdGraph')
             - node_count: Number of nodes in the graph
+            - kind: Top-level graph category ('ubergraph', 'function', 'macro',
+              'delegate', or 'interface_impl')
+            - owning_interface: (interface_impl only) Implemented interface class name
             - parent_graph: (subgraphs only) Name of the parent graph
             - subgraph_path: (subgraphs only) Dot-path for use in other tools
         """
