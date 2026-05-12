@@ -59,18 +59,29 @@ TArray<FCortexCommandInfo> FCortexStateTreeCommandHandler::GetSupportedCommands(
 			.Required(TEXT("name"), TEXT("string"), TEXT("New state display name"))
 			.Optional(TEXT("parent_state_id"), TEXT("string"), TEXT("Parent state GUID"))
 			.Optional(TEXT("parent_state_path"), TEXT("string"), TEXT("Parent state path"))
+			.Optional(TEXT("type"), TEXT("string"), TEXT("State type"))
+			.Optional(TEXT("tag"), TEXT("string"), TEXT("Gameplay Tag"))
+			.Optional(TEXT("enabled"), TEXT("boolean"), TEXT("Enabled flag"))
+			.Optional(TEXT("selection_behavior"), TEXT("string"), TEXT("Selection behavior"))
 			.Optional(TEXT("index"), TEXT("number"), TEXT("Insert index under parent"))
+			.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after mutation"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Persist package after mutation"))
 			.OptionalExpectedFingerprint(),
 		FCortexCommandInfo{ TEXT("remove_state"), TEXT("Remove a StateTree state") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path"))
 			.Optional(TEXT("state_id"), TEXT("string"), TEXT("State GUID"))
 			.Optional(TEXT("state_path"), TEXT("string"), TEXT("State path"))
+			.Optional(TEXT("remove_children"), TEXT("boolean"), TEXT("Allow child deletion"))
+			.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after mutation"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Persist package after mutation"))
 			.OptionalExpectedFingerprint(),
 		FCortexCommandInfo{ TEXT("rename_state"), TEXT("Rename a StateTree state") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path"))
-			.Required(TEXT("new_name"), TEXT("string"), TEXT("New display name"))
+			.Required(TEXT("name"), TEXT("string"), TEXT("New state display name"))
 			.Optional(TEXT("state_id"), TEXT("string"), TEXT("State GUID"))
 			.Optional(TEXT("state_path"), TEXT("string"), TEXT("State path"))
+			.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after mutation"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Persist package after mutation"))
 			.OptionalExpectedFingerprint(),
 		FCortexCommandInfo{ TEXT("move_state"), TEXT("Move a StateTree state") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path"))
@@ -79,30 +90,45 @@ TArray<FCortexCommandInfo> FCortexStateTreeCommandHandler::GetSupportedCommands(
 			.Optional(TEXT("new_parent_state_id"), TEXT("string"), TEXT("New parent state GUID"))
 			.Optional(TEXT("new_parent_state_path"), TEXT("string"), TEXT("New parent state path"))
 			.Optional(TEXT("index"), TEXT("number"), TEXT("Insert index under the new parent"))
+			.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after mutation"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Persist package after mutation"))
 			.OptionalExpectedFingerprint(),
 		FCortexCommandInfo{ TEXT("set_state_properties"), TEXT("Set whitelisted StateTree state properties") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path"))
 			.Optional(TEXT("state_id"), TEXT("string"), TEXT("State GUID"))
 			.Optional(TEXT("state_path"), TEXT("string"), TEXT("State path"))
 			.Required(TEXT("properties"), TEXT("object"), TEXT("State properties patch"))
+			.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after mutation"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Persist package after mutation"))
 			.OptionalExpectedFingerprint(),
 		FCortexCommandInfo{ TEXT("add_transition"), TEXT("Add a simple StateTree transition") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path"))
-			.Required(TEXT("source_state_id"), TEXT("string"), TEXT("Source state GUID"))
-			.Required(TEXT("target_state_id"), TEXT("string"), TEXT("Target state GUID"))
+			.Optional(TEXT("source_state_id"), TEXT("string"), TEXT("Source state GUID"))
+			.Optional(TEXT("source_state_path"), TEXT("string"), TEXT("Source state path"))
+			.Optional(TEXT("target_state_id"), TEXT("string"), TEXT("Target state GUID"))
+			.Optional(TEXT("target_state_path"), TEXT("string"), TEXT("Target state path"))
 			.Optional(TEXT("trigger"), TEXT("string"), TEXT("Transition trigger enum name"))
 			.Optional(TEXT("event_tag"), TEXT("string"), TEXT("Optional Gameplay Tag for event transitions"))
+			.Optional(TEXT("priority"), TEXT("string"), TEXT("Transition priority"))
+			.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after mutation"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Persist package after mutation"))
 			.OptionalExpectedFingerprint(),
 		FCortexCommandInfo{ TEXT("remove_transition"), TEXT("Remove a StateTree transition") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path"))
-			.Required(TEXT("source_state_id"), TEXT("string"), TEXT("Source state GUID"))
-			.Required(TEXT("transition_id"), TEXT("string"), TEXT("Transition GUID"))
+			.Required(TEXT("transition_id"), TEXT("string"), TEXT("Transition GUID or index token"))
+			.Optional(TEXT("state_id"), TEXT("string"), TEXT("Owning state GUID"))
+			.Optional(TEXT("state_path"), TEXT("string"), TEXT("Owning state path"))
+			.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after mutation"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Persist package after mutation"))
 			.OptionalExpectedFingerprint(),
-		FCortexCommandInfo{ TEXT("set_transition_properties"), TEXT("Set simple StateTree transition properties") }
+		FCortexCommandInfo{ TEXT("set_transition_properties"), TEXT("Set transition fields") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path"))
-			.Required(TEXT("source_state_id"), TEXT("string"), TEXT("Source state GUID"))
-			.Required(TEXT("transition_id"), TEXT("string"), TEXT("Transition GUID"))
-			.Required(TEXT("properties"), TEXT("object"), TEXT("Transition properties patch"))
+			.Required(TEXT("transition_id"), TEXT("string"), TEXT("Transition GUID or index token"))
+			.Required(TEXT("properties"), TEXT("object"), TEXT("Transition property values"))
+			.Optional(TEXT("state_id"), TEXT("string"), TEXT("Owning state GUID"))
+			.Optional(TEXT("state_path"), TEXT("string"), TEXT("Owning state path"))
+			.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after mutation"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Persist package after mutation"))
 			.OptionalExpectedFingerprint(),
 	};
 }
