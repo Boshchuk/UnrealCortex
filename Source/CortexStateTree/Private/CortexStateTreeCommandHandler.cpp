@@ -2,14 +2,31 @@
 
 #include "CortexCommandRouter.h"
 #include "CortexTypes.h"
+#include "Operations/CortexSTAssetOps.h"
 
 FCortexCommandResult FCortexStateTreeCommandHandler::Execute(
 	const FString& Command,
 	const TSharedPtr<FJsonObject>& Params,
 	FDeferredResponseCallback DeferredCallback)
 {
-	(void)Params;
 	(void)DeferredCallback;
+
+	if (Command == TEXT("list_assets"))
+	{
+		return FCortexSTAssetOps::ListAssets(Params);
+	}
+	if (Command == TEXT("create_asset"))
+	{
+		return FCortexSTAssetOps::CreateAsset(Params);
+	}
+	if (Command == TEXT("duplicate_asset"))
+	{
+		return FCortexSTAssetOps::DuplicateAsset(Params);
+	}
+	if (Command == TEXT("delete_asset"))
+	{
+		return FCortexSTAssetOps::DeleteAsset(Params);
+	}
 
 	return FCortexCommandRouter::Error(
 		CortexErrorCodes::UnknownCommand,
