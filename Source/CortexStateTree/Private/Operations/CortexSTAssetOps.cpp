@@ -455,19 +455,19 @@ FCortexCommandResult FCortexSTAssetOps::DeleteAsset(const TSharedPtr<FJsonObject
 		TryDeletePackageFile(PackageFilename);
 	}
 
-	if (DeletedCount == 0)
-	{
-		return FCortexCommandRouter::Error(
-			CortexErrorCodes::SerializationError,
-			FString::Printf(TEXT("Failed to delete StateTree: %s"), *Context.AssetPath),
-			ReferencerDetails);
-	}
-
 	if (FPlatformFileManager::Get().GetPlatformFile().FileExists(*PackageFilename))
 	{
 		return FCortexCommandRouter::Error(
 			CortexErrorCodes::SerializationError,
 			FString::Printf(TEXT("Failed to remove StateTree package file: %s"), *PackageFilename),
+			ReferencerDetails);
+	}
+
+	if (DeletedCount == 0)
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::SerializationError,
+			FString::Printf(TEXT("Failed to delete StateTree: %s"), *Context.AssetPath),
 			ReferencerDetails);
 	}
 
