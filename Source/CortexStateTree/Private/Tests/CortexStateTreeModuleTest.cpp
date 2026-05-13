@@ -292,3 +292,26 @@ bool FCortexStateTreeUnknownCommandTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("unknown command error code"), Result.ErrorCode, CortexErrorCodes::UnknownCommand);
 	return true;
 }
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexStateTreeErrorCodesTest,
+	"Cortex.StateTree.Module.ErrorCodes",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexStateTreeErrorCodesTest::RunTest(const FString& Parameters)
+{
+	TestEqual(TEXT("StateTree not found code"),
+		CortexErrorCodes::StateTreeNotFound,
+		FString(TEXT("STATETREE_NOT_FOUND")));
+	TestEqual(TEXT("State not found code"),
+		CortexErrorCodes::StateTreeStateNotFound,
+		FString(TEXT("STATETREE_STATE_NOT_FOUND")));
+	TestEqual(TEXT("Transition not found code"),
+		CortexErrorCodes::StateTreeTransitionNotFound,
+		FString(TEXT("STATETREE_TRANSITION_NOT_FOUND")));
+	TestEqual(TEXT("Ambiguous state path code"),
+		CortexErrorCodes::AmbiguousStatePath,
+		FString(TEXT("AMBIGUOUS_STATE_PATH")));
+	return true;
+}
