@@ -3,6 +3,7 @@
 #include "CortexCommandRouter.h"
 #include "CortexTypes.h"
 #include "Operations/CortexSTAssetOps.h"
+#include "Operations/CortexSTInspectOps.h"
 
 FCortexCommandResult FCortexStateTreeCommandHandler::Execute(
 	const FString& Command,
@@ -26,6 +27,14 @@ FCortexCommandResult FCortexStateTreeCommandHandler::Execute(
 	if (Command == TEXT("delete_asset"))
 	{
 		return FCortexSTAssetOps::DeleteAsset(Params);
+	}
+	if (Command == TEXT("dump_tree"))
+	{
+		return FCortexSTInspectOps::DumpTree(Params);
+	}
+	if (Command == TEXT("get_state"))
+	{
+		return FCortexSTInspectOps::GetState(Params);
 	}
 
 	return FCortexCommandRouter::Error(

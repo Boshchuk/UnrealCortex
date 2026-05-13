@@ -6,8 +6,61 @@
 #include "CortexEditorUtils.h"
 #include "GameplayTagsManager.h"
 #include "Misc/PackageName.h"
+#include "StateTreeEditorNode.h"
 #include "StateTree.h"
 #include "StateTreeEditorData.h"
+#include "StateTreeState.h"
+#include "StateTreeTypes.h"
+
+namespace
+{
+FString LexToStringStateType(const EStateTreeStateType StateType)
+{
+	const UEnum* Enum = StaticEnum<EStateTreeStateType>();
+	return Enum != nullptr ? Enum->GetNameStringByValue(static_cast<int64>(StateType)) : TEXT("State");
+}
+
+FString LexToStringSelectionBehavior(const EStateTreeStateSelectionBehavior SelectionBehavior)
+{
+	const UEnum* Enum = StaticEnum<EStateTreeStateSelectionBehavior>();
+	return Enum != nullptr ? Enum->GetNameStringByValue(static_cast<int64>(SelectionBehavior)) : TEXT("TrySelectChildrenInOrder");
+}
+
+FString LexToStringTransitionTrigger(const EStateTreeTransitionTrigger Trigger)
+{
+	const UEnum* Enum = StaticEnum<EStateTreeTransitionTrigger>();
+	return Enum != nullptr ? Enum->GetValueOrBitfieldAsString(static_cast<int64>(Trigger)).Replace(TEXT("EStateTreeTransitionTrigger::"), TEXT("")) : TEXT("");
+}
+
+FString LexToStringTransitionPriority(const EStateTreeTransitionPriority Priority)
+{
+	const UEnum* Enum = StaticEnum<EStateTreeTransitionPriority>();
+	return Enum != nullptr ? Enum->GetNameStringByValue(static_cast<int64>(Priority)) : TEXT("Normal");
+}
+
+void AppendNodeArray(
+	const TArray<FStateTreeEditorNode>& SourceNodes,
+	const TCHAR* Kind,
+	TArray<TSharedPtr<FJsonValue>>& OutNodes)
+{
+	for (const FStateTreeEditorNode& Node : SourceNodes)
+	{
+		TSharedPtr<FJsonObject> NodeObject = MakeShared<FJsonObject>();
+		NodeObject->SetStringField(TEXT("id"), Node.ID.ToString(EGuidFormats::DigitsWithHyphens));
+		NodeObject->SetStringField(TEXT("kind"), Kind);
+		NodeObject->SetStringField(TEXT("name"), Node.GetName().ToString());
+
+		if (const UScriptStruct* ScriptStruct = Node.Node.GetScriptStruct())
+		{
+			NodeObject->SetStringField(TEXT("struct_path"), ScriptStruct->GetPathName());
+			NodeObject->SetStringField(TEXT("display_name"), ScriptStruct->GetDisplayNameText().ToString());
+		}
+
+		NodeObject->SetBoolField(TEXT("enabled"), true);
+		OutNodes.Add(MakeShared<FJsonValueObject>(NodeObject));
+	}
+}
+}
 
 namespace CortexST
 {
@@ -198,5 +251,230 @@ TSharedPtr<FJsonObject> MakeValidationPayload(bool bValid, const TArray<FString>
 	Validation->SetArrayField(TEXT("warnings"), WarningValues);
 
 	return Validation;
+}
+
+void CollectStates(UStateTreeState* Root, TArray<FCortexSTStateRef>& OutStates)
+{
+	if (Root == nullptr)
+	{
+		return;
+	}
+
+	TFunction<void(UStateTreeState*, UStateTreeState*)> Visit =
+		[&OutStates, &Visit](UStateTreeState* State, UStateTreeState* Parent)
+		{
+			if (State == nullptr)
+			{
+				return;
+			}
+
+			FCortexSTStateRef StateRef;
+			StateRef.State = State;
+			StateRef.Parent = Parent;
+			StateRef.Id = State->ID.ToString(EGuidFormats::DigitsWithHyphens);
+			StateRef.Path = State->GetPath();
+			StateRef.Index = Parent != nullptr ? Parent->Children.IndexOfByKey(State) : 0;
+			OutStates.Add(StateRef);
+
+			for (UStateTreeState* ChildState : State->Children)
+			{
+				Visit(ChildState, State);
+			}
+		};
+
+	Visit(Root, nullptr);
+}
+
+bool ResolveState(
+	const FCortexSTAssetContext& Context,
+	const TSharedPtr<FJsonObject>& Params,
+	FCortexSTStateRef& OutState,
+	FCortexCommandResult& OutError)
+{
+	UStateTreeState* RootState =
+		Context.EditorData != nullptr && Context.EditorData->SubTrees.Num() > 0
+			? Context.EditorData->SubTrees[0]
+			: nullptr;
+	if (RootState == nullptr)
+	{
+		OutError = FCortexCommandRouter::Error(
+			CortexErrorCodes::StateTreeStateNotFound,
+			FString::Printf(TEXT("StateTree has no root state: %s"), *Context.AssetPath));
+		return false;
+	}
+
+	FString StateId;
+	FString StatePath;
+	const bool bHasStateId = Params.IsValid() && Params->TryGetStringField(TEXT("state_id"), StateId) && !StateId.IsEmpty();
+	const bool bHasStatePath = Params.IsValid() && Params->TryGetStringField(TEXT("state_path"), StatePath) && !StatePath.IsEmpty();
+
+	if (bHasStateId && bHasStatePath)
+	{
+		TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+		TArray<TSharedPtr<FJsonValue>> AllowedFields;
+		AllowedFields.Add(MakeShared<FJsonValueString>(TEXT("state_id")));
+		AllowedFields.Add(MakeShared<FJsonValueString>(TEXT("state_path")));
+		Details->SetArrayField(TEXT("allowed_fields"), AllowedFields);
+
+		OutError = FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidField,
+			TEXT("Specify exactly one of state_id or state_path"),
+			Details);
+		return false;
+	}
+
+	TArray<FCortexSTStateRef> States;
+	CollectStates(RootState, States);
+	if (!bHasStateId && !bHasStatePath)
+	{
+		if (States.Num() > 0)
+		{
+			OutState = States[0];
+			return true;
+		}
+
+		OutError = FCortexCommandRouter::Error(
+			CortexErrorCodes::StateTreeStateNotFound,
+			FString::Printf(TEXT("StateTree has no states: %s"), *Context.AssetPath));
+		return false;
+	}
+
+	if (bHasStateId)
+	{
+		for (const FCortexSTStateRef& StateRef : States)
+		{
+			if (StateRef.Id == StateId)
+			{
+				OutState = StateRef;
+				return true;
+			}
+		}
+
+		OutError = FCortexCommandRouter::Error(
+			CortexErrorCodes::StateTreeStateNotFound,
+			FString::Printf(TEXT("StateTree state not found: %s"), *StateId));
+		return false;
+	}
+
+	TArray<FCortexSTStateRef> Matches;
+	for (const FCortexSTStateRef& StateRef : States)
+	{
+		if (StateRef.Path == StatePath)
+		{
+			Matches.Add(StateRef);
+		}
+	}
+
+	if (Matches.Num() == 1)
+	{
+		OutState = Matches[0];
+		return true;
+	}
+
+	if (Matches.Num() > 1)
+	{
+		TArray<TSharedPtr<FJsonValue>> MatchingIds;
+		MatchingIds.Reserve(Matches.Num());
+		for (const FCortexSTStateRef& StateRef : Matches)
+		{
+			MatchingIds.Add(MakeShared<FJsonValueString>(StateRef.Id));
+		}
+
+		TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+		Details->SetArrayField(TEXT("matching_state_ids"), MatchingIds);
+		OutError = FCortexCommandRouter::Error(
+			CortexErrorCodes::AmbiguousStatePath,
+			FString::Printf(TEXT("State path resolves to multiple states: %s"), *StatePath),
+			Details);
+		return false;
+	}
+
+	OutError = FCortexCommandRouter::Error(
+		CortexErrorCodes::StateTreeStateNotFound,
+		FString::Printf(TEXT("StateTree state path not found: %s"), *StatePath));
+	return false;
+}
+
+TSharedPtr<FJsonObject> SerializeState(const FCortexSTStateRef& StateRef, const bool bIncludeTransitions, const bool bIncludeNodes)
+{
+	TSharedPtr<FJsonObject> StateObject = MakeShared<FJsonObject>();
+	if (StateRef.State == nullptr)
+	{
+		return StateObject;
+	}
+
+	StateObject->SetStringField(TEXT("id"), StateRef.Id);
+	StateObject->SetStringField(TEXT("path"), StateRef.Path);
+	StateObject->SetStringField(TEXT("name"), StateRef.State->Name.ToString());
+	StateObject->SetStringField(TEXT("type"), LexToStringStateType(StateRef.State->Type));
+	StateObject->SetStringField(TEXT("tag"), StateRef.State->Tag.ToString());
+	StateObject->SetBoolField(TEXT("enabled"), StateRef.State->bEnabled);
+	StateObject->SetStringField(TEXT("selection_behavior"), LexToStringSelectionBehavior(StateRef.State->SelectionBehavior));
+
+	TArray<TSharedPtr<FJsonValue>> ChildIds;
+	ChildIds.Reserve(StateRef.State->Children.Num());
+	for (UStateTreeState* ChildState : StateRef.State->Children)
+	{
+		if (ChildState != nullptr)
+		{
+			ChildIds.Add(MakeShared<FJsonValueString>(ChildState->ID.ToString(EGuidFormats::DigitsWithHyphens)));
+		}
+	}
+	StateObject->SetArrayField(TEXT("children"), ChildIds);
+
+	if (bIncludeTransitions)
+	{
+		TArray<TSharedPtr<FJsonValue>> TransitionValues;
+		TransitionValues.Reserve(StateRef.State->Transitions.Num());
+		const UStateTreeEditorData* EditorData = StateRef.State->GetTypedOuter<UStateTreeEditorData>();
+
+		for (int32 TransitionIndex = 0; TransitionIndex < StateRef.State->Transitions.Num(); ++TransitionIndex)
+		{
+			const FStateTreeTransition& Transition = StateRef.State->Transitions[TransitionIndex];
+			TSharedPtr<FJsonObject> TransitionObject = MakeShared<FJsonObject>();
+			TransitionObject->SetStringField(
+				TEXT("id"),
+				FString::Printf(TEXT("transition:%s:%d"), *StateRef.Id, TransitionIndex));
+			TransitionObject->SetStringField(TEXT("source_state_id"), StateRef.Id);
+			TransitionObject->SetStringField(TEXT("source_state_path"), StateRef.Path);
+			TransitionObject->SetStringField(TEXT("target_state_id"), Transition.State.ID.ToString(EGuidFormats::DigitsWithHyphens));
+
+			FString TargetPath;
+			if (EditorData != nullptr)
+			{
+				if (const UStateTreeState* TargetState = EditorData->GetStateByID(Transition.State.ID))
+				{
+					TargetPath = TargetState->GetPath();
+				}
+			}
+			TransitionObject->SetStringField(TEXT("target_state_path"), TargetPath);
+			TransitionObject->SetStringField(TEXT("trigger"), LexToStringTransitionTrigger(Transition.Trigger));
+			TransitionObject->SetStringField(TEXT("priority"), LexToStringTransitionPriority(Transition.Priority));
+			TransitionObject->SetBoolField(TEXT("enabled"), Transition.bTransitionEnabled);
+			TransitionObject->SetStringField(TEXT("event_tag"), Transition.RequiredEvent.Tag.ToString());
+			TransitionValues.Add(MakeShared<FJsonValueObject>(TransitionObject));
+		}
+
+		StateObject->SetArrayField(TEXT("transitions"), TransitionValues);
+	}
+
+	if (bIncludeNodes)
+	{
+		TArray<TSharedPtr<FJsonValue>> NodeValues;
+		AppendNodeArray(StateRef.State->EnterConditions, TEXT("EnterCondition"), NodeValues);
+		AppendNodeArray(StateRef.State->Tasks, TEXT("Task"), NodeValues);
+		AppendNodeArray(StateRef.State->Considerations, TEXT("Consideration"), NodeValues);
+
+		if (StateRef.State->SingleTask.ID.IsValid())
+		{
+			TArray<FStateTreeEditorNode> SingleTaskNodes;
+			SingleTaskNodes.Add(StateRef.State->SingleTask);
+			AppendNodeArray(SingleTaskNodes, TEXT("SingleTask"), NodeValues);
+		}
+
+		StateObject->SetArrayField(TEXT("nodes"), NodeValues);
+	}
+
+	return StateObject;
 }
 }

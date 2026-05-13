@@ -7,6 +7,7 @@
 class UStateTree;
 class UStateTreeEditorData;
 class UStateTreeState;
+class FJsonObject;
 
 struct FCortexSTAssetContext
 {
@@ -36,4 +37,7 @@ bool LoadAssetContext(const FString& AssetPath, FCortexSTAssetContext& OutContex
 TSharedPtr<FJsonObject> MakeFingerprint(UObject* Asset);
 bool CheckExpectedFingerprint(UObject* Asset, const TSharedPtr<FJsonObject>& Params, FCortexCommandResult& OutError);
 TSharedPtr<FJsonObject> MakeValidationPayload(bool bValid, const TArray<FString>& Errors, const TArray<FString>& Warnings);
+void CollectStates(UStateTreeState* Root, TArray<FCortexSTStateRef>& OutStates);
+bool ResolveState(const FCortexSTAssetContext& Context, const TSharedPtr<FJsonObject>& Params, FCortexSTStateRef& OutState, FCortexCommandResult& OutError);
+TSharedPtr<FJsonObject> SerializeState(const FCortexSTStateRef& StateRef, bool bIncludeTransitions, bool bIncludeNodes);
 }

@@ -1,0 +1,214 @@
+#include "Misc/AutomationTest.h"
+#include "CortexStateTreeCommandHandler.h"
+#include "CortexStateTreeTestUtils.h"
+#include "CortexSTTypes.h"
+#include "CortexTypes.h"
+#include "Dom/JsonObject.h"
+#include "StateTree.h"
+#include "StateTreeEditorData.h"
+#include "StateTreeState.h"
+
+namespace
+{
+bool CreateTestStateTree(
+	FAutomationTestBase& Test,
+	FCortexStateTreeCommandHandler& Handler,
+	const FString& AssetPath,
+	const FString& RootName = TEXT("Root"))
+{
+	TSharedPtr<FJsonObject> CreateParams = CortexStateTreeTest::Params();
+	CreateParams->SetStringField(TEXT("asset_path"), AssetPath);
+	CreateParams->SetStringField(TEXT("schema_class"), CortexStateTreeTest::GetTestSchemaClassPath());
+	CreateParams->SetStringField(TEXT("root_name"), RootName);
+	CreateParams->SetBoolField(TEXT("save"), false);
+
+	const FCortexCommandResult CreateResult = Handler.Execute(TEXT("create_asset"), CreateParams);
+	Test.TestTrue(TEXT("create succeeds"), CreateResult.bSuccess);
+	return CreateResult.bSuccess;
+}
+
+UStateTreeState* GetRootState(const FString& AssetPath)
+{
+	FCortexSTAssetContext Context;
+	FCortexCommandResult Error;
+	if (!CortexST::LoadAssetContext(AssetPath, Context, Error))
+	{
+		return nullptr;
+	}
+
+	return Context.EditorData != nullptr && Context.EditorData->SubTrees.Num() > 0
+		? Context.EditorData->SubTrees[0]
+		: nullptr;
+}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexStateTreeDumpTreeTest,
+	"Cortex.StateTree.Inspect.DumpTree",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexStateTreeDumpTreeTest::RunTest(const FString& Parameters)
+{
+	FCortexStateTreeCommandHandler Handler;
+	const FString AssetPath = CortexStateTreeTest::MakeAssetPath(TEXT("ST_DumpTree"));
+
+	if (!CreateTestStateTree(*this, Handler, AssetPath))
+	{
+		CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> DumpParams = CortexStateTreeTest::Params();
+	DumpParams->SetStringField(TEXT("asset_path"), AssetPath);
+	DumpParams->SetBoolField(TEXT("include_transitions"), true);
+	DumpParams->SetBoolField(TEXT("include_nodes"), true);
+
+	const FCortexCommandResult DumpResult = Handler.Execute(TEXT("dump_tree"), DumpParams);
+	TestTrue(TEXT("dump succeeds"), DumpResult.bSuccess);
+	TestTrue(TEXT("dump includes data"), DumpResult.Data.IsValid());
+	if (DumpResult.Data.IsValid())
+	{
+		TestTrue(TEXT("dump includes states array"),
+			DumpResult.Data->HasTypedField<EJson::Array>(TEXT("states")));
+		TestTrue(TEXT("dump includes validation object"),
+			DumpResult.Data->HasTypedField<EJson::Object>(TEXT("validation")));
+		TestTrue(TEXT("dump includes fingerprint object"),
+			DumpResult.Data->HasTypedField<EJson::Object>(TEXT("fingerprint")));
+	}
+
+	CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexStateTreeGetStateByPathTest,
+	"Cortex.StateTree.Inspect.GetState.ByPath",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexStateTreeGetStateByPathTest::RunTest(const FString& Parameters)
+{
+	FCortexStateTreeCommandHandler Handler;
+	const FString AssetPath = CortexStateTreeTest::MakeAssetPath(TEXT("ST_GetStateByPath"));
+
+	if (!CreateTestStateTree(*this, Handler, AssetPath))
+	{
+		CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> GetParams = CortexStateTreeTest::Params();
+	GetParams->SetStringField(TEXT("asset_path"), AssetPath);
+	GetParams->SetStringField(TEXT("state_path"), TEXT("Root"));
+
+	const FCortexCommandResult GetResult = Handler.Execute(TEXT("get_state"), GetParams);
+	TestTrue(TEXT("get_state succeeds"), GetResult.bSuccess);
+	TestTrue(TEXT("get_state includes data"), GetResult.Data.IsValid());
+	if (GetResult.Data.IsValid())
+	{
+		FString StatePath;
+		TestTrue(TEXT("state path is returned"),
+			GetResult.Data->TryGetStringField(TEXT("path"), StatePath));
+		TestEqual(TEXT("state_path resolves root"), StatePath, FString(TEXT("Root")));
+		TestTrue(TEXT("get_state includes fingerprint object"),
+			GetResult.Data->HasTypedField<EJson::Object>(TEXT("fingerprint")));
+	}
+
+	CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexStateTreeGetStateRejectsConflictingSelectorsTest,
+	"Cortex.StateTree.Inspect.GetState.RejectsConflictingSelectors",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexStateTreeGetStateRejectsConflictingSelectorsTest::RunTest(const FString& Parameters)
+{
+	FCortexStateTreeCommandHandler Handler;
+	const FString AssetPath = CortexStateTreeTest::MakeAssetPath(TEXT("ST_GetStateConflict"));
+
+	if (!CreateTestStateTree(*this, Handler, AssetPath))
+	{
+		CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+		return false;
+	}
+
+	UStateTreeState* RootState = GetRootState(AssetPath);
+	TestNotNull(TEXT("root state loads"), RootState);
+
+	TSharedPtr<FJsonObject> GetParams = CortexStateTreeTest::Params();
+	GetParams->SetStringField(TEXT("asset_path"), AssetPath);
+	GetParams->SetStringField(TEXT("state_id"), RootState != nullptr ? RootState->ID.ToString(EGuidFormats::DigitsWithHyphens) : FString());
+	GetParams->SetStringField(TEXT("state_path"), TEXT("Root"));
+
+	const FCortexCommandResult GetResult = Handler.Execute(TEXT("get_state"), GetParams);
+	TestFalse(TEXT("get_state rejects conflicting selectors"), GetResult.bSuccess);
+	TestEqual(TEXT("conflicting selectors use invalid field"), GetResult.ErrorCode, CortexErrorCodes::InvalidField);
+
+	CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexStateTreeGetStateRejectsAmbiguousPathTest,
+	"Cortex.StateTree.Inspect.GetState.RejectsAmbiguousPath",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexStateTreeGetStateRejectsAmbiguousPathTest::RunTest(const FString& Parameters)
+{
+	FCortexStateTreeCommandHandler Handler;
+	const FString AssetPath = CortexStateTreeTest::MakeAssetPath(TEXT("ST_GetStateAmbiguous"));
+
+	if (!CreateTestStateTree(*this, Handler, AssetPath))
+	{
+		CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+		return false;
+	}
+
+	UStateTreeState* RootState = GetRootState(AssetPath);
+	TestNotNull(TEXT("root state loads"), RootState);
+	if (RootState == nullptr)
+	{
+		CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+		return false;
+	}
+
+	UStateTreeState& FirstDuplicate = RootState->AddChildState(TEXT("Duplicate"));
+	UStateTreeState& SecondDuplicate = RootState->AddChildState(TEXT("Duplicate"));
+
+	TSharedPtr<FJsonObject> GetParams = CortexStateTreeTest::Params();
+	GetParams->SetStringField(TEXT("asset_path"), AssetPath);
+	GetParams->SetStringField(TEXT("state_path"), TEXT("Root/Duplicate"));
+
+	const FCortexCommandResult GetResult = Handler.Execute(TEXT("get_state"), GetParams);
+	TestFalse(TEXT("ambiguous path is rejected"), GetResult.bSuccess);
+	TestEqual(TEXT("ambiguous path uses dedicated error"), GetResult.ErrorCode, CortexErrorCodes::AmbiguousStatePath);
+
+	const TArray<TSharedPtr<FJsonValue>>* MatchingIds = nullptr;
+	TestTrue(TEXT("ambiguous path returns matching ids"),
+		GetResult.ErrorDetails.IsValid()
+		&& GetResult.ErrorDetails->TryGetArrayField(TEXT("matching_state_ids"), MatchingIds)
+		&& MatchingIds != nullptr);
+	if (MatchingIds != nullptr)
+	{
+		TestEqual(TEXT("matching ids count"), MatchingIds->Num(), 2);
+
+		TSet<FString> ReturnedIds;
+		for (const TSharedPtr<FJsonValue>& Value : *MatchingIds)
+		{
+			ReturnedIds.Add(Value->AsString());
+		}
+
+		TestTrue(TEXT("first duplicate id returned"),
+			ReturnedIds.Contains(FirstDuplicate.ID.ToString(EGuidFormats::DigitsWithHyphens)));
+		TestTrue(TEXT("second duplicate id returned"),
+			ReturnedIds.Contains(SecondDuplicate.ID.ToString(EGuidFormats::DigitsWithHyphens)));
+	}
+
+	CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+	return true;
+}
