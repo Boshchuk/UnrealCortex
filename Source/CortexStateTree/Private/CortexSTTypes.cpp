@@ -38,6 +38,21 @@ FString LexToStringTransitionPriority(const EStateTreeTransitionPriority Priorit
 	return Enum != nullptr ? Enum->GetNameStringByValue(static_cast<int64>(Priority)) : TEXT("Normal");
 }
 
+FString MakeTransitionToken(const FString& OwnerStateId, const int32 TransitionIndex)
+{
+	return FString::Printf(TEXT("transition:%s:%d"), *OwnerStateId, TransitionIndex);
+}
+
+FString GetSerializedTransitionId(const FCortexSTStateRef& StateRef, const FStateTreeTransition& Transition, const int32 TransitionIndex)
+{
+	if (Transition.ID.IsValid())
+	{
+		return Transition.ID.ToString(EGuidFormats::DigitsWithHyphens);
+	}
+
+	return MakeTransitionToken(StateRef.Id, TransitionIndex);
+}
+
 void AppendNodeArray(
 	const TArray<FStateTreeEditorNode>& SourceNodes,
 	const TCHAR* Kind,
@@ -432,12 +447,12 @@ TSharedPtr<FJsonObject> SerializeState(const FCortexSTStateRef& StateRef, const 
 		{
 			const FStateTreeTransition& Transition = StateRef.State->Transitions[TransitionIndex];
 			TSharedPtr<FJsonObject> TransitionObject = MakeShared<FJsonObject>();
-			TransitionObject->SetStringField(
-				TEXT("id"),
-				FString::Printf(TEXT("transition:%s:%d"), *StateRef.Id, TransitionIndex));
+			TransitionObject->SetStringField(TEXT("id"), GetSerializedTransitionId(StateRef, Transition, TransitionIndex));
 			TransitionObject->SetStringField(TEXT("source_state_id"), StateRef.Id);
 			TransitionObject->SetStringField(TEXT("source_state_path"), StateRef.Path);
-			TransitionObject->SetStringField(TEXT("target_state_id"), Transition.State.ID.ToString(EGuidFormats::DigitsWithHyphens));
+			TransitionObject->SetStringField(
+				TEXT("target_state_id"),
+				Transition.State.ID.IsValid() ? Transition.State.ID.ToString(EGuidFormats::DigitsWithHyphens) : FString());
 
 			FString TargetPath;
 			if (EditorData != nullptr)

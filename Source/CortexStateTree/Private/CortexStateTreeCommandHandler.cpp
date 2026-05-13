@@ -5,6 +5,7 @@
 #include "Operations/CortexSTAssetOps.h"
 #include "Operations/CortexSTInspectOps.h"
 #include "Operations/CortexSTStateOps.h"
+#include "Operations/CortexSTTransitionOps.h"
 #include "Operations/CortexSTValidationOps.h"
 
 FCortexCommandResult FCortexStateTreeCommandHandler::Execute(
@@ -69,6 +70,18 @@ FCortexCommandResult FCortexStateTreeCommandHandler::Execute(
 	if (Command == TEXT("set_state_properties"))
 	{
 		return FCortexSTStateOps::SetStateProperties(Params);
+	}
+	if (Command == TEXT("add_transition"))
+	{
+		return FCortexSTTransitionOps::AddTransition(Params);
+	}
+	if (Command == TEXT("remove_transition"))
+	{
+		return FCortexSTTransitionOps::RemoveTransition(Params);
+	}
+	if (Command == TEXT("set_transition_properties"))
+	{
+		return FCortexSTTransitionOps::SetTransitionProperties(Params);
 	}
 
 	return FCortexCommandRouter::Error(
