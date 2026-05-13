@@ -32,6 +32,7 @@ DEFINE_LOG_CATEGORY(LogCortexFrontend);
 
 const FName FCortexFrontendModule::CortexChatTabId(TEXT("CortexFrontend"));
 const FName FCortexFrontendModule::GenStudioTabId(TEXT("CortexGenStudio"));
+const FName FCortexFrontendModule::ToolMenuOwnerName(TEXT("CortexFrontend"));
 
 void FCortexFrontendModule::StartupModule()
 {
@@ -63,6 +64,7 @@ void FCortexFrontendModule::StartupModule()
     StartupCallbackHandle = UToolMenus::RegisterStartupCallback(
         FSimpleMulticastDelegate::FDelegate::CreateLambda([this]()
         {
+            FToolMenuOwnerScoped OwnerScoped(ToolMenuOwnerName);
             UToolMenu* Menu = UToolMenus::Get()->ExtendMenu(TEXT("LevelEditor.MainMenu.Tools"));
             FToolMenuSection& Section = Menu->FindOrAddSection(TEXT("Cortex"));
             Section.AddEntry(FToolMenuEntry::InitMenuEntry(
@@ -92,6 +94,7 @@ void FCortexFrontendModule::StartupModule()
     StatusBarCallbackHandle = UToolMenus::RegisterStartupCallback(
         FSimpleMulticastDelegate::FDelegate::CreateLambda([this]()
         {
+            FToolMenuOwnerScoped OwnerScoped(ToolMenuOwnerName);
             UToolMenu* StatusBar = UToolMenus::Get()->ExtendMenu(TEXT("LevelEditor.StatusBar.ToolBar"));
             FToolMenuSection& Section = StatusBar->FindOrAddSection(TEXT("Cortex"),
                 FText::GetEmpty(),
@@ -148,11 +151,9 @@ void FCortexFrontendModule::ShutdownModule()
     {
         UToolMenus::UnRegisterStartupCallback(StartupCallbackHandle);
         UToolMenus::UnRegisterStartupCallback(StatusBarCallbackHandle);
-        UToolMenu* StatusBar = UToolMenus::Get()->FindMenu(TEXT("LevelEditor.StatusBar.ToolBar"));
-        if (StatusBar)
-        {
-            StatusBar->RemoveSection(TEXT("Cortex"));
-        }
+        // Owner-tagged entries are swept by a single call; no FindMenu / singleton deref needed.
+        // Safe across teardown phases: UnregisterOwner internally guards on UToolMenus::Singleton.
+        UToolMenus::UnregisterOwner(ToolMenuOwnerName);
     }
 
     if (FSlateApplication::IsInitialized())
