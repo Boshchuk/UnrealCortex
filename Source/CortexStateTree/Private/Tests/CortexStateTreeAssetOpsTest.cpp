@@ -1,9 +1,42 @@
 #include "Misc/AutomationTest.h"
 #include "CortexStateTreeCommandHandler.h"
 #include "CortexStateTreeTestUtils.h"
+#include "CortexStateTreeTestSchema.h"
 #include "CortexTypes.h"
 #include "Dom/JsonObject.h"
 #include "StateTree.h"
+#include "UObject/Class.h"
+
+namespace
+{
+class FScopedClassFlagOverride
+{
+public:
+	FScopedClassFlagOverride(UClass* InClass, const EClassFlags InFlags)
+		: Class(InClass)
+		, Flags(InFlags)
+	{
+		if (Class != nullptr)
+		{
+			bHadFlags = Class->HasAnyClassFlags(Flags);
+			Class->ClassFlags |= Flags;
+		}
+	}
+
+	~FScopedClassFlagOverride()
+	{
+		if (Class != nullptr && !bHadFlags)
+		{
+			Class->ClassFlags &= ~Flags;
+		}
+	}
+
+private:
+	UClass* Class = nullptr;
+	EClassFlags Flags = CLASS_None;
+	bool bHadFlags = false;
+};
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexStateTreeCreateRequiresSchemaTest,
@@ -20,6 +53,45 @@ bool FCortexStateTreeCreateRequiresSchemaTest::RunTest(const FString& Parameters
 	FCortexCommandResult Result = Handler.Execute(TEXT("create_asset"), Params);
 	TestFalse(TEXT("create without schema fails"), Result.bSuccess);
 	TestEqual(TEXT("error code"), Result.ErrorCode, CortexErrorCodes::InvalidField);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexStateTreeCreateRejectsInvalidSchemaClassesTest,
+	"Cortex.StateTree.Asset.Create.RejectsInvalidSchemaClasses",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexStateTreeCreateRejectsInvalidSchemaClassesTest::RunTest(const FString& Parameters)
+{
+	FCortexStateTreeCommandHandler Handler;
+
+	auto ExpectInvalidSchema = [this, &Handler](const FString& SchemaPath, const FString& AssetPrefix, const FString& CaseName)
+	{
+		const FString AssetPath = CortexStateTreeTest::MakeAssetPath(AssetPrefix);
+		TSharedPtr<FJsonObject> Params = CortexStateTreeTest::Params();
+		Params->SetStringField(TEXT("asset_path"), AssetPath);
+		Params->SetStringField(TEXT("schema_class"), SchemaPath);
+
+		const FCortexCommandResult Result = Handler.Execute(TEXT("create_asset"), Params);
+		TestFalse(*FString::Printf(TEXT("%s should fail"), *CaseName), Result.bSuccess);
+		TestEqual(*FString::Printf(TEXT("%s error code"), *CaseName), Result.ErrorCode, CortexErrorCodes::StateTreeSchemaInvalid);
+		CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+	};
+
+	ExpectInvalidSchema(TEXT("/Script/CortexStateTree.CortexStateTreeAbstractSchema"), TEXT("ST_AbstractSchema"), TEXT("abstract schema"));
+	ExpectInvalidSchema(TEXT("/Script/CortexStateTree.CortexStateTreeHiddenSchema"), TEXT("ST_HiddenSchema"), TEXT("hidden schema"));
+
+	{
+		FScopedClassFlagOverride DeprecatedFlag(UCortexStateTreeTestSchema::StaticClass(), CLASS_Deprecated);
+		ExpectInvalidSchema(CortexStateTreeTest::GetTestSchemaClassPath(), TEXT("ST_DeprecatedSchema"), TEXT("deprecated schema"));
+	}
+
+	{
+		FScopedClassFlagOverride NewerVersionFlag(UCortexStateTreeTestSchema::StaticClass(), CLASS_NewerVersionExists);
+		ExpectInvalidSchema(CortexStateTreeTest::GetTestSchemaClassPath(), TEXT("ST_NewerVersionSchema"), TEXT("newer version schema"));
+	}
+
 	return true;
 }
 

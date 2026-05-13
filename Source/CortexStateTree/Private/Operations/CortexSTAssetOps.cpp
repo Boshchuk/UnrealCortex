@@ -70,6 +70,75 @@ UClass* ResolveSchemaClass(const FString& SchemaClassPath)
 	return FindFirstObject<UClass>(*SchemaClassPath, EFindFirstObjectOptions::NativeFirst);
 }
 
+FCortexCommandResult MakeInvalidSchemaError(
+	const FString& SchemaClassPath,
+	const FString& Message,
+	const TArray<FString>& RejectedFlags = {})
+{
+	TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+	Details->SetStringField(TEXT("schema_class"), SchemaClassPath);
+	if (RejectedFlags.Num() > 0)
+	{
+		TArray<TSharedPtr<FJsonValue>> RejectedFlagValues;
+		RejectedFlagValues.Reserve(RejectedFlags.Num());
+		for (const FString& RejectedFlag : RejectedFlags)
+		{
+			RejectedFlagValues.Add(MakeShared<FJsonValueString>(RejectedFlag));
+		}
+		Details->SetArrayField(TEXT("rejected_flags"), RejectedFlagValues);
+	}
+
+	return FCortexCommandRouter::Error(
+		CortexErrorCodes::StateTreeSchemaInvalid,
+		Message,
+		Details);
+}
+
+FCortexCommandResult ValidateSchemaClassForCreation(UClass* SchemaClass, const FString& SchemaClassPath)
+{
+	if (!SchemaClass)
+	{
+		return MakeInvalidSchemaError(
+			SchemaClassPath,
+			FString::Printf(TEXT("StateTree schema class not found: %s"), *SchemaClassPath));
+	}
+
+	if (!SchemaClass->IsChildOf(UStateTreeSchema::StaticClass()))
+	{
+		return MakeInvalidSchemaError(
+			SchemaClassPath,
+			FString::Printf(TEXT("Class is not a StateTree schema: %s"), *SchemaClassPath));
+	}
+
+	TArray<FString> RejectedFlags;
+	if (SchemaClass->HasAnyClassFlags(CLASS_Abstract))
+	{
+		RejectedFlags.Add(TEXT("Abstract"));
+	}
+	if (SchemaClass->HasAnyClassFlags(CLASS_Deprecated))
+	{
+		RejectedFlags.Add(TEXT("Deprecated"));
+	}
+	if (SchemaClass->HasAnyClassFlags(CLASS_NewerVersionExists))
+	{
+		RejectedFlags.Add(TEXT("NewerVersionExists"));
+	}
+	if (SchemaClass->HasAnyClassFlags(CLASS_HideDropDown))
+	{
+		RejectedFlags.Add(TEXT("HideDropdown"));
+	}
+
+	if (RejectedFlags.Num() > 0)
+	{
+		return MakeInvalidSchemaError(
+			SchemaClassPath,
+			FString::Printf(TEXT("StateTree schema class is not selectable for asset creation: %s"), *SchemaClassPath),
+			RejectedFlags);
+	}
+
+	return FCortexCommandRouter::Success(MakeShared<FJsonObject>());
+}
+
 TSharedPtr<FJsonObject> MakeListEntry(const FAssetData& AssetData)
 {
 	TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
@@ -154,11 +223,10 @@ FCortexCommandResult FCortexSTAssetOps::CreateAsset(const TSharedPtr<FJsonObject
 	}
 
 	UClass* SchemaClass = ResolveSchemaClass(SchemaClassPath);
-	if (!SchemaClass || !SchemaClass->IsChildOf(UStateTreeSchema::StaticClass()))
+	const FCortexCommandResult SchemaValidation = ValidateSchemaClassForCreation(SchemaClass, SchemaClassPath);
+	if (!SchemaValidation.bSuccess)
 	{
-		return FCortexCommandRouter::Error(
-			CortexErrorCodes::StateTreeSchemaInvalid,
-			FString::Printf(TEXT("Invalid StateTree schema class: %s"), *SchemaClassPath));
+		return SchemaValidation;
 	}
 
 	FString RootName;
@@ -361,6 +429,11 @@ FCortexCommandResult FCortexSTAssetOps::DeleteAsset(const TSharedPtr<FJsonObject
 	FString PackageFilename = FPackageName::LongPackageNameToFilename(
 		Package->GetName(),
 		FPackageName::GetAssetPackageExtension());
+
+	if (FPlatformFileManager::Get().GetPlatformFile().FileExists(*PackageFilename))
+	{
+		TryDeletePackageFile(PackageFilename);
+	}
 
 	UTextBuffer* DeleteGuard = nullptr;
 	if (IsValid(Package))

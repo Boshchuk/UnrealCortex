@@ -30,3 +30,15 @@ public:
 		return true;
 	}
 };
+
+UCLASS(Abstract)
+class UCortexStateTreeAbstractSchema : public UCortexStateTreeTestSchema
+{
+	GENERATED_BODY()
+};
+
+UCLASS(HideDropdown)
+class UCortexStateTreeHiddenSchema : public UCortexStateTreeTestSchema
+{
+	GENERATED_BODY()
+};
