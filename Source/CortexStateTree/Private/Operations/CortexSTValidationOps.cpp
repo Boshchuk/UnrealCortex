@@ -27,36 +27,6 @@ struct FCortexSTValidationSummary
 	TArray<FString> Warnings;
 };
 
-uint32 BuildEditorMutationSignature(UStateTree* StateTree)
-{
-	if (StateTree == nullptr)
-	{
-		return 0;
-	}
-
-	uint32 Signature = UStateTreeEditingSubsystem::CalculateStateTreeHash(StateTree);
-	Signature = HashCombineFast(Signature, GetTypeHash(GetPathNameSafe(StateTree->EditorData ? StateTree->EditorData->GetClass() : nullptr)));
-
-	if (const UStateTreeEditorData* EditorData = Cast<UStateTreeEditorData>(StateTree->EditorData))
-	{
-		Signature = HashCombineFast(Signature, GetTypeHash(EditorData->HasAnyFlags(RF_Transactional)));
-
-		if (EditorData->SubTrees.Num() > 0 && EditorData->SubTrees[0] != nullptr)
-		{
-			TArray<FCortexSTStateRef> States;
-			CortexST::CollectStates(EditorData->SubTrees[0], States);
-			for (const FCortexSTStateRef& StateRef : States)
-			{
-				Signature = HashCombineFast(Signature, GetTypeHash(StateRef.Id));
-				Signature = HashCombineFast(Signature, GetTypeHash(StateRef.Path));
-				Signature = HashCombineFast(Signature, GetTypeHash(StateRef.State != nullptr && StateRef.State->HasAnyFlags(RF_Transactional)));
-			}
-		}
-	}
-
-	return Signature;
-}
-
 bool LoadStateTree(
 	const TSharedPtr<FJsonObject>& Params,
 	FCortexSTLoadedAsset& OutAsset,
@@ -390,8 +360,6 @@ FCortexCommandResult FCortexSTValidationOps::Compile(const TSharedPtr<FJsonObjec
 
 	const bool bWasReady = Asset.StateTree->IsReadyToRun();
 	const uint32 PreviousCompiledHash = Asset.StateTree->LastCompiledEditorDataHash;
-	const uint32 PreviousEditorMutationSignature = BuildEditorMutationSignature(Asset.StateTree);
-
 	FScopedTransaction Transaction(FText::FromString(
 		FString::Printf(TEXT("Cortex: Compile StateTree %s"), *FPackageName::GetShortName(Asset.AssetPath))));
 
@@ -402,10 +370,8 @@ FCortexCommandResult FCortexSTValidationOps::Compile(const TSharedPtr<FJsonObjec
 
 	const bool bIsReady = Asset.StateTree->IsReadyToRun();
 	const uint32 CurrentCompiledHash = Asset.StateTree->LastCompiledEditorDataHash;
-	const uint32 CurrentEditorMutationSignature = BuildEditorMutationSignature(Asset.StateTree);
 	const bool bCompiledDataChanged = bWasReady != bIsReady || PreviousCompiledHash != CurrentCompiledHash;
-	const bool bEditorDataChanged = PreviousEditorMutationSignature != CurrentEditorMutationSignature;
-	if (bCompiledDataChanged || bEditorDataChanged)
+	if (bCompiledDataChanged)
 	{
 		Asset.StateTree->MarkPackageDirty();
 	}

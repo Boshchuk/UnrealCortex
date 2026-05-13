@@ -201,15 +201,15 @@ bool FCortexStateTreeValidationNonGotoTransitionTest::RunTest(const FString& Par
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FCortexStateTreeCompileMarksDirtyOnValidationFixupTest,
-	"Cortex.StateTree.Validation.CompileMarksDirtyOnValidationFixup",
+	FCortexStateTreeCompileMarksDirtyWithStableCompiledDataTest,
+	"Cortex.StateTree.Validation.CompileDirtyWithStableCompiledData",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
-bool FCortexStateTreeCompileMarksDirtyOnValidationFixupTest::RunTest(const FString& Parameters)
+bool FCortexStateTreeCompileMarksDirtyWithStableCompiledDataTest::RunTest(const FString& Parameters)
 {
 	FCortexStateTreeCommandHandler Handler;
-	const FString AssetPath = CortexStateTreeTest::MakeAssetPath(TEXT("ST_CompileFixup"));
+	const FString AssetPath = CortexStateTreeTest::MakeAssetPath(TEXT("ST_CompileDirtyStable"));
 
 	TSharedPtr<FJsonObject> CreateParams = CortexStateTreeTest::Params();
 	CreateParams->SetStringField(TEXT("asset_path"), AssetPath);
@@ -234,6 +234,17 @@ bool FCortexStateTreeCompileMarksDirtyOnValidationFixupTest::RunTest(const FStri
 	ChildState.Modify();
 	StateTree->MarkPackageDirty();
 
+	TSharedPtr<FJsonObject> InitialCompileParams = CortexStateTreeTest::Params();
+	InitialCompileParams->SetStringField(TEXT("asset_path"), AssetPath);
+	InitialCompileParams->SetObjectField(TEXT("expected_fingerprint"), CortexST::MakeFingerprint(StateTree));
+	const FCortexCommandResult InitialCompile = Handler.Execute(TEXT("compile"), InitialCompileParams);
+	TestTrue(TEXT("initial compile establishes stable compiled data"), InitialCompile.bSuccess);
+	if (!InitialCompile.bSuccess)
+	{
+		DeleteWithCurrentFingerprint(Handler, AssetPath);
+		return false;
+	}
+
 	const FCortexCommandResult SaveResult = FCortexSTAssetOps::SaveAsset(AssetPath);
 	TestTrue(TEXT("save fixture succeeds"), SaveResult.bSuccess);
 	if (!SaveResult.bSuccess)
@@ -243,31 +254,48 @@ bool FCortexStateTreeCompileMarksDirtyOnValidationFixupTest::RunTest(const FStri
 	}
 
 	TestFalse(TEXT("saved fixture package is clean"), StateTree->GetOutermost()->IsDirty());
+	TestTrue(TEXT("compiled fixture is ready before modify"), StateTree->IsReadyToRun());
+	const uint32 StableCompiledHash = StateTree->LastCompiledEditorDataHash;
+	TestNotEqual(TEXT("compiled fixture has stable hash"), StableCompiledHash, 0u);
 
-	RootState->ClearFlags(RF_Transactional);
-	ChildState.ClearFlags(RF_Transactional);
-	TestFalse(TEXT("root state transactional flag cleared before compile"), RootState->HasAnyFlags(RF_Transactional));
-	TestFalse(TEXT("child state transactional flag cleared before compile"), ChildState.HasAnyFlags(RF_Transactional));
+	StateTree->Modify();
+	TestTrue(TEXT("Modify alone marks package dirty"), StateTree->GetOutermost()->IsDirty());
+
+	TSharedPtr<FJsonObject> DirtyFingerprint = CortexST::MakeFingerprint(StateTree);
+	bool bModifyDirty = false;
+	TestTrue(TEXT("fingerprint after Modify exists"), GetDirectFingerprintDirtyFlag(DirtyFingerprint, bModifyDirty));
+	TestTrue(TEXT("Modify alone returns dirty fingerprint"), bModifyDirty);
+
+	const FCortexCommandResult SaveAfterModify = FCortexSTAssetOps::SaveAsset(AssetPath);
+	TestTrue(TEXT("save after Modify succeeds"), SaveAfterModify.bSuccess);
+	if (!SaveAfterModify.bSuccess)
+	{
+		CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+		return false;
+	}
+
+	TestFalse(TEXT("fixture is clean again before compile command"), StateTree->GetOutermost()->IsDirty());
+	TestTrue(TEXT("fixture stays ready before compile command"), StateTree->IsReadyToRun());
+	TestEqual(TEXT("compiled hash stays stable before compile command"), StateTree->LastCompiledEditorDataHash, StableCompiledHash);
 
 	const TSharedPtr<FJsonObject> ExpectedFingerprint = CortexST::MakeFingerprint(StateTree);
 	bool bExpectedDirty = true;
 	TestTrue(TEXT("pre-compile fingerprint present"), GetDirectFingerprintDirtyFlag(ExpectedFingerprint, bExpectedDirty));
-	TestFalse(TEXT("pre-compile fingerprint remains clean before compile"), bExpectedDirty);
-	TestFalse(TEXT("fixture package remains clean before compile"), StateTree->GetOutermost()->IsDirty());
+	TestFalse(TEXT("pre-compile fingerprint is clean"), bExpectedDirty);
 
 	TSharedPtr<FJsonObject> CompileParams = CortexStateTreeTest::Params();
 	CompileParams->SetStringField(TEXT("asset_path"), AssetPath);
 	CompileParams->SetObjectField(TEXT("expected_fingerprint"), ExpectedFingerprint);
 
 	const FCortexCommandResult Compile = Handler.Execute(TEXT("compile"), CompileParams);
-	TestTrue(TEXT("compile succeeds after validation fixup"), Compile.bSuccess);
-	TestTrue(TEXT("compile fixup restores root transactional flag"), RootState->HasAnyFlags(RF_Transactional));
-	TestTrue(TEXT("compile fixup restores child transactional flag"), ChildState.HasAnyFlags(RF_Transactional));
-	TestTrue(TEXT("compile fixup marks package dirty"), StateTree->GetOutermost()->IsDirty());
+	TestTrue(TEXT("compile succeeds with stable compiled data"), Compile.bSuccess);
+	TestTrue(TEXT("compile keeps asset ready"), StateTree->IsReadyToRun());
+	TestEqual(TEXT("compile keeps compiled hash stable"), StateTree->LastCompiledEditorDataHash, StableCompiledHash);
+	TestTrue(TEXT("compile marks package dirty even with stable compiled data"), StateTree->GetOutermost()->IsDirty());
 
 	bool bReturnedDirty = false;
 	TestTrue(TEXT("compile returns fingerprint with dirty flag"), GetFingerprintDirtyFlag(Compile.Data, bReturnedDirty));
-	TestTrue(TEXT("compile returns dirty fingerprint after validation fixup"), bReturnedDirty);
+	TestTrue(TEXT("compile returns dirty fingerprint with stable compiled data"), bReturnedDirty);
 
 	DeleteWithCurrentFingerprint(Handler, AssetPath);
 	return true;
