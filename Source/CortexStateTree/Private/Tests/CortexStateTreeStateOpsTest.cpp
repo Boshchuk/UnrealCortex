@@ -9,6 +9,7 @@
 #include "StateTreeEditorData.h"
 #include "StateTreeState.h"
 #include "StateTreeTypes.h"
+#include "UObject/UObjectGlobals.h"
 
 namespace
 {
@@ -85,6 +86,27 @@ bool TryGetValidationFlag(const FCortexCommandResult& Result, bool& bOutValid)
 	}
 
 	return Result.Data->GetObjectField(TEXT("validation"))->TryGetBoolField(TEXT("valid"), bOutValid);
+}
+
+TArray<UStateTreeState*> CollectStateObjectsWithOuter(UObject* Outer)
+{
+	TArray<UStateTreeState*> Result;
+	if (Outer == nullptr)
+	{
+		return Result;
+	}
+
+	TArray<UObject*> Objects;
+	GetObjectsWithOuter(Outer, Objects, true);
+	for (UObject* Object : Objects)
+	{
+		if (UStateTreeState* State = Cast<UStateTreeState>(Object))
+		{
+			Result.Add(State);
+		}
+	}
+
+	return Result;
 }
 }
 
@@ -361,6 +383,195 @@ bool FCortexStateTreeInvalidGameplayTagTest::RunTest(const FString& Parameters)
 	const FCortexCommandResult Add = Handler.Execute(TEXT("add_state"), AddParams);
 	TestFalse(TEXT("invalid tag fails"), Add.bSuccess);
 	TestEqual(TEXT("invalid tag uses InvalidTag"), Add.ErrorCode, CortexErrorCodes::InvalidTag);
+
+	CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexStateTreeMoveStateSameParentForwardReorderTest,
+	"Cortex.StateTree.State.MoveState.SameParentForwardReorder",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexStateTreeMoveStateSameParentForwardReorderTest::RunTest(const FString& Parameters)
+{
+	FCortexStateTreeCommandHandler Handler;
+	const FString AssetPath = CortexStateTreeTest::MakeAssetPath(TEXT("ST_StateReorderForward"));
+
+	FCortexCommandResult Create;
+	if (!CreateTestStateTree(*this, Handler, AssetPath, Create))
+	{
+		CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> Fingerprint = Create.Data->GetObjectField(TEXT("fingerprint"));
+	TArray<FString> AddedStateIds;
+
+	for (const FString& StateName : { FString(TEXT("A")), FString(TEXT("B")), FString(TEXT("C")) })
+	{
+		TSharedPtr<FJsonObject> AddParams = CortexStateTreeTest::Params();
+		AddParams->SetStringField(TEXT("asset_path"), AssetPath);
+		AddParams->SetStringField(TEXT("name"), StateName);
+		AddParams->SetObjectField(TEXT("expected_fingerprint"), Fingerprint);
+
+		const FCortexCommandResult Add = Handler.Execute(TEXT("add_state"), AddParams);
+		TestTrue(*FString::Printf(TEXT("add_state succeeds for %s"), *StateName), Add.bSuccess);
+		if (!Add.bSuccess)
+		{
+			CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+			return false;
+		}
+
+		FString AddedStateId;
+		TestTrue(*FString::Printf(TEXT("add_state returns id for %s"), *StateName), TryGetStateId(Add, AddedStateId));
+		AddedStateIds.Add(AddedStateId);
+		Fingerprint = Add.Data->GetObjectField(TEXT("fingerprint"));
+	}
+
+	TSharedPtr<FJsonObject> MoveParams = CortexStateTreeTest::Params();
+	MoveParams->SetStringField(TEXT("asset_path"), AssetPath);
+	MoveParams->SetStringField(TEXT("state_id"), AddedStateIds[1]);
+	MoveParams->SetNumberField(TEXT("index"), 2);
+	MoveParams->SetObjectField(TEXT("expected_fingerprint"), Fingerprint);
+
+	const FCortexCommandResult Move = Handler.Execute(TEXT("move_state"), MoveParams);
+	TestTrue(TEXT("same-parent move succeeds"), Move.bSuccess);
+
+	FCortexSTAssetContext Context;
+	FCortexCommandResult LoadError;
+	TestTrue(TEXT("asset context loads after reorder"), LoadContext(AssetPath, Context, LoadError));
+
+	UStateTreeState* RootState = GetRootState(Context);
+	TestNotNull(TEXT("root state exists after reorder"), RootState);
+	if (RootState == nullptr)
+	{
+		CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+		return false;
+	}
+
+	TestEqual(TEXT("root still has three children"), RootState->Children.Num(), 3);
+	if (RootState->Children.Num() == 3)
+	{
+		TestEqual(TEXT("same-parent forward reorder places A first"), RootState->Children[0]->Name.ToString(), FString(TEXT("A")));
+		TestEqual(TEXT("same-parent forward reorder places C second"), RootState->Children[1]->Name.ToString(), FString(TEXT("C")));
+		TestEqual(TEXT("same-parent forward reorder places B last"), RootState->Children[2]->Name.ToString(), FString(TEXT("B")));
+	}
+
+	CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexStateTreeRemoveStateCleansDetachedSubtreeOwnershipTest,
+	"Cortex.StateTree.State.RemoveState.CleansDetachedSubtreeOwnership",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexStateTreeRemoveStateCleansDetachedSubtreeOwnershipTest::RunTest(const FString& Parameters)
+{
+	FCortexStateTreeCommandHandler Handler;
+	const FString AssetPath = CortexStateTreeTest::MakeAssetPath(TEXT("ST_StateRemoveOwnership"));
+
+	FCortexCommandResult Create;
+	if (!CreateTestStateTree(*this, Handler, AssetPath, Create))
+	{
+		CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> Fingerprint = Create.Data->GetObjectField(TEXT("fingerprint"));
+
+	TSharedPtr<FJsonObject> AddParentParams = CortexStateTreeTest::Params();
+	AddParentParams->SetStringField(TEXT("asset_path"), AssetPath);
+	AddParentParams->SetStringField(TEXT("name"), TEXT("Parent"));
+	AddParentParams->SetObjectField(TEXT("expected_fingerprint"), Fingerprint);
+
+	const FCortexCommandResult AddParent = Handler.Execute(TEXT("add_state"), AddParentParams);
+	TestTrue(TEXT("add parent succeeds"), AddParent.bSuccess);
+	if (!AddParent.bSuccess)
+	{
+		CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+		return false;
+	}
+
+	FString ParentStateId;
+	TestTrue(TEXT("add parent returns state id"), TryGetStateId(AddParent, ParentStateId));
+	Fingerprint = AddParent.Data->GetObjectField(TEXT("fingerprint"));
+
+	TSharedPtr<FJsonObject> AddChildParams = CortexStateTreeTest::Params();
+	AddChildParams->SetStringField(TEXT("asset_path"), AssetPath);
+	AddChildParams->SetStringField(TEXT("name"), TEXT("Child"));
+	AddChildParams->SetStringField(TEXT("parent_state_id"), ParentStateId);
+	AddChildParams->SetObjectField(TEXT("expected_fingerprint"), Fingerprint);
+
+	const FCortexCommandResult AddChild = Handler.Execute(TEXT("add_state"), AddChildParams);
+	TestTrue(TEXT("add child succeeds"), AddChild.bSuccess);
+	if (!AddChild.bSuccess)
+	{
+		CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+		return false;
+	}
+
+	FString ChildStateId;
+	TestTrue(TEXT("add child returns state id"), TryGetStateId(AddChild, ChildStateId));
+	Fingerprint = AddChild.Data->GetObjectField(TEXT("fingerprint"));
+
+	FCortexSTAssetContext BeforeRemoveContext;
+	FCortexCommandResult LoadError;
+	TestTrue(TEXT("asset context loads before remove"), LoadContext(AssetPath, BeforeRemoveContext, LoadError));
+	UStateTreeState* RootState = GetRootState(BeforeRemoveContext);
+	UStateTreeState* ParentState = FindStateById(BeforeRemoveContext, ParentStateId);
+	UStateTreeState* ChildState = FindStateById(BeforeRemoveContext, ChildStateId);
+	TestNotNull(TEXT("root state exists before remove"), RootState);
+	TestNotNull(TEXT("parent state exists before remove"), ParentState);
+	TestNotNull(TEXT("child state exists before remove"), ChildState);
+	if (RootState == nullptr || ParentState == nullptr || ChildState == nullptr)
+	{
+		CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> RemoveParams = CortexStateTreeTest::Params();
+	RemoveParams->SetStringField(TEXT("asset_path"), AssetPath);
+	RemoveParams->SetStringField(TEXT("state_id"), ParentStateId);
+	RemoveParams->SetBoolField(TEXT("remove_children"), true);
+	RemoveParams->SetObjectField(TEXT("expected_fingerprint"), Fingerprint);
+
+	const FCortexCommandResult Remove = Handler.Execute(TEXT("remove_state"), RemoveParams);
+	TestTrue(TEXT("remove subtree succeeds"), Remove.bSuccess);
+
+	FCortexSTAssetContext AfterRemoveContext;
+	TestTrue(TEXT("asset context loads after remove"), LoadContext(AssetPath, AfterRemoveContext, LoadError));
+	UStateTreeState* RootStateAfterRemove = GetRootState(AfterRemoveContext);
+	TestNotNull(TEXT("root state exists after remove"), RootStateAfterRemove);
+	if (RootStateAfterRemove == nullptr)
+	{
+		CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+		return false;
+	}
+
+	TestNull(TEXT("removed parent no longer resolves"), FindStateById(AfterRemoveContext, ParentStateId));
+	TestNull(TEXT("removed child no longer resolves"), FindStateById(AfterRemoveContext, ChildStateId));
+
+	const TArray<UStateTreeState*> RootOwnedStates = CollectStateObjectsWithOuter(RootStateAfterRemove);
+	bool bFoundDetachedParent = false;
+	bool bFoundDetachedChild = false;
+	for (const UStateTreeState* State : RootOwnedStates)
+	{
+		if (State == ParentState)
+		{
+			bFoundDetachedParent = true;
+		}
+		if (State == ChildState)
+		{
+			bFoundDetachedChild = true;
+		}
+	}
+
+	TestFalse(TEXT("removed subtree root is no longer outer-owned by remaining root"), bFoundDetachedParent);
+	TestFalse(TEXT("removed subtree child is no longer outer-owned by remaining root"), bFoundDetachedChild);
 
 	CortexStateTreeTest::DeleteIfLoaded(AssetPath);
 	return true;

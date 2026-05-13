@@ -249,6 +249,19 @@ bool IsDescendantOf(const UStateTreeState* CandidateParent, const UStateTreeStat
 	return false;
 }
 
+void ReouterStateSubtree(UStateTreeState* State, UObject* NewOuter)
+{
+	if (State == nullptr || NewOuter == nullptr)
+	{
+		return;
+	}
+
+	if (State->GetOuter() != NewOuter)
+	{
+		State->Rename(nullptr, NewOuter, REN_DontCreateRedirectors | REN_DoNotDirty);
+	}
+}
+
 FCortexSTStateRef MakeStateRef(UStateTreeState* State)
 {
 	FCortexSTStateRef StateRef;
@@ -834,6 +847,7 @@ FCortexCommandResult FCortexSTStateOps::RemoveState(const TSharedPtr<FJsonObject
 
 	StateRef.Parent->Children.RemoveAt(RemovedIndex);
 	StateRef.State->Parent = nullptr;
+	ReouterStateSubtree(StateRef.State, GetTransientPackage());
 
 	UE_LOG(LogCortexStateTree, Log, TEXT("Removed StateTree state %s from %s"), *RemovedStatePath, *Context.AssetPath);
 	return FinalizeMutation(Context, Params, RemovedStateId, RemovedStatePath);
@@ -974,20 +988,16 @@ FCortexCommandResult FCortexSTStateOps::MoveState(const TSharedPtr<FJsonObject>&
 			FString::Printf(TEXT("State is not attached to its source parent: %s"), *SourceStateRef.Path));
 	}
 
+	SourceArray.RemoveAt(SourceIndex);
+
 	TArray<TObjectPtr<UStateTreeState>>& TargetArray = TargetParentStateRef.State->Children;
-	int32 InsertIndex = bHasIndex
+	const int32 InsertIndex = bHasIndex
 		? FMath::Clamp(RequestedIndex, 0, TargetArray.Num())
 		: TargetArray.Num();
 
-	if (TargetParentStateRef.State == SourceStateRef.Parent && InsertIndex > SourceIndex)
-	{
-		--InsertIndex;
-	}
-
-	SourceArray.RemoveAt(SourceIndex);
-	InsertIndex = FMath::Clamp(InsertIndex, 0, TargetArray.Num());
 	TargetArray.Insert(SourceStateRef.State, InsertIndex);
 	SourceStateRef.State->Parent = TargetParentStateRef.State;
+	ReouterStateSubtree(SourceStateRef.State, TargetParentStateRef.State);
 
 	const FString StatePath = SourceStateRef.State->GetPath();
 	UE_LOG(LogCortexStateTree, Log, TEXT("Moved StateTree state %s to %s"), *SourceStateRef.Id, *StatePath);
