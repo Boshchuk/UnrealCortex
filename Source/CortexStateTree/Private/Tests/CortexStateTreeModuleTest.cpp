@@ -251,6 +251,8 @@ bool FCortexStateTreeModuleRegistrationTest::RunTest(const FString& Parameters)
 		HasParam(*AddTransitionParams, TEXT("compile"), TEXT("boolean"), false));
 	TestTrue(TEXT("add_transition exposes save"),
 		HasParam(*AddTransitionParams, TEXT("save"), TEXT("boolean"), false));
+	TestTrue(TEXT("add_transition requires expected_fingerprint"),
+		HasParam(*AddTransitionParams, TEXT("expected_fingerprint"), TEXT("object"), true));
 
 	TestFalse(TEXT("remove_transition does not expose source_state_id at all"),
 		HasParamNamed(*RemoveTransitionParams, TEXT("source_state_id")));
@@ -262,6 +264,8 @@ bool FCortexStateTreeModuleRegistrationTest::RunTest(const FString& Parameters)
 		HasParam(*RemoveTransitionParams, TEXT("compile"), TEXT("boolean"), false));
 	TestTrue(TEXT("remove_transition exposes save"),
 		HasParam(*RemoveTransitionParams, TEXT("save"), TEXT("boolean"), false));
+	TestTrue(TEXT("remove_transition requires expected_fingerprint"),
+		HasParam(*RemoveTransitionParams, TEXT("expected_fingerprint"), TEXT("object"), true));
 
 	TestFalse(TEXT("set_transition_properties does not expose source_state_id at all"),
 		HasParamNamed(*SetTransitionPropertiesParams, TEXT("source_state_id")));
@@ -273,6 +277,8 @@ bool FCortexStateTreeModuleRegistrationTest::RunTest(const FString& Parameters)
 		HasParam(*SetTransitionPropertiesParams, TEXT("compile"), TEXT("boolean"), false));
 	TestTrue(TEXT("set_transition_properties exposes save"),
 		HasParam(*SetTransitionPropertiesParams, TEXT("save"), TEXT("boolean"), false));
+	TestTrue(TEXT("set_transition_properties requires expected_fingerprint"),
+		HasParam(*SetTransitionPropertiesParams, TEXT("expected_fingerprint"), TEXT("object"), true));
 
 	return true;
 }

@@ -185,7 +185,7 @@ TArray<FCortexCommandInfo> FCortexStateTreeCommandHandler::GetSupportedCommands(
 			.Optional(TEXT("priority"), TEXT("string"), TEXT("Transition priority"))
 			.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after mutation"))
 			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Persist package after mutation"))
-			.OptionalExpectedFingerprint(),
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Required stale-write guard for transition mutation")),
 		FCortexCommandInfo{ TEXT("remove_transition"), TEXT("Remove a StateTree transition") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path"))
 			.Required(TEXT("transition_id"), TEXT("string"), TEXT("Transition GUID or index token"))
@@ -193,7 +193,7 @@ TArray<FCortexCommandInfo> FCortexStateTreeCommandHandler::GetSupportedCommands(
 			.Optional(TEXT("state_path"), TEXT("string"), TEXT("Owning state path"))
 			.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after mutation"))
 			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Persist package after mutation"))
-			.OptionalExpectedFingerprint(),
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Required stale-write guard for transition mutation")),
 		FCortexCommandInfo{ TEXT("set_transition_properties"), TEXT("Set transition fields") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path"))
 			.Required(TEXT("transition_id"), TEXT("string"), TEXT("Transition GUID or index token"))
@@ -202,6 +202,6 @@ TArray<FCortexCommandInfo> FCortexStateTreeCommandHandler::GetSupportedCommands(
 			.Optional(TEXT("state_path"), TEXT("string"), TEXT("Owning state path"))
 			.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after mutation"))
 			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Persist package after mutation"))
-			.OptionalExpectedFingerprint(),
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Required stale-write guard for transition mutation")),
 	};
 }
