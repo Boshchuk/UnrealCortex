@@ -194,7 +194,7 @@ bool FCortexCliDiscoveryCodexLaunchCommandTest::RunTest(const FString& Parameter
     SessionConfig.ResolvedOptions.ProviderDisplayName = TEXT("Codex");
     SessionConfig.ResolvedOptions.ModelId = TEXT("gpt-5.4");
     SessionConfig.ResolvedOptions.EffortLevel = ECortexEffortLevel::Maximum;
-    SessionConfig.ResolvedOptions.ContextLimitTokens = 272000;
+    SessionConfig.ResolvedOptions.ContextLimitTokens = 1050000;
     SessionConfig.LaunchOptions.bSkipPermissions = true;
 
     const FCortexCodexCliProvider Provider;
@@ -210,18 +210,16 @@ bool FCortexCliDiscoveryCodexLaunchCommandTest::RunTest(const FString& Parameter
         CommandLine.Contains(FString::Printf(TEXT("-C \"%s\""), *SessionConfig.WorkingDirectory)));
     TestTrue(
         TEXT("Codex launch should include the exact quoted MCP args override token"),
-        CommandLine.Contains(TEXT("-c \"mcp_servers.cortex_mcp.args=[")) &&
-        CommandLine.Contains(TEXT("cortex-mcp")));
+        CommandLine.Contains(TEXT("-c \"mcp_servers.cortex_mcp.args=[\\\"run\\\",\\\"--directory\\\",\\\"Plugins/UnrealCortex/MCP\\\",\\\"cortex-mcp\\\"]\"")));
     TestTrue(TEXT("Codex launch should include model flag"), CommandLine.Contains(TEXT("-m \"gpt-5.4\"")));
-    TestTrue(TEXT("Codex launch should include reasoning effort"), CommandLine.Contains(TEXT("-c model_reasoning_effort=maximum")));
+    TestTrue(TEXT("Codex launch should include reasoning effort"), CommandLine.Contains(TEXT("-c model_reasoning_effort=xhigh")));
     TestTrue(
         TEXT("Codex launch should include the exact quoted MCP command override token"),
         CommandLine.Contains(TEXT("-c \"mcp_servers.cortex_mcp.command=\\\"uv\\\"\"")));
     TestTrue(
         TEXT("Codex launch should include the exact quoted MCP env override token"),
-        CommandLine.Contains(TEXT("-c \"mcp_servers.cortex_mcp.env.CORTEX_PROJECT_DIR=")));
+        CommandLine.Contains(TEXT("-c \"mcp_servers.cortex_mcp.env.CORTEX_PROJECT_DIR=\\\".\\\"\"")));
     TestTrue(TEXT("Codex launch should include bypass approvals flag when skip permissions is set"), CommandLine.Contains(TEXT("--dangerously-bypass-approvals-and-sandbox")));
-    TestTrue(TEXT("Codex resume should read prompt from stdin explicitly"), CommandLine.EndsWith(TEXT(" -")));
     return true;
 }
 

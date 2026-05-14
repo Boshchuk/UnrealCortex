@@ -114,11 +114,8 @@ uint32 FCortexCliWorker::Run()
 				// Capture by value — the background thread outlives this scope
 				void* WritePipe = StdinWritePipe;
 				TWeakPtr<FCortexCliSession> WeakCopy = WeakSession;
-				const bool bCloseStdinAfterWrite =
-					Provider != nullptr &&
-					Provider->GetTransportMode() == ECortexCliTransportMode::PerTurnExec;
 				Async(EAsyncExecution::ThreadPool,
-					[PromptEnvelope, WritePipe, WeakCopy, bCloseStdinAfterWrite]()
+					[PromptEnvelope, WritePipe, WeakCopy]()
 					{
 						if (WritePipe == nullptr)
 						{
@@ -134,16 +131,13 @@ uint32 FCortexCliWorker::Run()
 						if (bSuccess)
 						{
 							UE_LOG(LogCortexFrontend, Log, TEXT("Stdin write: completed successfully"));
-							if (bCloseStdinAfterWrite)
+							AsyncTask(ENamedThreads::GameThread, [WeakCopy]()
 							{
-								AsyncTask(ENamedThreads::GameThread, [WeakCopy]()
+								if (const TSharedPtr<FCortexCliSession> Pinned = WeakCopy.Pin())
 								{
-									if (const TSharedPtr<FCortexCliSession> Pinned = WeakCopy.Pin())
-									{
-										Pinned->CloseStdinPipe();
-									}
-								});
-							}
+									Pinned->HandlePromptWriteCompleted();
+								}
+							});
 						}
 						else
 						{

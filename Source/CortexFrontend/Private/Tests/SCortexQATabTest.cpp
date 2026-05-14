@@ -80,8 +80,8 @@ bool FCortexQATabRegisteredTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-    FCortexQADefaultSessionUsesActiveProviderTest,
-    "Cortex.Frontend.QATab.DefaultSessionUsesActiveProvider",
+    FCortexQAGenerationUsesTurnBoundCodexSessionIntentTest,
+    "Cortex.Frontend.QATab.GenerationUsesTurnBoundCodexSessionIntent",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -89,7 +89,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     "Cortex.Frontend.QATab.GenerationConnectFailureShowsProviderStatus",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FCortexQADefaultSessionUsesActiveProviderTest::RunTest(const FString& Parameters)
+bool FCortexQAGenerationUsesTurnBoundCodexSessionIntentTest::RunTest(const FString& Parameters)
 {
     (void)Parameters;
 
@@ -143,19 +143,40 @@ bool FCortexQADefaultSessionUsesActiveProviderTest::RunTest(const FString& Param
     Settings.SetEffortLevel(ECortexEffortLevel::Medium);
     Settings.SetSelectedModel(TEXT("gpt-5.4"));
 
-    const FCortexSessionConfig Config = FCortexFrontendModule::CreateDefaultSessionConfig();
-    TestEqual(TEXT("QA default session config should pin the active provider"), Config.ProviderId, FName(TEXT("codex")));
-    TestEqual(TEXT("QA default session config should resolve active provider metadata"), Config.ResolvedOptions.ProviderId, FName(TEXT("codex")));
-    TestEqual(TEXT("QA default session config should resolve codex model"), Config.ResolvedOptions.ModelId, FString(TEXT("gpt-5.4")));
+    FCortexSessionConfig CapturedConfig;
+    bool bCapturedConfig = false;
+    FCortexQATabTestHooks::SetSessionCreationOverrideForTests(
+        [&CapturedConfig, &bCapturedConfig](const FCortexSessionConfig& Config)
+        {
+            bCapturedConfig = true;
+            CapturedConfig = Config;
 
-    TSharedPtr<FCortexCliSession> Session = MakeShared<FCortexCliSession>(Config);
-    TestTrue(TEXT("QA session should exist"), Session.IsValid());
-    if (!Session.IsValid())
+            FCortexQATabSessionCreateResult Result;
+            Result.Session = MakeShared<FCortexCliSession>(Config);
+            Result.bConnected = false;
+            return Result;
+        });
+    ON_SCOPE_EXIT
+    {
+        FCortexQATabTestHooks::ClearSessionCreationOverrideForTests();
+    };
+
+    TSharedRef<STestCortexQATab> Tab = SNew(STestCortexQATab);
+    Tab->InvokeGenerateForTests(TEXT("Generate a QA scenario"));
+
+    TestTrue(TEXT("QA generation should construct a CLI session config"), bCapturedConfig);
+    if (!bCapturedConfig)
     {
         return false;
     }
 
-    TestEqual(TEXT("QA session should use the active provider"), Session->GetProviderId(), FName(TEXT("codex")));
+    TestEqual(TEXT("QA generation config should pin the active provider"), CapturedConfig.ProviderId, FName(TEXT("codex")));
+    TestEqual(TEXT("QA generation config should resolve active provider metadata"), CapturedConfig.ResolvedOptions.ProviderId, FName(TEXT("codex")));
+    TestEqual(TEXT("QA generation config should resolve codex model"), CapturedConfig.ResolvedOptions.ModelId, FString(TEXT("gpt-5.4")));
+    TestEqual(TEXT("QA generation should explicitly use turn-bound lifetime"), CapturedConfig.LifetimePolicy, ECortexSessionLifetimePolicy::TurnBound);
+
+    TSharedPtr<FCortexCliSession> Session = MakeShared<FCortexCliSession>(CapturedConfig);
+    TestEqual(TEXT("QA-generated session should pin turn-bound lifetime"), Session->GetLifetimePolicy(), ECortexSessionLifetimePolicy::TurnBound);
     return true;
 }
 

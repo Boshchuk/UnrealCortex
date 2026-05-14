@@ -35,6 +35,9 @@ public:
     /** Unregister a conversion session. */
     void UnregisterSession(TSharedPtr<FCortexCliSession> Session);
 
+    /** Release the main workbench chat session when the owning UI surface closes. */
+    void ReleaseMainChatSession(TSharedPtr<FCortexCliSession> Session);
+
     /** Register a build process for PreExit cleanup. */
     void RegisterBuildProcess(TSharedPtr<FMonitoredProcess> Process);
 
@@ -60,6 +63,8 @@ private:
     void OnAnalysisRequested(const FCortexAnalysisPayload& Payload);
     void OnConversionWindowClosed(const TSharedRef<SWindow>&, TSharedPtr<FCortexConversionContext> Context);
     void OnAnalysisWindowClosed(const TSharedRef<SWindow>&, TSharedPtr<FCortexAnalysisContext> Context);
+    void RegisterFrontendSettings();
+    void UnregisterFrontendSettings();
     void ReleaseSessions();
     void HandlePreExit();
 
@@ -74,5 +79,6 @@ private:
     TArray<FConversionWindowEntry> ConversionWindows;
     TArray<FAnalysisWindowEntry> AnalysisWindows;
     bool bGenStudioTabRegistered = false;
+    bool bHasHandledPreExit = false;
     FDelegateHandle StatusBarCallbackHandle;
 };

@@ -25,12 +25,20 @@ enum class ECortexWorkflowMode : uint8
     Thorough
 };
 
+enum class ECortexSessionLifetimePolicy : uint8
+{
+    Default,
+    Persistent,
+    TurnBound
+};
+
 enum class ECortexSessionState : uint8
 {
     Inactive,
     Spawning,
     Idle,
     Processing,
+    AwaitingTurnExit,
     Cancelling,
     Respawning,
     Terminated
@@ -69,6 +77,7 @@ struct FCortexSessionConfig
     ECortexEffortLevel EffortLevel = ECortexEffortLevel::Default;
     bool bSkipPermissions = false;
     bool bConversionMode = false;  // Lightweight mode: no MCP, no project context, no tools
+    ECortexSessionLifetimePolicy LifetimePolicy = ECortexSessionLifetimePolicy::Default;
 };
 
 struct FCortexPromptRequest
