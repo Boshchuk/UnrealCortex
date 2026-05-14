@@ -145,6 +145,25 @@ Every mutation wrapped in `FScopedTransaction`. Large responses auto-truncate wi
 </details>
 
 <details>
+<summary><strong>AI State Machines — CortexStateTree</strong> &nbsp;·&nbsp; StateTree assets, state hierarchy, transitions, validation, compile</summary>
+
+<br>
+
+**Asset lifecycle:** List, create, duplicate, delete, and save StateTree assets with referencer checks and stale-write fingerprints.
+
+**Inspection:** Dump full StateTree structure, read individual states by GUID or path, and run read-only structure checks for missing editor data, ambiguous paths, duplicate IDs, and dangling transitions.
+
+**Authoring:** Add, remove, rename, move, and configure states. Add and update simple transitions with trigger, priority, target, and Gameplay Tag validation.
+
+**Validation and compile:** Run mutating StateTree validation fixups and explicit compile with structured diagnostics. `statetree_compose` creates or updates multi-state structures with fingerprint threading and cleanup on create failure.
+
+**Current boundary:** Structure-level authoring only. Task, condition, evaluator, parameter bag, and property binding authoring are intentionally not exposed yet.
+
+**Example tasks:** *"Create ST_Guard with Patrol and Chase states and a SawTarget transition"* · *"Review all StateTrees for dangling transitions and invalid tags"* · *"Compile ST_BossBehavior and summarize diagnostics"*
+
+</details>
+
+<details>
 <summary><strong>Project Analysis — CortexReflect</strong> &nbsp;·&nbsp; Class hierarchy, properties, cross-references, migration intelligence</summary>
 
 <br>
@@ -220,6 +239,7 @@ flowchart TB
         Data["CortexData<br/>DataTables · Tags<br/>DataAssets · Curves"]
         BP["CortexBlueprint<br/>Blueprint CRUD<br/>Graph Editing"]
         Mat["CortexMaterial<br/>Materials · Instances<br/>Parameter Collections"]
+        ST["CortexStateTree<br/>StateTrees<br/>States · Transitions"]
         UMG["CortexUMG<br/>Widget Trees<br/>Properties · Animations"]
         Level["CortexLevel<br/>Actors · Components<br/>Streaming"]
         Editor["CortexEditor<br/>PIE · Viewport<br/>Input · Console"]
@@ -241,6 +261,8 @@ flowchart TB
 ```
 
 Commands are namespaced: `{domain}.{command}` — e.g. `data.query_datatable`, `bp.create`, `graph.add_node`. CortexCore routes each command to its registered domain handler and dispatches to the Game Thread. The port is auto-discovered via `Saved/CortexPort-{PID}.txt` — multiple editor instances each get their own port.
+
+Representative command examples include `data.query_datatable`, `bp.create`, `graph.add_node`, `statetree.dump_tree`, `statetree.add_state`, and `statetree.compile`.
 
 ---
 
