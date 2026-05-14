@@ -72,6 +72,15 @@ FCortexCliSession::FCortexCliSession(const FCortexSessionConfig& InConfig)
 	: Config(InConfig)
 	, State(ECortexSessionState::Inactive)
 {
+	ResolvedLifetimePolicy = Config.LifetimePolicy;
+	if (ResolvedLifetimePolicy == ECortexSessionLifetimePolicy::Default)
+	{
+		ResolvedLifetimePolicy = Config.bConversionMode
+			? ECortexSessionLifetimePolicy::TurnBound
+			: ECortexSessionLifetimePolicy::Persistent;
+	}
+	Config.LifetimePolicy = ResolvedLifetimePolicy;
+
 	if (Config.ProviderId.IsNone())
 	{
 		const UCortexFrontendProviderSettings* ProviderSettings = UCortexFrontendProviderSettings::Get();
@@ -176,6 +185,12 @@ bool FCortexCliSession::SendPrompt(const FCortexPromptRequest& Request)
 		return true;
 	}
 
+	if (CurrentState == ECortexSessionState::AwaitingTurnExit)
+	{
+		UE_LOG(LogCortexFrontend, Log, TEXT("Prompt queued while waiting for turn-bound provider exit"));
+		return true;
+	}
+
 	if (CurrentState != ECortexSessionState::Idle)
 	{
 		UE_LOG(LogCortexFrontend, Log, TEXT("SendPrompt rejected: session in state %d"), static_cast<int32>(CurrentState));
@@ -188,6 +203,7 @@ bool FCortexCliSession::SendPrompt(const FCortexPromptRequest& Request)
 
 	if (PinnedProvider != nullptr &&
 		bIsPerTurnExec &&
+		UsesTurnBoundLifetimePolicy() &&
 		(!ProcessHandle.IsValid() || !FPlatformProcess::IsProcRunning(ProcessHandle)))
 	{
 		const bool bResumeProviderConversation = bHasProviderConversationId || bHasResumableProviderConversation;
@@ -422,6 +438,7 @@ void FCortexCliSession::HandleWorkerEvent(const FCortexStreamEvent& Event)
 
 		if (PinnedProvider != nullptr &&
 			PinnedProvider->GetTransportMode() == ECortexCliTransportMode::PerTurnExec &&
+			UsesTurnBoundLifetimePolicy() &&
 			bHasProviderConversationId)
 		{
 			bHasResumableProviderConversation = true;
@@ -440,8 +457,18 @@ void FCortexCliSession::HandleWorkerEvent(const FCortexStreamEvent& Event)
 		}
 		else
 		{
-			const ECortexSessionState PreviousState = State.exchange(ECortexSessionState::Idle);
-			BroadcastStateChange(PreviousState, ECortexSessionState::Idle, TEXT("Turn complete"));
+			const bool bAwaitingTurnBoundExit =
+				PinnedProvider != nullptr &&
+				PinnedProvider->GetTransportMode() == ECortexCliTransportMode::PerTurnExec &&
+				UsesTurnBoundLifetimePolicy();
+			const ECortexSessionState CompletedState = bAwaitingTurnBoundExit
+				? ECortexSessionState::AwaitingTurnExit
+				: ECortexSessionState::Idle;
+			const TCHAR* CompletionReason = bAwaitingTurnBoundExit
+				? TEXT("Turn complete, awaiting provider exit")
+				: TEXT("Turn complete");
+			const ECortexSessionState PreviousState = State.exchange(CompletedState);
+			BroadcastStateChange(PreviousState, CompletedState, CompletionReason);
 			UE_LOG(LogCortexFrontend, Log, TEXT("Turn complete: %d turns, $%.4f"), Result.NumTurns, Result.TotalCostUsd);
 			OnTurnComplete.Broadcast(Result);
 		}
@@ -507,13 +534,62 @@ void FCortexCliSession::HandleProcessExited(const FString& Reason)
 	}
 
 	// Non-cancel process exit (unexpected crash)
+	bool bHasPendingPrompt = false;
+	{
+		FScopeLock Lock(&PromptMutex);
+		bHasPendingPrompt = PendingPrompt.IsSet();
+	}
+
 	const bool bKeepResumableConversation =
+		(CurrentState == ECortexSessionState::Idle || CurrentState == ECortexSessionState::AwaitingTurnExit) &&
 		PinnedProvider != nullptr &&
 		PinnedProvider->GetTransportMode() == ECortexCliTransportMode::PerTurnExec &&
+		UsesTurnBoundLifetimePolicy() &&
 		bHasResumableProviderConversation;
+	const bool bHadActivePrompt =
+		CurrentState == ECortexSessionState::Processing ||
+		CurrentState == ECortexSessionState::AwaitingTurnExit ||
+		bHasPendingPrompt;
 
-	if (!bKeepResumableConversation &&
-		(CurrentState == ECortexSessionState::Spawning || CurrentState == ECortexSessionState::Processing))
+	CleanupProcess();
+
+	if (bKeepResumableConversation)
+	{
+		if (bHasPendingPrompt)
+		{
+			const ECortexAccessMode PendingPromptAccessMode = GetPendingAccessMode();
+			State.store(ECortexSessionState::Spawning);
+			BroadcastStateChange(CurrentState, ECortexSessionState::Spawning, TEXT("Resuming per-turn exec conversation"));
+			if (!SpawnProcess(PendingPromptAccessMode, true))
+			{
+				{
+					FScopeLock Lock(&PromptMutex);
+					PendingPrompt.Reset();
+					PendingAccessMode.Reset();
+				}
+
+				State.store(ECortexSessionState::Inactive);
+				BroadcastStateChange(ECortexSessionState::Spawning, ECortexSessionState::Inactive, TEXT("Failed to resume provider"));
+
+				FCortexTurnResult Result;
+				Result.bIsError = true;
+				Result.ResultText = TEXT("Failed to resume provider before the queued follow-up prompt could be processed.");
+				Result.SessionId = Config.SessionId;
+				OnTurnComplete.Broadcast(Result);
+			}
+			return;
+		}
+
+		State.store(ECortexSessionState::Idle);
+		BroadcastStateChange(CurrentState, ECortexSessionState::Idle, Reason);
+		UE_LOG(LogCortexFrontend, Log, TEXT("Provider CLI exited after a resumable turn; preserving idle state"));
+		return;
+	}
+
+	State.store(ECortexSessionState::Inactive);
+	BroadcastStateChange(CurrentState, ECortexSessionState::Inactive, Reason);
+
+	if (bHadActivePrompt)
 	{
 		FCortexTurnResult Result;
 		Result.bIsError = true;
@@ -521,15 +597,6 @@ void FCortexCliSession::HandleProcessExited(const FString& Reason)
 		Result.SessionId = Config.SessionId;
 		OnTurnComplete.Broadcast(Result);
 	}
-
-	CleanupProcess();
-	if (bKeepResumableConversation)
-	{
-		UE_LOG(LogCortexFrontend, Log, TEXT("Provider CLI exited after a resumable turn; preserving idle state"));
-		return;
-	}
-	BroadcastStateChange(CurrentState, ECortexSessionState::Inactive, Reason);
-	State.store(ECortexSessionState::Inactive);
 }
 
 FString FCortexCliSession::BuildLaunchCommandLine(bool bResumeSession, ECortexAccessMode AccessMode) const
@@ -803,7 +870,13 @@ void FCortexCliSession::HandlePromptWriteCompleted()
 bool FCortexCliSession::ShouldCloseStdinAfterPromptWrite() const
 {
 	return PinnedProvider != nullptr &&
-		PinnedProvider->GetTransportMode() == ECortexCliTransportMode::PerTurnExec;
+		PinnedProvider->GetTransportMode() == ECortexCliTransportMode::PerTurnExec &&
+		UsesTurnBoundLifetimePolicy();
+}
+
+bool FCortexCliSession::UsesTurnBoundLifetimePolicy() const
+{
+	return ResolvedLifetimePolicy == ECortexSessionLifetimePolicy::TurnBound;
 }
 
 ECortexAccessMode FCortexCliSession::GetPendingAccessMode() const
@@ -1008,6 +1081,16 @@ void FCortexCliSession::CompleteSpawnForTests(ECortexAccessMode AccessMode)
 {
 	LastSpawnedAccessMode = AccessMode;
 	State.store(ECortexSessionState::Idle);
+
+	bool bHasPendingPrompt = false;
+	{
+		FScopeLock Lock(&PromptMutex);
+		bHasPendingPrompt = PendingPrompt.IsSet();
+	}
+	if (bHasPendingPrompt)
+	{
+		TransitionState(ECortexSessionState::Idle, ECortexSessionState::Processing, TEXT("Draining queued prompt (test spawn)"));
+	}
 }
 #endif
 

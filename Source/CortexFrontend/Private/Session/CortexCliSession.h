@@ -62,6 +62,7 @@ public:
 	FString GetAuthCommandText() const;
 	int64 GetContextLimitTokens() const;
 	ECortexAccessMode GetPinnedAccessMode() const { return Config.LaunchOptions.AccessMode; }
+	ECortexSessionLifetimePolicy GetLifetimePolicy() const { return ResolvedLifetimePolicy; }
 	FString GetModelId() const { return ModelId; }
 	FString GetProvider() const { return Provider; }
 
@@ -90,11 +91,18 @@ private:
 	friend class FCortexCliSessionCodexTurnExitPreservesResumableIdleStateTest;
 	friend class FCortexCliSessionCodexErrorWithoutThreadDoesNotResumeTest;
 	friend class FCortexCliSessionProcessExitCompletesErrorTurnTest;
+	friend class FCortexCliSessionProcessExitDuringSpawnDoesNotCompleteTurnTest;
 	friend class FCortexCliSessionSendPromptDoesNotMutatePinnedAccessModeTest;
 	friend class FCortexCliSessionCodexOverridePathRecomputesResolvedOptionsTest;
 	friend class FCortexCliSessionLightweightConfigStaysMcpFreeTest;
 	friend class FCortexCliSessionPerTurnExecFirstTurnDoesNotResumeWithoutConversationTest;
 	friend class FCortexCliSessionCodexClosesStdinAfterPromptWriteTest;
+	friend class FCortexCliSessionCodexChatKeepsStdinOpenAfterPromptWriteTest;
+	friend class FCortexCliSessionCodexTurnBoundTaskClosesStdinAfterPromptWriteTest;
+	friend class FCortexCliSessionCodexChatReusesLiveSessionAcrossPromptsTest;
+	friend class FCortexCliSessionCodexChatUnexpectedExitDuringTurnFailsTest;
+	friend class FCortexCliSessionTurnBoundFollowUpQueuesUntilProcessExitTest;
+	friend class FCortexCliSessionTurnBoundFollowUpRespawnFailureCompletesQueuedTurnTest;
 	friend class FCortexCliSessionQueuePromptWhileSpawningTest;
 	friend class FCortexCliSessionTurnCompleteReturnsIdleTest;
 	friend class FCortexCliSessionCancelTransitionsTest;
@@ -127,6 +135,7 @@ private:
 	FString ConsumePendingPromptEnvelope();
 	void HandlePromptWriteCompleted();
 	bool ShouldCloseStdinAfterPromptWrite() const;
+	bool UsesTurnBoundLifetimePolicy() const;
 	ECortexAccessMode GetPendingAccessMode() const;
 	bool TransitionState(ECortexSessionState ExpectedState, ECortexSessionState NewState, const FString& Reason = FString());
 	void BroadcastStateChange(ECortexSessionState PreviousState, ECortexSessionState NewState, const FString& Reason);
@@ -160,6 +169,7 @@ private:
 
 	FCortexSessionConfig Config;
 	const ICortexCliProvider* PinnedProvider = nullptr;
+	ECortexSessionLifetimePolicy ResolvedLifetimePolicy = ECortexSessionLifetimePolicy::Persistent;
 	FCortexCliInfo CachedCliInfo;
 	bool bHasProviderConversationId = false;
 	bool bHasResumableProviderConversation = false;

@@ -216,6 +216,7 @@ FCortexSessionConfig FCortexFrontendModule::CreateDefaultSessionConfig()
     FCortexSessionConfig Config;
     Config.SessionId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
     Config.WorkingDirectory = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+    Config.LifetimePolicy = ECortexSessionLifetimePolicy::Persistent;
 
     FCortexFrontendSettings& Settings = FCortexFrontendSettings::Get();
     const FCortexResolvedSessionOptions ResolvedOptions = Settings.ResolveForActiveProvider();
@@ -250,28 +251,20 @@ FCortexSessionConfig FCortexFrontendModule::CreateLightweightSessionConfig()
     Config.LaunchOptions.bAutoContext = false;
     Config.LaunchOptions.CustomDirective.Empty();
     Config.bConversionMode = true;
+    Config.LifetimePolicy = ECortexSessionLifetimePolicy::TurnBound;
     return Config;
 }
 
 TWeakPtr<FCortexCliSession> FCortexFrontendModule::GetOrCreateSession()
 {
-    const FCortexSessionConfig DesiredConfig = CreateDefaultSessionConfig();
-
     if (MainChatSession.IsValid())
     {
         const TSharedPtr<FCortexCliSession>& ExistingSession = MainChatSession;
-        if (ExistingSession->GetProviderId() == DesiredConfig.ProviderId)
-        {
-            RegisterSession(ExistingSession);
-            return ExistingSession;
-        }
-
-        ExistingSession->Shutdown();
-        Sessions.Remove(ExistingSession);
-        MainChatSession.Reset();
+        RegisterSession(ExistingSession);
+        return ExistingSession;
     }
 
-    TSharedPtr<FCortexCliSession> Session = MakeShared<FCortexCliSession>(DesiredConfig);
+    TSharedPtr<FCortexCliSession> Session = MakeShared<FCortexCliSession>(CreateDefaultSessionConfig());
     MainChatSession = Session;
     RegisterSession(Session);
     return Session;
@@ -444,6 +437,21 @@ void FCortexFrontendModule::UnregisterSession(TSharedPtr<FCortexCliSession> Sess
     {
         MainChatSession.Reset();
     }
+}
+
+void FCortexFrontendModule::ReleaseMainChatSession(TSharedPtr<FCortexCliSession> Session)
+{
+    if (!Session.IsValid() || MainChatSession != Session)
+    {
+        return;
+    }
+
+    if (Session->GetState() != ECortexSessionState::Terminated)
+    {
+        Session->Shutdown();
+    }
+
+    UnregisterSession(Session);
 }
 
 void FCortexFrontendModule::RegisterBuildProcess(TSharedPtr<FMonitoredProcess> Process)

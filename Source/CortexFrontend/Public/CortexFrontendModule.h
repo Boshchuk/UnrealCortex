@@ -35,6 +35,9 @@ public:
     /** Unregister a conversion session. */
     void UnregisterSession(TSharedPtr<FCortexCliSession> Session);
 
+    /** Release the main workbench chat session when the owning UI surface closes. */
+    void ReleaseMainChatSession(TSharedPtr<FCortexCliSession> Session);
+
     /** Register a build process for PreExit cleanup. */
     void RegisterBuildProcess(TSharedPtr<FMonitoredProcess> Process);
 

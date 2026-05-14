@@ -504,6 +504,7 @@ void SCortexQATab::OnGenerateClicked(const FString& Prompt)
             "Save the generated scenario to Saved/CortexQA/Recordings/ using the session JSON format."
         );
         Config.bConversionMode = false;
+        Config.LifetimePolicy = ECortexSessionLifetimePolicy::TurnBound;
 
         bool bUsedTestOverride = false;
         if (!CreateAndConnectQASession(Config, QACliSession, bUsedTestOverride))
