@@ -1732,7 +1732,7 @@ FCortexCommandResult FCortexBPAnalysisOps::AnalyzeForMigration(const TSharedPtr<
 			TSharedPtr<FJsonObject> ParamsObj = MakeShared<FJsonObject>();
 			ParamsObj->SetStringField(TEXT("asset_path"), AssetPath);
 			TSharedPtr<FJsonObject> PropertiesObj = MakeShared<FJsonObject>();
-			PropertiesObj->SetStringField(NodeName, NodeName);
+			PropertiesObj->SetStringField(NodeName, FString::Printf(TEXT("%s@self"), *NodeName));
 			ParamsObj->SetObjectField(TEXT("properties"), PropertiesObj);
 			CollisionObj->SetObjectField(TEXT("recommended_params"), ParamsObj);
 		}

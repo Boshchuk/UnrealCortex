@@ -1,6 +1,7 @@
 #include "Misc/AutomationTest.h"
 #include "Operations/CortexBPCleanupOps.h"
 #include "CortexBPTestLiftActor.h"
+#include "CortexEditorUtils.h"
 #include "CortexTypes.h"
 #include "Components/TimelineComponent.h"
 #include "EdGraph/EdGraph.h"
@@ -59,12 +60,52 @@ namespace
 		}
 	};
 
+	struct FScopedRenameWritableMountedRoot
+	{
+		FString Root;
+		FString PhysicalDir;
+
+		FScopedRenameWritableMountedRoot()
+		{
+			Root = FString::Printf(
+				TEXT("/CortexRename%s"),
+				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
+			PhysicalDir = FPaths::ProjectSavedDir() / TEXT("CortexRenameBlueprintTests") / Root.RightChop(1);
+			IFileManager::Get().MakeDirectory(*PhysicalDir, true);
+			FPackageName::RegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
+			FCortexEditorUtils::AddTestWritableContentRoot(Root);
+		}
+
+		~FScopedRenameWritableMountedRoot()
+		{
+			for (TObjectIterator<UPackage> It; It; ++It)
+			{
+				UPackage* Package = *It;
+				if (Package && RenameIsPackageUnderRoot(Package->GetName(), Root))
+				{
+					Package->MarkAsGarbage();
+				}
+			}
+			CollectGarbage(RF_NoFlags);
+			FCortexEditorUtils::RemoveTestWritableContentRoot(Root);
+			FPackageName::UnRegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
+			IFileManager::Get().DeleteDirectory(*PhysicalDir, false, true);
+		}
+	};
+
+	const FString& RenameWritableRoot()
+	{
+		static FScopedRenameWritableMountedRoot MountedRoot;
+		return MountedRoot.Root;
+	}
+
 	UBlueprint* RenameCreateLiftBP(const TCHAR* Name, UClass* ParentClass = nullptr)
 	{
 		return FKismetEditorUtilities::CreateBlueprint(
 			ParentClass ? ParentClass : ACortexBPTestLiftActor::StaticClass(),
 			CreatePackage(*FString::Printf(
-				TEXT("/Game/Temp/%s_%s"),
+				TEXT("%s/%s_%s"),
+				*RenameWritableRoot(),
 				Name,
 				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8))),
 			FName(Name),
@@ -779,4 +820,47 @@ bool FCortexBPRenameSCSComponentUndoTest::RunTest(const FString& Parameters)
 	GEditor->ResetTransaction(FText::FromString(TEXT("Cortex RenameSCS Undo Test Cleanup")));
 	BP->MarkAsGarbage();
 	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexBPRenameSCSComponentCompileFailureRollbackTest,
+	"Cortex.Blueprint.Cleanup.RenameSCSComponent.CompileFailureRollback",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexBPRenameSCSComponentCompileFailureRollbackTest::RunTest(const FString& Parameters)
+{
+#if WITH_DEV_AUTOMATION_TESTS
+	UBlueprint* BP = RenameCreateLiftBP(TEXT("BP_RenameSCS_CompileFailure"));
+	TestNotNull(TEXT("BP created"), BP);
+	if (!BP)
+	{
+		return false;
+	}
+
+	TestNotNull(TEXT("OldComp added"), RenameAddSCSNode(BP, UCortexBPTestSubobjComponent::StaticClass(), TEXT("OldComp")));
+
+	FCortexBPCleanupOps::SetRenameSCSComponentPostCompileTestHook(
+		[](UBlueprint* HookBP)
+		{
+			if (HookBP)
+			{
+				HookBP->Status = BS_Error;
+			}
+		});
+
+	const FCortexCommandResult Result = FCortexBPCleanupOps::RenameSCSComponent(
+		RenameMakeParams(BP, TEXT("OldComp"), TEXT("NewComp"), true));
+	FCortexBPCleanupOps::SetRenameSCSComponentPostCompileTestHook(nullptr);
+
+	TestFalse(TEXT("Compile failure returns an error"), Result.bSuccess);
+	TestEqual(TEXT("Error code is CompileFailed"), Result.ErrorCode, CortexErrorCodes::CompileFailed);
+	TestTrue(TEXT("OldComp restored after compile failure"), RenameHasSCSNode(BP, TEXT("OldComp")));
+	TestFalse(TEXT("NewComp rolled back after compile failure"), RenameHasSCSNode(BP, TEXT("NewComp")));
+
+	BP->MarkAsGarbage();
+	return true;
+#else
+	AddInfo(TEXT("WITH_DEV_AUTOMATION_TESTS disabled; skipping compile failure rollback test."));
+	return true;
+#endif
 }

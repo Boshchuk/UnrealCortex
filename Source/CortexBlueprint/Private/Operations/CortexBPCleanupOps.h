@@ -37,5 +37,7 @@ public:
 
 #if WITH_DEV_AUTOMATION_TESTS
 	static void SetRemoveSCSComponentMidflightTestHook(TFunction<void(class USCS_Node*, class UBlueprint*)> InHook);
+	static void SetRemoveSCSComponentPostCompileTestHook(TFunction<void(class UBlueprint*)> InHook);
+	static void SetRenameSCSComponentPostCompileTestHook(TFunction<void(class UBlueprint*)> InHook);
 #endif
 };

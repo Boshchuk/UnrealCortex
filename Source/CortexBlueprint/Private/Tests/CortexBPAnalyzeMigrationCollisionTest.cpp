@@ -168,7 +168,8 @@ bool FCortexBPAnalyzeMigrationCollisionAdoptableUPropertyTest::RunTest(const FSt
 				FString EchoValue;
 				TestTrue(TEXT("properties contains OpenSeq"),
 					(*PropertiesObj)->TryGetStringField(TEXT("OpenSeq"), EchoValue));
-				TestEqual(TEXT("bare-name value echoes OpenSeq"), EchoValue, FString(TEXT("OpenSeq")));
+				TestEqual(TEXT("adopt value uses explicit self qualifier"),
+					EchoValue, FString(TEXT("OpenSeq@self")));
 			}
 		}
 	}

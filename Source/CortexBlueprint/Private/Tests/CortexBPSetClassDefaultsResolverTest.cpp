@@ -250,6 +250,31 @@ bool FCortexBPSetClassDefaultsResolverAmbiguousShadowTest::RunTest(const FString
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexBPSetClassDefaultsResolverExplicitSelfQualifierTest,
+	"Cortex.Blueprint.ClassDefaults.Resolver.ExplicitSelfQualifier",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexBPSetClassDefaultsResolverExplicitSelfQualifierTest::RunTest(const FString& Parameters)
+{
+	UBlueprint* BP = ResolverCreateLiftBlueprint(TEXT("BP_SetDefaultsResolverSelfQualifier"));
+	TestNotNull(TEXT("Blueprint created"), BP);
+	if (!BP)
+	{
+		return false;
+	}
+
+	TestNotNull(TEXT("OpenSeq SCS added"),
+		ResolverAddSCSNode(BP, UCortexBPTestSubobjComponent::StaticClass(), TEXT("OpenSeq"), false));
+
+	const FCortexCommandResult Result = FCortexBPClassDefaultsOps::SetClassDefaults(
+		ResolverMakeSetParams(BP, TEXT("OpenSeq"), TEXT("OpenSeq@self")));
+
+	TestTrue(TEXT("Explicit @self qualifier resolves the owned SCS node"), Result.bSuccess);
+	BP->MarkAsGarbage();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexBPSetClassDefaultsResolverTypeMismatchCloseMatchTest,
 	"Cortex.Blueprint.ClassDefaults.Resolver.TypeMismatchCloseMatch",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
