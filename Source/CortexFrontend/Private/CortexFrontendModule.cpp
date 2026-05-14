@@ -5,6 +5,7 @@
 #include "Analysis/CortexAnalysisContext.h"
 #include "Conversion/CortexConversionContext.h"
 #include "CortexCoreModule.h"
+#include "CortexFrontendShutdown.h"
 #include "CortexFrontendProviderSettings.h"
 #include "CortexAnalysisTypes.h"
 #include "CortexConversionTypes.h"
@@ -12,6 +13,7 @@
 #include "Framework/Docking/TabManager.h"
 #include "IToolMenusModule.h"
 #include "ISettingsModule.h"
+#include "CoreGlobals.h"
 #include "Misc/CoreDelegates.h"
 #include "Misc/MonitoredProcess.h"
 #include "Modules/ModuleManager.h"
@@ -19,6 +21,7 @@
 #include "Session/CortexCliSession.h"
 #include "Styling/AppStyle.h"
 #include "ToolMenus.h"
+#include "ToolMenuOwner.h"
 #include "Widgets/SCortexWorkbench.h"
 #include "Widgets/SCortexGenPanel.h"
 #include "Widgets/SCortexConversionTab.h"
@@ -69,6 +72,7 @@ void FCortexFrontendModule::StartupModule()
     StartupCallbackHandle = UToolMenus::RegisterStartupCallback(
         FSimpleMulticastDelegate::FDelegate::CreateLambda([this]()
         {
+            FToolMenuOwnerScoped OwnerScoped(this);
             UToolMenu* Menu = UToolMenus::Get()->ExtendMenu(TEXT("LevelEditor.MainMenu.Tools"));
             FToolMenuSection& Section = Menu->FindOrAddSection(TEXT("Cortex"));
             Section.AddEntry(FToolMenuEntry::InitMenuEntry(
@@ -98,6 +102,7 @@ void FCortexFrontendModule::StartupModule()
     StatusBarCallbackHandle = UToolMenus::RegisterStartupCallback(
         FSimpleMulticastDelegate::FDelegate::CreateLambda([this]()
         {
+            FToolMenuOwnerScoped OwnerScoped(this);
             UToolMenu* StatusBar = UToolMenus::Get()->ExtendMenu(TEXT("LevelEditor.StatusBar.ToolBar"));
             FToolMenuSection& Section = StatusBar->FindOrAddSection(TEXT("Cortex"),
                 FText::GetEmpty(),
@@ -156,10 +161,12 @@ void FCortexFrontendModule::ShutdownModule()
     {
         UToolMenus::UnRegisterStartupCallback(StartupCallbackHandle);
         UToolMenus::UnRegisterStartupCallback(StatusBarCallbackHandle);
-        UToolMenu* StatusBar = UToolMenus::Get()->FindMenu(TEXT("LevelEditor.StatusBar.ToolBar"));
-        if (StatusBar)
+
+        if (UE::CortexFrontend::ShouldTraverseToolMenusDuringShutdown(
+            IsEngineExitRequested() || bHasHandledPreExit,
+            true))
         {
-            StatusBar->RemoveSection(TEXT("Cortex"));
+            UToolMenus::UnregisterOwner(this);
         }
     }
 
@@ -511,6 +518,7 @@ void FCortexFrontendModule::ReleaseSessions()
 
 void FCortexFrontendModule::HandlePreExit()
 {
+    bHasHandledPreExit = true;
     UE_LOG(LogCortexFrontend, Log, TEXT("PreExit: releasing sessions"));
     ReleaseSessions();
 }
