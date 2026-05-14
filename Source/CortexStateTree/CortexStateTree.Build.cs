@@ -22,6 +22,7 @@ public class CortexStateTree : ModuleRules
 			"AssetTools",
 			"UnrealEd",
 			"GameplayTags",
+			"GameplayStateTreeModule",
 			"StateTreeModule",
 			"StateTreeEditorModule",
 		});

@@ -187,6 +187,30 @@ bool FCortexStateTreeCreateRejectsInvalidSchemaClassesTest::RunTest(const FStrin
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexStateTreeCreateAcceptsGameplayComponentSchemaTest,
+	"Cortex.StateTree.Asset.Create.AcceptsGameplayComponentSchema",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexStateTreeCreateAcceptsGameplayComponentSchemaTest::RunTest(const FString& Parameters)
+{
+	FCortexStateTreeCommandHandler Handler;
+	const FString AssetPath = CortexStateTreeTest::MakeAssetPath(TEXT("ST_GameplayComponentSchema"));
+
+	TSharedPtr<FJsonObject> CreateParams = CortexStateTreeTest::Params();
+	CreateParams->SetStringField(TEXT("asset_path"), AssetPath);
+	CreateParams->SetStringField(TEXT("schema_class"), TEXT("/Script/GameplayStateTreeModule.StateTreeComponentSchema"));
+	CreateParams->SetBoolField(TEXT("save"), false);
+
+	const FCortexCommandResult Create = Handler.Execute(TEXT("create_asset"), CreateParams);
+	TestTrue(TEXT("create with gameplay component schema succeeds"), Create.bSuccess);
+	TestNotNull(TEXT("created StateTree loads"), LoadObject<UStateTree>(nullptr, *AssetPath));
+
+	CortexStateTreeTest::DeleteIfLoaded(AssetPath);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexStateTreeAssetCrudTest,
 	"Cortex.StateTree.Asset.Crud",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter

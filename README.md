@@ -12,7 +12,7 @@
 
 Your AI assistant can already write code. UnrealCortex lets it work *inside* the editor — querying DataTables, editing Blueprint graphs, building UMG hierarchies, placing actors, converting Blueprints to C++, analyzing Blueprints for bugs and performance issues, generating 3D assets, and even playing and testing your game autonomously. No copy-pasting, no file exports. Changes appear live with full undo support.
 
-> **Status:** v0.1.0 Beta — All 13 modules shipped and tested.
+> **Status:** v0.1.9 Beta — All 13 modules shipped and tested.
 
 ---
 
@@ -329,7 +329,7 @@ Choose one of the two installation paths below.
 #### Option A — Automatic Setup with Cortex Toolkit *(Claude Code, Codex, Cursor)*
 
 > [!NOTE]
-> **[Cortex Toolkit](https://github.com/etelyatn/cortex-toolkit)** adds 26 domain-specific skills, 14 specialist agents, and project memory on top of UnrealCortex. It handles MCP configuration, editor auto-launch, and context injection automatically.
+> **[Cortex Toolkit](https://github.com/etelyatn/cortex-toolkit)** adds domain-specific skills, specialist agents, and project memory on top of UnrealCortex. It handles MCP configuration, editor auto-launch, and context injection automatically.
 
 **Install the toolkit:**
 

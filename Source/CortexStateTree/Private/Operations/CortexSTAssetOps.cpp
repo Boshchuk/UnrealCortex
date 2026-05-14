@@ -68,13 +68,33 @@ UClass* ResolveSchemaClass(const FString& SchemaClassPath)
 		return LooseMatch;
 	}
 
+	if (UClass* LoadedClass = StaticLoadClass(UStateTreeSchema::StaticClass(), nullptr, *SchemaClassPath))
+	{
+		return LoadedClass;
+	}
+
 	const FString ObjectPath = FPackageName::ExportTextPathToObjectPath(SchemaClassPath);
-	if (!ObjectPath.Contains(TEXT(".")))
+	if (ObjectPath.IsEmpty() || !ObjectPath.Contains(TEXT(".")))
 	{
 		return nullptr;
 	}
 
+	if (UClass* FoundObjectPathClass = FindObject<UClass>(nullptr, *ObjectPath))
+	{
+		return FoundObjectPathClass;
+	}
+
+	if (UClass* LoadedObjectPathClass = StaticLoadClass(UStateTreeSchema::StaticClass(), nullptr, *ObjectPath))
+	{
+		return LoadedObjectPathClass;
+	}
+
 	const FString PackageName = FPackageName::ObjectPathToPackageName(ObjectPath);
+	if (PackageName.StartsWith(TEXT("/Script/")))
+	{
+		return LoadObject<UClass>(nullptr, *ObjectPath);
+	}
+
 	if (PackageName.IsEmpty()
 		|| !FPackageName::IsValidLongPackageName(PackageName, true)
 		|| (!FindPackage(nullptr, *PackageName) && !FPackageName::DoesPackageExist(PackageName)))
