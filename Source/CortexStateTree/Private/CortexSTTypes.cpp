@@ -14,6 +14,12 @@
 
 namespace
 {
+struct FCortexSTValidationSummary
+{
+	TArray<FString> Errors;
+	TArray<FString> Warnings;
+};
+
 FString LexToStringStateType(const EStateTreeStateType StateType)
 {
 	const UEnum* Enum = StaticEnum<EStateTreeStateType>();
@@ -74,6 +80,116 @@ void AppendNodeArray(
 		NodeObject->SetBoolField(TEXT("enabled"), true);
 		OutNodes.Add(MakeShared<FJsonValueObject>(NodeObject));
 	}
+}
+
+FCortexSTValidationSummary BuildValidationSummary(UStateTree* StateTree)
+{
+	FCortexSTValidationSummary Summary;
+	if (StateTree == nullptr)
+	{
+		Summary.Errors.Add(TEXT("StateTree asset is null"));
+		return Summary;
+	}
+
+	UStateTreeEditorData* EditorData = Cast<UStateTreeEditorData>(StateTree->EditorData);
+	if (EditorData == nullptr)
+	{
+		Summary.Errors.Add(TEXT("StateTree has no editor data"));
+		return Summary;
+	}
+
+	UStateTreeState* RootState = EditorData->SubTrees.Num() > 0 ? EditorData->SubTrees[0] : nullptr;
+	if (RootState == nullptr)
+	{
+		Summary.Errors.Add(TEXT("StateTree has no root state"));
+		return Summary;
+	}
+
+	TArray<FCortexSTStateRef> States;
+	CortexST::CollectStates(RootState, States);
+	if (States.Num() == 0)
+	{
+		Summary.Errors.Add(TEXT("StateTree has no root state"));
+		return Summary;
+	}
+
+	TSet<FString> SeenIds;
+	TSet<FString> DuplicateIds;
+	TMap<FString, int32> PathCounts;
+
+	for (const FCortexSTStateRef& StateRef : States)
+	{
+		if (StateRef.State == nullptr)
+		{
+			Summary.Errors.Add(TEXT("StateTree contains a null state reference"));
+			continue;
+		}
+
+		if (!StateRef.State->ID.IsValid())
+		{
+			Summary.Errors.Add(FString::Printf(
+				TEXT("State has invalid ID at path %s"),
+				StateRef.Path.IsEmpty() ? TEXT("<unknown>") : *StateRef.Path));
+		}
+
+		if (SeenIds.Contains(StateRef.Id))
+		{
+			DuplicateIds.Add(StateRef.Id);
+		}
+		SeenIds.Add(StateRef.Id);
+
+		if (StateRef.Path.IsEmpty())
+		{
+			Summary.Errors.Add(FString::Printf(TEXT("State %s has empty path"), *StateRef.Id));
+		}
+		else
+		{
+			int32& Count = PathCounts.FindOrAdd(StateRef.Path);
+			++Count;
+		}
+
+		for (int32 TransitionIndex = 0; TransitionIndex < StateRef.State->Transitions.Num(); ++TransitionIndex)
+		{
+			const FStateTreeTransition& Transition = StateRef.State->Transitions[TransitionIndex];
+			if (Transition.State.LinkType != EStateTreeTransitionType::GotoState)
+			{
+				continue;
+			}
+
+			if (!Transition.State.ID.IsValid())
+			{
+				Summary.Errors.Add(FString::Printf(
+					TEXT("Transition %d in state %s has invalid target ID"),
+					TransitionIndex,
+					*StateRef.Path));
+				continue;
+			}
+
+			if (EditorData->GetStateByID(Transition.State.ID) == nullptr)
+			{
+				Summary.Errors.Add(FString::Printf(
+					TEXT("Transition %d in state %s targets missing state %s"),
+					TransitionIndex,
+					*StateRef.Path,
+					*Transition.State.ID.ToString(EGuidFormats::DigitsWithHyphens)));
+			}
+		}
+	}
+
+	for (const FString& DuplicateId : DuplicateIds)
+	{
+		Summary.Errors.Add(FString::Printf(TEXT("Duplicate state ID: %s"), *DuplicateId));
+	}
+
+	for (const TPair<FString, int32>& PathEntry : PathCounts)
+	{
+		if (PathEntry.Value > 1)
+		{
+			Summary.Warnings.Add(FString::Printf(TEXT("Ambiguous state path: %s"), *PathEntry.Key));
+		}
+	}
+
+	return Summary;
 }
 }
 
@@ -266,6 +382,12 @@ TSharedPtr<FJsonObject> MakeValidationPayload(bool bValid, const TArray<FString>
 	Validation->SetArrayField(TEXT("warnings"), WarningValues);
 
 	return Validation;
+}
+
+TSharedPtr<FJsonObject> BuildValidationPayload(UStateTree* StateTree)
+{
+	const FCortexSTValidationSummary Summary = BuildValidationSummary(StateTree);
+	return MakeValidationPayload(Summary.Errors.Num() == 0, Summary.Errors, Summary.Warnings);
 }
 
 void CollectStates(UStateTreeState* Root, TArray<FCortexSTStateRef>& OutStates)

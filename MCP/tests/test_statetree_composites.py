@@ -94,7 +94,7 @@ def test_statetree_compose_create_flow_translates_commands():
             transitions=[
                 {
                     "source_state_path": "Root",
-                    "target_state_path": "Root.Idle",
+                    "target_state_path": "Root/Idle",
                     "trigger": "OnCompleted",
                 }
             ],
@@ -139,6 +139,150 @@ def test_statetree_compose_update_requires_expected_fingerprint():
     assert result["success"] is False
     assert "expected_fingerprint" in result["error"]
     connection.send_command.assert_not_called()
+
+
+def test_statetree_compose_update_preflights_before_mutation():
+    """Update flow should inspect first and stop before writes when preflight fails."""
+    connection = MagicMock()
+    connection.send_command.side_effect = [
+        {
+            "success": True,
+            "data": {
+                "asset_path": "/Game/StateTrees/ST_Test",
+                "states": [
+                    {"id": "root-id", "path": "Root", "children": []},
+                    {"id": "idle-id", "path": "Root/Idle", "children": []},
+                ],
+                "fingerprint": {"revision": 7},
+            },
+        },
+    ]
+
+    tool = _extract_tool(connection)
+    result = json.loads(
+        tool(
+            mode="update",
+            asset_path="/Game/StateTrees/ST_Test",
+            expected_fingerprint={"revision": 7},
+            transitions=[
+                {
+                    "source_state_path": "Root",
+                    "target_state_path": "Root/Missing",
+                    "trigger": "OnCompleted",
+                }
+            ],
+        )
+    )
+
+    assert result["success"] is False
+    assert "Root/Missing" in result["error"]
+    calls = connection.send_command.call_args_list
+    assert [call.args[0] for call in calls] == ["statetree.dump_tree"]
+
+
+def test_statetree_compose_rejects_unsupported_operations():
+    """Explicit operations should be limited to supported structure mutations."""
+    connection = MagicMock()
+    tool = _extract_tool(connection)
+
+    result = json.loads(
+        tool(
+            mode="update",
+            asset_path="/Game/StateTrees/ST_Test",
+            expected_fingerprint={"revision": 3},
+            operations=[{"command": "delete_asset"}],
+        )
+    )
+
+    assert result["success"] is False
+    assert "Unsupported StateTree compose command" in result["error"]
+    connection.send_command.assert_not_called()
+
+
+def test_statetree_compose_processes_removals_before_additions():
+    """Replacement updates should remove old structure before adding the replacement."""
+    connection = MagicMock()
+    connection.send_command.side_effect = [
+        {
+            "success": True,
+            "data": {
+                "asset_path": "/Game/StateTrees/ST_Test",
+                "states": [
+                    {"id": "root-id", "path": "Root", "children": ["idle-id"]},
+                    {"id": "idle-id", "path": "Root/Idle", "children": []},
+                ],
+                "fingerprint": {"revision": 4},
+            },
+        },
+        {"success": True, "data": {"fingerprint": {"revision": 5}}},
+        {"success": True, "data": {"state_id": "idle-new", "fingerprint": {"revision": 6}}},
+        {"success": True, "data": {"validated": True, "fingerprint": {"revision": 7}}},
+        {"success": True, "data": {"compiled": True, "fingerprint": {"revision": 8}}},
+    ]
+
+    tool = _extract_tool(connection)
+    result = json.loads(
+        tool(
+            mode="update",
+            asset_path="/Game/StateTrees/ST_Test",
+            expected_fingerprint={"revision": 4},
+            removals={"states": [{"state_path": "Root/Idle"}]},
+            states=[{"name": "Idle", "parent_state_path": "Root"}],
+        )
+    )
+
+    assert result["success"] is True
+    calls = connection.send_command.call_args_list
+    assert [call.args[0] for call in calls] == [
+        "statetree.dump_tree",
+        "statetree.remove_state",
+        "statetree.add_state",
+        "statetree.validate_asset",
+        "statetree.compile",
+    ]
+
+
+def test_statetree_compose_honors_validate_compile_and_save_flags():
+    """Compose should expose workflow controls instead of always validating and compiling."""
+    connection = MagicMock()
+    connection.send_command.side_effect = [
+        {
+            "success": True,
+            "data": {
+                "asset_path": "/Game/StateTrees/ST_Test",
+                "states": [{"id": "root-id", "path": "Root", "children": []}],
+                "fingerprint": {"revision": 10},
+            },
+        },
+        {
+            "success": True,
+            "data": {
+                "state_id": "idle-id",
+                "fingerprint": {"revision": 11},
+            },
+        },
+    ]
+
+    tool = _extract_tool(connection)
+    result = json.loads(
+        tool(
+            mode="update",
+            asset_path="/Game/StateTrees/ST_Test",
+            expected_fingerprint={"revision": 10},
+            validate=False,
+            compile=False,
+            save=True,
+            states=[{"name": "Idle", "parent_state_path": "Root"}],
+        )
+    )
+
+    assert result["success"] is True
+    calls = connection.send_command.call_args_list
+    assert [call.args[0] for call in calls] == [
+        "statetree.dump_tree",
+        "statetree.add_state",
+    ]
+    assert calls[1].args[1]["save"] is True
 
 
 def test_statetree_compose_create_failure_attempts_cleanup():

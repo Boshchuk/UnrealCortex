@@ -42,7 +42,7 @@ FCortexCommandResult FCortexSTInspectOps::DumpTree(const TSharedPtr<FJsonObject>
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetStringField(TEXT("asset_path"), Context.AssetPath);
 	Data->SetArrayField(TEXT("states"), SerializedStates);
-	Data->SetObjectField(TEXT("validation"), CortexST::MakeValidationPayload(true, {}, {}));
+	Data->SetObjectField(TEXT("validation"), CortexST::BuildValidationPayload(Context.StateTree));
 	Data->SetObjectField(TEXT("fingerprint"), CortexST::MakeFingerprint(Context.StateTree));
 	return FCortexCommandRouter::Success(Data);
 }
@@ -70,6 +70,7 @@ FCortexCommandResult FCortexSTInspectOps::GetState(const TSharedPtr<FJsonObject>
 
 	TSharedPtr<FJsonObject> Data = CortexST::SerializeState(StateRef, true, false);
 	Data->SetStringField(TEXT("asset_path"), Context.AssetPath);
+	Data->SetObjectField(TEXT("validation"), CortexST::BuildValidationPayload(Context.StateTree));
 	Data->SetObjectField(TEXT("fingerprint"), CortexST::MakeFingerprint(Context.StateTree));
 	return FCortexCommandRouter::Success(Data);
 }

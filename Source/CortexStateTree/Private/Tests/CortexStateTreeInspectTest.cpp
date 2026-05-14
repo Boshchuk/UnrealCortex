@@ -59,6 +59,14 @@ bool FCortexStateTreeDumpTreeTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
+	UStateTreeState* RootState = GetRootState(AssetPath);
+	TestNotNull(TEXT("root state loads"), RootState);
+	if (RootState != nullptr)
+	{
+		RootState->AddChildState(TEXT("Duplicate"));
+		RootState->AddChildState(TEXT("Duplicate"));
+	}
+
 	TSharedPtr<FJsonObject> DumpParams = CortexStateTreeTest::Params();
 	DumpParams->SetStringField(TEXT("asset_path"), AssetPath);
 	DumpParams->SetBoolField(TEXT("include_transitions"), true);
@@ -79,6 +87,33 @@ bool FCortexStateTreeDumpTreeTest::RunTest(const FString& Parameters)
 			DumpResult.Data->HasTypedField<EJson::Object>(TEXT("validation")));
 		TestTrue(TEXT("dump includes fingerprint object"),
 			DumpResult.Data->HasTypedField<EJson::Object>(TEXT("fingerprint")));
+		const TSharedPtr<FJsonObject>* Validation = nullptr;
+		TestTrue(TEXT("dump returns validation payload"),
+			DumpResult.Data->TryGetObjectField(TEXT("validation"), Validation) && Validation != nullptr && Validation->IsValid());
+		if (Validation != nullptr && Validation->IsValid())
+		{
+			bool bValid = true;
+			TestTrue(TEXT("dump returns validation.valid"), (*Validation)->TryGetBoolField(TEXT("valid"), bValid));
+			TestTrue(TEXT("duplicate state paths remain structurally valid"), bValid);
+
+			const TArray<TSharedPtr<FJsonValue>>* Warnings = nullptr;
+			TestTrue(TEXT("dump returns validation warnings"),
+				(*Validation)->TryGetArrayField(TEXT("warnings"), Warnings) && Warnings != nullptr);
+			if (Warnings != nullptr)
+			{
+				bool bFoundAmbiguousPathWarning = false;
+				for (const TSharedPtr<FJsonValue>& WarningValue : *Warnings)
+				{
+					if (WarningValue.IsValid() && WarningValue->AsString().Contains(TEXT("Ambiguous state path: Root/Duplicate")))
+					{
+						bFoundAmbiguousPathWarning = true;
+						break;
+					}
+				}
+
+				TestTrue(TEXT("dump surfaces ambiguous path warning"), bFoundAmbiguousPathWarning);
+			}
+		}
 	}
 
 	CortexStateTreeTest::DeleteIfLoaded(AssetPath);
@@ -131,6 +166,8 @@ bool FCortexStateTreeGetStateByIdTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("get_state by id includes top-level asset_path"),
 			GetResult.Data->TryGetStringField(TEXT("asset_path"), ReturnedAssetPath));
 		TestEqual(TEXT("get_state by id asset_path matches object path"), ReturnedAssetPath, AssetPath);
+		TestTrue(TEXT("get_state by id includes validation object"),
+			GetResult.Data->HasTypedField<EJson::Object>(TEXT("validation")));
 	}
 
 	CortexStateTreeTest::DeleteIfLoaded(AssetPath);
@@ -173,6 +210,8 @@ bool FCortexStateTreeGetStateByPathTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("get_state asset_path matches object path"), ReturnedAssetPath, AssetPath);
 		TestTrue(TEXT("get_state includes fingerprint object"),
 			GetResult.Data->HasTypedField<EJson::Object>(TEXT("fingerprint")));
+		TestTrue(TEXT("get_state includes validation object"),
+			GetResult.Data->HasTypedField<EJson::Object>(TEXT("validation")));
 	}
 
 	CortexStateTreeTest::DeleteIfLoaded(AssetPath);
