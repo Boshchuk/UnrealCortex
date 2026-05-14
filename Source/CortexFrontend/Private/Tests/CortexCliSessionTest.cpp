@@ -75,9 +75,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexCliSessionCancelTransitionsTest, "Cortex
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexCliSessionNewChatGeneratesFreshSessionIdTest, "Cortex.Frontend.CliSession.NewChatGeneratesFreshSessionId", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexFrontendModuleGetOrCreateSessionTest, "Cortex.Frontend.Module.GetOrCreateSession", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexCliSessionPerTurnExecFirstTurnDoesNotResumeWithoutConversationTest, "Cortex.Frontend.CliSession.PerTurnExecFirstTurnDoesNotResumeWithoutConversation", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexCliSessionCodexChatKeepsStdinOpenAfterPromptWriteTest, "Cortex.Frontend.CliSession.CodexChatKeepsStdinOpenAfterPromptWrite", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexCliSessionCodexChatClosesStdinAfterPromptWriteTest, "Cortex.Frontend.CliSession.CodexChatClosesStdinAfterPromptWrite", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexCliSessionCodexTurnBoundTaskClosesStdinAfterPromptWriteTest, "Cortex.Frontend.CliSession.CodexTurnBoundTaskClosesStdinAfterPromptWrite", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexCliSessionCodexChatReusesLiveSessionAcrossPromptsTest, "Cortex.Frontend.CliSession.CodexChatReusesLiveSessionAcrossPrompts", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexCliSessionCodexChatResumesAcrossExecTurnsTest, "Cortex.Frontend.CliSession.CodexChatResumesAcrossExecTurns", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexCliSessionCodexChatUnexpectedExitDuringTurnFailsTest, "Cortex.Frontend.CliSession.CodexChatUnexpectedExitDuringTurnFails", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexCliSessionTurnBoundFollowUpQueuesUntilProcessExitTest, "Cortex.Frontend.CliSession.TurnBoundFollowUpQueuesUntilProcessExit", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexCliSessionTurnBoundFollowUpRespawnFailureCompletesQueuedTurnTest, "Cortex.Frontend.CliSession.TurnBoundFollowUpRespawnFailureCompletesQueuedTurn", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -216,6 +216,9 @@ bool FCortexCliSessionTurnCompleteReturnsIdleTest::RunTest(const FString& Parame
 
     FCortexSessionConfig Config;
     Config.SessionId = TEXT("session-turn");
+    Config.ProviderId = FName(TEXT("claude_code"));
+    Config.ResolvedOptions.ProviderId = FName(TEXT("claude_code"));
+    Config.ResolvedOptions.ProviderDisplayName = TEXT("Claude Code");
 
     FCortexCliSession Session(Config);
     Session.SetStateForTest(ECortexSessionState::Processing);
@@ -332,7 +335,7 @@ bool FCortexCliSessionPerTurnExecFirstTurnDoesNotResumeWithoutConversationTest::
     return true;
 }
 
-bool FCortexCliSessionCodexChatKeepsStdinOpenAfterPromptWriteTest::RunTest(const FString& Parameters)
+bool FCortexCliSessionCodexChatClosesStdinAfterPromptWriteTest::RunTest(const FString& Parameters)
 {
     (void)Parameters;
 
@@ -345,7 +348,7 @@ bool FCortexCliSessionCodexChatKeepsStdinOpenAfterPromptWriteTest::RunTest(const
     CodexConfig.LifetimePolicy = ECortexSessionLifetimePolicy::Persistent;
 
     FCortexCliSession CodexSession(CodexConfig);
-    TestFalse(TEXT("Codex chat sessions should keep stdin open after writing the prompt so the process stays alive"),
+    TestTrue(TEXT("Codex exec reads prompts from stdin and must receive EOF even for chat sessions"),
         CodexSession.ShouldCloseStdinAfterPromptWriteForTest());
 
     return true;
@@ -379,7 +382,7 @@ bool FCortexCliSessionCodexTurnBoundTaskClosesStdinAfterPromptWriteTest::RunTest
     return true;
 }
 
-bool FCortexCliSessionCodexChatReusesLiveSessionAcrossPromptsTest::RunTest(const FString& Parameters)
+bool FCortexCliSessionCodexChatResumesAcrossExecTurnsTest::RunTest(const FString& Parameters)
 {
     (void)Parameters;
 
@@ -421,13 +424,20 @@ bool FCortexCliSessionCodexChatReusesLiveSessionAcrossPromptsTest::RunTest(const
     ResultEvent.ResultText = TEXT("First reply");
     ResultEvent.SessionId = TEXT("thread-codex-chat");
     Session.HandleWorkerEvent(ResultEvent);
-    TestEqual(TEXT("Completed persistent chat turn should return to idle"), Session.GetState(), ECortexSessionState::Idle);
+    TestEqual(TEXT("Completed Codex chat turn should wait for the exec process to exit"), Session.GetState(), ECortexSessionState::AwaitingTurnExit);
 
     FCortexPromptRequest SecondPrompt;
     SecondPrompt.Prompt = TEXT("Second chat prompt");
     SecondPrompt.AccessMode = ECortexAccessMode::Guided;
-    TestTrue(TEXT("Second persistent chat prompt should be accepted without a respawn"), Session.SendPrompt(SecondPrompt));
-    TestEqual(TEXT("Persistent chat follow-up should still reuse the existing process"), SpawnCallCount, 1);
+    TestTrue(TEXT("Second persistent chat prompt should be queued until the previous exec exits"), Session.SendPrompt(SecondPrompt));
+    TestEqual(TEXT("Persistent chat follow-up should not spawn while the previous exec is still exiting"), SpawnCallCount, 1);
+    TestEqual(TEXT("Follow-up prompt should remain queued until the previous exec exits"), Session.GetPendingPromptForTest(), FString(TEXT("Second chat prompt")));
+    TestEqual(TEXT("Follow-up prompt should keep the session waiting for process exit"), Session.GetState(), ECortexSessionState::AwaitingTurnExit);
+
+    bObservedResumeSession = false;
+    Session.HandleProcessExited(TEXT("Provider CLI process exited"));
+    TestEqual(TEXT("Codex chat follow-up should spawn a resumed exec after the old process exits"), SpawnCallCount, 2);
+    TestTrue(TEXT("Codex chat follow-up should resume the provider conversation"), bObservedResumeSession);
     TestEqual(TEXT("Follow-up prompt should transition back to processing"), Session.GetState(), ECortexSessionState::Processing);
     return true;
 }
@@ -457,7 +467,9 @@ bool FCortexCliSessionCodexChatUnexpectedExitDuringTurnFailsTest::RunTest(const 
     FirstTurnResult.SessionId = TEXT("thread-codex-chat");
     Session.SetStateForTest(ECortexSessionState::Processing);
     Session.HandleWorkerEvent(FirstTurnResult);
-    TestEqual(TEXT("Prior successful chat turn should leave the session idle"), Session.GetState(), ECortexSessionState::Idle);
+    TestEqual(TEXT("Prior successful Codex chat turn should wait for the exec process to exit"), Session.GetState(), ECortexSessionState::AwaitingTurnExit);
+    Session.HandleProcessExited(TEXT("Provider CLI process exited after prior turn"));
+    TestEqual(TEXT("Prior successful Codex chat turn should become idle after the exec exits"), Session.GetState(), ECortexSessionState::Idle);
 
     bool bTurnCompleteCalled = false;
     FCortexTurnResult CapturedResult;

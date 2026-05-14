@@ -876,7 +876,8 @@ bool FCortexCliSession::ShouldCloseStdinAfterPromptWrite() const
 
 bool FCortexCliSession::UsesTurnBoundLifetimePolicy() const
 {
-	return ResolvedLifetimePolicy == ECortexSessionLifetimePolicy::TurnBound;
+	return ResolvedLifetimePolicy == ECortexSessionLifetimePolicy::TurnBound ||
+		(PinnedProvider != nullptr && PinnedProvider->GetTransportMode() == ECortexCliTransportMode::PerTurnExec);
 }
 
 ECortexAccessMode FCortexCliSession::GetPendingAccessMode() const
