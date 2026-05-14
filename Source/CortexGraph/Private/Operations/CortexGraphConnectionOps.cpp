@@ -1,5 +1,6 @@
 #include "Operations/CortexGraphConnectionOps.h"
 #include "Operations/CortexGraphNodeOps.h"
+#include "CortexEditorUtils.h"
 #include "CortexGraphModule.h"
 #include "Engine/Blueprint.h"
 #include "EdGraph/EdGraph.h"
@@ -9,7 +10,65 @@
 #include "K2Node_Composite.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Dom/JsonObject.h"
+#include "Misc/PackageName.h"
 #include "ScopedTransaction.h"
+
+namespace
+{
+FString GetGraphConnectionWritableValidationPath(const FString& AssetPath)
+{
+	static const FString LevelBPPrefix = TEXT("__level_bp__:");
+	const FString BlueprintPath = AssetPath.StartsWith(LevelBPPrefix)
+		? AssetPath.Mid(LevelBPPrefix.Len())
+		: AssetPath;
+	const FString NormalizedPath = FCortexEditorUtils::NormalizeMountedContentPath(BlueprintPath);
+	return FPackageName::ObjectPathToPackageName(NormalizedPath);
+}
+
+bool ValidateWritableGraphConnectionBlueprintAssetPath(const FString& AssetPath, FCortexCommandResult& OutError)
+{
+	FString ValidationError;
+	if (!FCortexEditorUtils::IsWritableMountedContentPath(GetGraphConnectionWritableValidationPath(AssetPath), ValidationError))
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
+		return false;
+	}
+
+	return true;
+}
+
+bool ResolveMutableConnectionGraph(
+	UBlueprint* Blueprint,
+	const FString& GraphName,
+	UEdGraph*& OutGraph,
+	FCortexCommandResult& OutError)
+{
+	FCortexGraphEntry Entry;
+	if (!FCortexGraphNodeOps::FindGraphEntry(Blueprint, GraphName, Entry))
+	{
+		const FString TargetName = GraphName.IsEmpty() ? TEXT("EventGraph") : GraphName;
+		OutError = FCortexCommandRouter::Error(
+			CortexErrorCodes::GraphNotFound,
+			FString::Printf(TEXT("Graph not found: %s"), *TargetName)
+		);
+		return false;
+	}
+
+	if (!FCortexGraphNodeOps::IsMutableGraphKind(Entry.Kind))
+	{
+		OutError = FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidOperation,
+			FString::Printf(
+				TEXT("Graph kind is not mutable through graph_cmd: %s"),
+				*FCortexGraphNodeOps::GraphKindToString(Entry.Kind))
+		);
+		return false;
+	}
+
+	OutGraph = Entry.Graph;
+	return true;
+}
+}
 
 FCortexCommandResult FCortexGraphConnectionOps::Connect(const TSharedPtr<FJsonObject>& Params)
 {
@@ -53,15 +112,19 @@ FCortexCommandResult FCortexGraphConnectionOps::Connect(const TSharedPtr<FJsonOb
 
 	// Load blueprint using helper
 	FCortexCommandResult LoadError;
+	if (!ValidateWritableGraphConnectionBlueprintAssetPath(AssetPath, LoadError))
+	{
+		return LoadError;
+	}
+
 	UBlueprint* Blueprint = FCortexGraphNodeOps::LoadBlueprint(AssetPath, LoadError);
 	if (Blueprint == nullptr)
 	{
 		return LoadError;
 	}
 
-	// Find graph using helper
-	UEdGraph* Graph = FCortexGraphNodeOps::FindGraph(Blueprint, GraphName, LoadError);
-	if (Graph == nullptr)
+	UEdGraph* Graph = nullptr;
+	if (!ResolveMutableConnectionGraph(Blueprint, GraphName, Graph, LoadError))
 	{
 		return LoadError;
 	}
@@ -177,6 +240,11 @@ FCortexCommandResult FCortexGraphConnectionOps::Disconnect(const TSharedPtr<FJso
 
 	// Load blueprint using helper
 	FCortexCommandResult LoadError;
+	if (!ValidateWritableGraphConnectionBlueprintAssetPath(AssetPath, LoadError))
+	{
+		return LoadError;
+	}
+
 	UBlueprint* Blueprint = FCortexGraphNodeOps::LoadBlueprint(AssetPath, LoadError);
 	if (Blueprint == nullptr)
 	{
@@ -184,8 +252,8 @@ FCortexCommandResult FCortexGraphConnectionOps::Disconnect(const TSharedPtr<FJso
 	}
 
 	// Find graph using helper
-	UEdGraph* Graph = FCortexGraphNodeOps::FindGraph(Blueprint, GraphName, LoadError);
-	if (Graph == nullptr)
+	UEdGraph* Graph = nullptr;
+	if (!ResolveMutableConnectionGraph(Blueprint, GraphName, Graph, LoadError))
 	{
 		return LoadError;
 	}

@@ -25,7 +25,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexGraphCompactPinSkippingTest::RunTest(const FString& Parameters)
 {
-	UPackage* TestPackage = NewObject<UPackage>(nullptr, TEXT("/Temp/CortexCompactPinSkipTest"), RF_Transient);
+	UPackage* TestPackage = CreatePackage(TEXT("/Game/Temp/CortexCompactPinSkipTest"));
 	TestPackage->SetPackageFlags(PKG_PlayInEditor);
 
 	UBlueprint* TestBP = FKismetEditorUtilities::CreateBlueprint(
@@ -152,7 +152,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexGraphListNodesCompactTest::RunTest(const FString& Parameters)
 {
-	UPackage* TestPackage = NewObject<UPackage>(nullptr, TEXT("/Temp/CortexListNodesCompactTest"), RF_Transient);
+	UPackage* TestPackage = CreatePackage(TEXT("/Game/Temp/CortexListNodesCompactTest"));
 	TestPackage->SetPackageFlags(PKG_PlayInEditor);
 
 	UBlueprint* TestBP = FKismetEditorUtilities::CreateBlueprint(
@@ -197,8 +197,8 @@ bool FCortexGraphListNodesCompactTest::RunTest(const FString& Parameters)
 		Params->SetStringField(TEXT("asset_path"), AssetPath);
 		// compact is default (true), no explicit param needed
 
-		const FCortexCommandResult Result = Router.Execute(TEXT("graph.list_nodes"), Params);
-		TestTrue(TEXT("list_nodes compact (default) should succeed"), Result.bSuccess);
+		const FCortexCommandResult Result = Router.Execute(TEXT("graph.get_subgraph"), Params);
+		TestTrue(TEXT("get_subgraph compact (default) should succeed"), Result.bSuccess);
 
 		if (Result.bSuccess && Result.Data.IsValid())
 		{
@@ -228,8 +228,8 @@ bool FCortexGraphListNodesCompactTest::RunTest(const FString& Parameters)
 		Params->SetStringField(TEXT("asset_path"), AssetPath);
 		Params->SetBoolField(TEXT("compact"), false);
 
-		const FCortexCommandResult Result = Router.Execute(TEXT("graph.list_nodes"), Params);
-		TestTrue(TEXT("list_nodes compact=false should succeed"), Result.bSuccess);
+		const FCortexCommandResult Result = Router.Execute(TEXT("graph.get_subgraph"), Params);
+		TestTrue(TEXT("get_subgraph compact=false should succeed"), Result.bSuccess);
 
 		if (Result.bSuccess && Result.Data.IsValid())
 		{
@@ -265,7 +265,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexGraphGetNodeCompactTest::RunTest(const FString& Parameters)
 {
-	UPackage* TestPackage = NewObject<UPackage>(nullptr, TEXT("/Temp/CortexGetNodeCompactTest"), RF_Transient);
+	UPackage* TestPackage = CreatePackage(TEXT("/Game/Temp/CortexGetNodeCompactTest"));
 	TestPackage->SetPackageFlags(PKG_PlayInEditor);
 
 	UBlueprint* TestBP = FKismetEditorUtilities::CreateBlueprint(
@@ -352,8 +352,8 @@ bool FCortexGraphGetNodeCompactTest::RunTest(const FString& Parameters)
 		Params->SetStringField(TEXT("asset_path"), AssetPath);
 		Params->SetStringField(TEXT("node_id"), NodeId);
 
-		const FCortexCommandResult Result = Router.Execute(TEXT("graph.get_node"), Params);
-		TestTrue(TEXT("get_node compact (default) should succeed"), Result.bSuccess);
+		const FCortexCommandResult Result = Router.Execute(TEXT("graph.get_subgraph"), Params);
+		TestTrue(TEXT("get_subgraph compact (default) should succeed"), Result.bSuccess);
 
 		if (Result.bSuccess && Result.Data.IsValid())
 		{
@@ -407,8 +407,8 @@ bool FCortexGraphGetNodeCompactTest::RunTest(const FString& Parameters)
 		Params->SetStringField(TEXT("node_id"), NodeId);
 		Params->SetBoolField(TEXT("compact"), false);
 
-		const FCortexCommandResult Result = Router.Execute(TEXT("graph.get_node"), Params);
-		TestTrue(TEXT("get_node compact=false should succeed"), Result.bSuccess);
+		const FCortexCommandResult Result = Router.Execute(TEXT("graph.get_subgraph"), Params);
+		TestTrue(TEXT("get_subgraph compact=false should succeed"), Result.bSuccess);
 
 		if (Result.bSuccess && Result.Data.IsValid())
 		{
@@ -457,7 +457,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexGraphSearchNodesCompactTest::RunTest(const FString& Parameters)
 {
-	UPackage* TestPackage = NewObject<UPackage>(nullptr, TEXT("/Temp/CortexSearchNodesCompactTest"), RF_Transient);
+	UPackage* TestPackage = CreatePackage(TEXT("/Game/Temp/CortexSearchNodesCompactTest"));
 	TestPackage->SetPackageFlags(PKG_PlayInEditor);
 
 	UBlueprint* TestBP = FKismetEditorUtilities::CreateBlueprint(

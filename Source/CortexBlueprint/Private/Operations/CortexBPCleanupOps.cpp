@@ -26,6 +26,8 @@
 namespace
 {
 	TFunction<void(USCS_Node*, UBlueprint*)> GRemoveSCSComponentMidflightTestHook;
+	TFunction<void(UBlueprint*)> GRemoveSCSComponentPostCompileTestHook;
+	TFunction<void(UBlueprint*)> GRenameSCSComponentPostCompileTestHook;
 }
 #endif
 
@@ -195,6 +197,77 @@ namespace
 
 		return false;
 	}
+
+	void RestoreSCSComponentName(
+		UBlueprint* BP,
+		USimpleConstructionScript* SCS,
+		const FName CurrentName,
+		const FName OriginalName)
+	{
+		if (!BP || !SCS)
+		{
+			return;
+		}
+
+		if (USCS_Node* CurrentNode = FindOwnedSCSNodeByName(SCS, CurrentName))
+		{
+			CurrentNode->Modify();
+			FBlueprintEditorUtils::RenameMemberVariable(BP, CurrentName, OriginalName);
+			if (!FindOwnedSCSNodeByName(SCS, OriginalName))
+			{
+				FBlueprintEditorUtils::RenameComponentMemberVariable(BP, CurrentNode, OriginalName);
+			}
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
+		}
+	}
+
+	void RestoreRemovedSCSNode(
+		UBlueprint* BP,
+		USimpleConstructionScript* SCS,
+		USCS_Node* RemovedNode,
+		USCS_Node* OriginalParent,
+		const TArray<USCS_Node*>& OriginalChildren)
+	{
+		if (!BP || !SCS || !RemovedNode || FindOwnedSCSNodeByName(SCS, RemovedNode->GetVariableName()))
+		{
+			return;
+		}
+
+		USCS_Node* RestoredNode = SCS->CreateNode(RemovedNode->ComponentClass, RemovedNode->GetVariableName());
+		if (!RestoredNode)
+		{
+			return;
+		}
+
+		RestoredNode->Modify();
+		if (OriginalParent)
+		{
+			OriginalParent->Modify();
+			OriginalParent->AddChildNode(RestoredNode);
+		}
+		else
+		{
+			SCS->AddNode(RestoredNode);
+		}
+
+		for (USCS_Node* ChildNode : OriginalChildren)
+		{
+			if (!ChildNode)
+			{
+				continue;
+			}
+
+			ChildNode->Modify();
+			if (USCS_Node* CurrentParent = SCS->FindParentNode(ChildNode))
+			{
+				CurrentParent->Modify();
+				CurrentParent->RemoveChildNode(ChildNode, false);
+			}
+			RestoredNode->AddChildNode(ChildNode, false);
+		}
+
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
+	}
 }
 
 FCortexCommandResult FCortexBPCleanupOps::CleanupMigration(const TSharedPtr<FJsonObject>& Params)
@@ -205,6 +278,12 @@ FCortexCommandResult FCortexBPCleanupOps::CleanupMigration(const TSharedPtr<FJso
 		return FCortexCommandRouter::Error(
 			CortexErrorCodes::InvalidField,
 			TEXT("Missing required param: asset_path"));
+	}
+
+	FString ValidationError;
+	if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(AssetPath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
 	}
 
 	FString LoadError;
@@ -416,6 +495,12 @@ FCortexCommandResult FCortexBPCleanupOps::RecompileDependents(const TSharedPtr<F
 			TEXT("Missing required param: asset_path"));
 	}
 
+	FString ValidationError;
+	if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(AssetPath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
+	}
+
 	FString LoadError;
 	UBlueprint* TargetBlueprint = FCortexBPAssetOps::LoadBlueprint(AssetPath, LoadError);
 	if (!TargetBlueprint)
@@ -423,12 +508,25 @@ FCortexCommandResult FCortexBPCleanupOps::RecompileDependents(const TSharedPtr<F
 		return FCortexCommandRouter::Error(CortexErrorCodes::BlueprintNotFound, LoadError);
 	}
 
+	TArray<UBlueprint*> DependentBlueprints;
+	FBlueprintEditorUtils::GetDependentBlueprints(TargetBlueprint, DependentBlueprints);
+
+	for (UBlueprint* DependentBlueprint : DependentBlueprints)
+	{
+		if (!IsValid(DependentBlueprint))
+		{
+			continue;
+		}
+
+		if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(DependentBlueprint->GetPathName(), ValidationError))
+		{
+			return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
+		}
+	}
+
 	FScopedTransaction Transaction(FText::FromString(
 		FString::Printf(TEXT("Cortex: Recompile Dependents of %s"), *TargetBlueprint->GetName())
 	));
-
-	TArray<UBlueprint*> DependentBlueprints;
-	FBlueprintEditorUtils::GetDependentBlueprints(TargetBlueprint, DependentBlueprints);
 
 	TArray<TSharedPtr<FJsonValue>> ResultsArray;
 	ResultsArray.Reserve(DependentBlueprints.Num());
@@ -436,7 +534,7 @@ FCortexCommandResult FCortexBPCleanupOps::RecompileDependents(const TSharedPtr<F
 
 	for (UBlueprint* DependentBlueprint : DependentBlueprints)
 	{
-		if (!DependentBlueprint)
+		if (!IsValid(DependentBlueprint))
 		{
 			continue;
 		}
@@ -488,6 +586,12 @@ FCortexCommandResult FCortexBPCleanupOps::RenameSCSComponent(const TSharedPtr<FJ
 
 	bool bCompile = true;
 	Params->TryGetBoolField(TEXT("compile"), bCompile);
+
+	FString ValidationError;
+	if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(AssetPath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
+	}
 
 	FString LoadError;
 	UBlueprint* BP = FCortexBPAssetOps::LoadBlueprint(AssetPath, LoadError);
@@ -588,7 +692,7 @@ FCortexCommandResult FCortexBPCleanupOps::RenameSCSComponent(const TSharedPtr<FJ
 	FBlueprintEditorUtils::GetDependentBlueprints(BP, DependentBlueprints);
 	for (UBlueprint* DependentBP : DependentBlueprints)
 	{
-		if (!DependentBP || DependentBP == BP)
+		if (!IsValid(DependentBP) || DependentBP == BP)
 		{
 			continue;
 		}
@@ -616,9 +720,25 @@ FCortexCommandResult FCortexBPCleanupOps::RenameSCSComponent(const TSharedPtr<FJ
 				FString::Printf(
 					TEXT("new_name '%s' would shadow an SCS node on dependent Blueprint %s"),
 					*NewName,
-					*DependentBP->GetPathName()));
+				*DependentBP->GetPathName()));
 		}
 	}
+
+	for (UBlueprint* DependentBP : DependentBlueprints)
+	{
+		if (!IsValid(DependentBP) || DependentBP == BP)
+		{
+			continue;
+		}
+
+		if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(DependentBP->GetPathName(), ValidationError))
+		{
+			return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
+		}
+	}
+
+	FScopedTransaction Transaction(FText::FromString(
+		FString::Printf(TEXT("Cortex: Rename SCS Component %s to %s in %s"), *OldName, *NewName, *BP->GetName())));
 
 	BP->Modify();
 	SCS->Modify();
@@ -648,10 +768,18 @@ FCortexCommandResult FCortexBPCleanupOps::RenameSCSComponent(const TSharedPtr<FJ
 	if (bCompile)
 	{
 		FKismetEditorUtilities::CompileBlueprint(BP);
+#if WITH_DEV_AUTOMATION_TESTS
+		if (GRenameSCSComponentPostCompileTestHook)
+		{
+			GRenameSCSComponentPostCompileTestHook(BP);
+		}
+#endif
 		bCompiled = IsBlueprintUpToDate(BP);
 		CompileStatus = bCompiled ? TEXT("UpToDate") : TEXT("Error");
 		if (!bCompiled)
 		{
+			RestoreSCSComponentName(BP, SCS, NewFName, OldFName);
+			Transaction.Cancel();
 			return FCortexCommandRouter::Error(
 				CortexErrorCodes::CompileFailed,
 				FString::Printf(TEXT("Blueprint compile failed after SCS rename: %s"), *BP->GetPathName()));
@@ -659,13 +787,19 @@ FCortexCommandResult FCortexBPCleanupOps::RenameSCSComponent(const TSharedPtr<FJ
 
 		for (UBlueprint* DependentBP : DependentBlueprints)
 		{
-			if (!DependentBP || DependentBP == BP)
+			if (!IsValid(DependentBP) || DependentBP == BP)
 			{
 				continue;
 			}
 
 			DependentBP->Modify();
 			FKismetEditorUtilities::CompileBlueprint(DependentBP);
+#if WITH_DEV_AUTOMATION_TESTS
+			if (GRenameSCSComponentPostCompileTestHook)
+			{
+				GRenameSCSComponentPostCompileTestHook(DependentBP);
+			}
+#endif
 			const bool bDependentCompiled = IsBlueprintUpToDate(DependentBP);
 			TSharedPtr<FJsonObject> DependentEntry = MakeShared<FJsonObject>();
 			DependentEntry->SetStringField(TEXT("path"), DependentBP->GetPathName());
@@ -674,6 +808,8 @@ FCortexCommandResult FCortexBPCleanupOps::RenameSCSComponent(const TSharedPtr<FJ
 			DependentBlueprintEntries.Add(MakeShared<FJsonValueObject>(DependentEntry));
 			if (!bDependentCompiled)
 			{
+				RestoreSCSComponentName(BP, SCS, NewFName, OldFName);
+				Transaction.Cancel();
 				return FCortexCommandRouter::Error(
 					CortexErrorCodes::CompileFailed,
 					FString::Printf(
@@ -691,7 +827,7 @@ FCortexCommandResult FCortexBPCleanupOps::RenameSCSComponent(const TSharedPtr<FJ
 
 	for (UBlueprint* DependentBP : DependentBlueprints)
 	{
-		if (!DependentBP || DependentBP == BP)
+		if (!IsValid(DependentBP) || DependentBP == BP)
 		{
 			continue;
 		}
@@ -728,7 +864,7 @@ FCortexCommandResult FCortexBPCleanupOps::RenameSCSComponent(const TSharedPtr<FJ
 	{
 		for (UBlueprint* DependentBP : DependentBlueprints)
 		{
-			if (!DependentBP || DependentBP == BP)
+			if (!IsValid(DependentBP) || DependentBP == BP)
 			{
 				continue;
 			}
@@ -756,6 +892,12 @@ FCortexCommandResult FCortexBPCleanupOps::RemoveSCSComponent(const TSharedPtr<FJ
 		return FCortexCommandRouter::Error(
 			CortexErrorCodes::InvalidField,
 			TEXT("Missing required params: asset_path, component_name"));
+	}
+
+	FString ValidationError;
+	if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(AssetPath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
 	}
 
 	FString LoadError;
@@ -871,6 +1013,8 @@ FCortexCommandResult FCortexBPCleanupOps::RemoveSCSComponent(const TSharedPtr<FJ
 
 	// RemoveNodeAndPromoteChildren re-parents children to the removed node's parent
 	// and removes the node from all SCS arrays — it is the canonical API for this operation.
+	USCS_Node* OriginalParentNode = SCS->FindParentNode(TargetNode);
+	const TArray<USCS_Node*> OriginalChildNodes = TargetNode->GetChildNodes();
 	SCS->RemoveNodeAndPromoteChildren(TargetNode);
 
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
@@ -902,10 +1046,28 @@ FCortexCommandResult FCortexBPCleanupOps::RemoveSCSComponent(const TSharedPtr<FJ
 	if (bCompile)
 	{
 		FKismetEditorUtilities::CompileBlueprint(BP);
+#if WITH_DEV_AUTOMATION_TESTS
+		if (GRemoveSCSComponentPostCompileTestHook)
+		{
+			GRemoveSCSComponentPostCompileTestHook(BP);
+		}
+#endif
+		const bool bCompiled = BP->Status == BS_UpToDate || BP->Status == BS_UpToDateWithWarnings;
 		ResponseData->SetBoolField(TEXT("compiled"), true);
 		ResponseData->SetStringField(TEXT("compile_status"),
-			(BP->Status == BS_UpToDate || BP->Status == BS_UpToDateWithWarnings)
-				? TEXT("UpToDate") : TEXT("Error"));
+			bCompiled ? TEXT("UpToDate") : TEXT("Error"));
+		if (!bCompiled)
+		{
+			RestoreRemovedSCSNode(BP, SCS, TargetNode, OriginalParentNode, OriginalChildNodes);
+			Transaction.Cancel();
+			TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+			Details->SetStringField(TEXT("compile_status"), TEXT("Error"));
+			Details->SetObjectField(TEXT("partial_result"), ResponseData);
+			return FCortexCommandRouter::Error(
+				CortexErrorCodes::CompileFailed,
+				FString::Printf(TEXT("Blueprint compile failed after SCS removal: %s"), *BP->GetPathName()),
+				Details);
+		}
 	}
 	else
 	{
@@ -953,5 +1115,15 @@ void FCortexBPCleanupOps::SetRemoveSCSComponentMidflightTestHook(
 	TFunction<void(USCS_Node*, UBlueprint*)> InHook)
 {
 	GRemoveSCSComponentMidflightTestHook = MoveTemp(InHook);
+}
+
+void FCortexBPCleanupOps::SetRemoveSCSComponentPostCompileTestHook(TFunction<void(UBlueprint*)> InHook)
+{
+	GRemoveSCSComponentPostCompileTestHook = MoveTemp(InHook);
+}
+
+void FCortexBPCleanupOps::SetRenameSCSComponentPostCompileTestHook(TFunction<void(UBlueprint*)> InHook)
+{
+	GRenameSCSComponentPostCompileTestHook = MoveTemp(InHook);
 }
 #endif

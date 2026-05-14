@@ -51,7 +51,10 @@ def test_build_router_docstring_lists_all_commands():
 
     assert "core" in docstrings
     assert "core_cmd(command, params)" in docstrings["core"]
-    assert "- save_asset(asset_path: string, force: boolean = optional, dry_run: boolean = optional)" in docstrings["core"]
+    assert (
+        "- save_asset(items: array = optional, expected_fingerprint: object = optional, "
+        "asset_path: string, force: boolean = optional, dry_run: boolean = optional)"
+    ) in docstrings["core"]
     assert "query_datatable" in docstrings["data"]
     assert "table_path: string" in docstrings["data"]
 
@@ -103,6 +106,13 @@ def test_get_registered_domains_returns_core_when_malformed():
     """Malformed cache (no domains key) should return only core domains."""
     assert get_registered_domains({"unexpected_key": True}) == CORE_DOMAINS
     assert get_registered_domains({"domains": "not_a_dict"}) == CORE_DOMAINS
+
+
+def test_statetree_is_core_domain():
+    """StateTree should be exposed as a core router domain with a compose hint."""
+    assert "statetree" in CORE_DOMAINS
+    assert "statetree" in _COMPOSITE_HINTS
+    assert "statetree_compose" in _COMPOSITE_HINTS["statetree"]
 
 
 # --- Minimal router docstrings tests ---
@@ -224,6 +234,18 @@ class TestFallbackDrift:
             + "\n\nFix: cd MCP && uv run python scripts/sync_fallback.py --from-fixture"
         )
 
+    def test_blueprint_set_class_defaults_exposes_batch_items(self, cache_domains):
+        """The AI-facing fallback must advertise set_class_defaults batch mode."""
+        blueprint_commands = cache_domains["blueprint"]["commands"]
+        cache_command = next(cmd for cmd in blueprint_commands if cmd["name"] == "set_class_defaults")
+        fallback_command = next(cmd for cmd in _FALLBACK_STRUCTURED["blueprint"] if cmd["name"] == "set_class_defaults")
+
+        cache_params = {param["name"] for param in cache_command["params"]}
+        fallback_params = {param["name"] for param in fallback_command["params"]}
+
+        assert "items" in cache_params
+        assert "items" in fallback_params
+
     def test_fallback_domains_subset_of_cache(self, cache_domains):
         """Generated fallback should not contain domains absent from cache."""
         extra = set(_FALLBACK_STRUCTURED) - set(cache_domains)
@@ -252,6 +274,7 @@ class TestCompositeHints:
             "blueprint_compose",
             "widget_compose",
             "level_compose",
+            "statetree_compose",
             "gen_compose",
             "scenario_compose",
         }

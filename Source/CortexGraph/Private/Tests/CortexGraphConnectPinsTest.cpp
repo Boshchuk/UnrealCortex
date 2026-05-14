@@ -17,9 +17,11 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexGraphConnectPinsTest::RunTest(const FString& Parameters)
 {
+	UPackage* TestPackage = CreatePackage(TEXT("/Game/Temp/CortexGraphConnectPinsTest"));
+	TestPackage->SetPackageFlags(PKG_PlayInEditor);
 	UBlueprint* TestBP = FKismetEditorUtilities::CreateBlueprint(
 		AActor::StaticClass(),
-		GetTransientPackage(),
+		TestPackage,
 		FName(TEXT("BP_CortexGraphTest_Connect")),
 		BPTYPE_Normal,
 		UBlueprint::StaticClass(),
@@ -29,6 +31,7 @@ bool FCortexGraphConnectPinsTest::RunTest(const FString& Parameters)
 
 	if (TestBP == nullptr)
 	{
+		TestPackage->MarkAsGarbage();
 		return true;
 	}
 
@@ -116,7 +119,7 @@ bool FCortexGraphConnectPinsTest::RunTest(const FString& Parameters)
 		Params->SetStringField(TEXT("asset_path"), AssetPath);
 		Params->SetStringField(TEXT("node_id"), Node1Id);
 
-		FCortexCommandResult Result = Router.Execute(TEXT("graph.get_node"), Params);
+		FCortexCommandResult Result = Router.Execute(TEXT("graph.get_subgraph"), Params);
 		TestTrue(TEXT("get_node should succeed"), Result.bSuccess);
 
 		if (Result.Data.IsValid())
@@ -171,7 +174,7 @@ bool FCortexGraphConnectPinsTest::RunTest(const FString& Parameters)
 		Params->SetStringField(TEXT("asset_path"), AssetPath);
 		Params->SetStringField(TEXT("node_id"), Node1Id);
 
-		FCortexCommandResult Result = Router.Execute(TEXT("graph.get_node"), Params);
+		FCortexCommandResult Result = Router.Execute(TEXT("graph.get_subgraph"), Params);
 		TestTrue(TEXT("get_node should succeed after disconnect"), Result.bSuccess);
 		if (Result.Data.IsValid())
 		{
@@ -215,6 +218,7 @@ bool FCortexGraphConnectPinsTest::RunTest(const FString& Parameters)
 
 	// Cleanup
 	TestBP->MarkAsGarbage();
+	TestPackage->MarkAsGarbage();
 
 	return true;
 }

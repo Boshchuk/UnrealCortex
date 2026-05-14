@@ -8,6 +8,22 @@ class UEdGraph;
 class UEdGraphNode;
 class UEdGraphPin;
 
+enum class ECortexGraphKind : uint8
+{
+	Ubergraph,
+	Function,
+	Macro,
+	Delegate,
+	InterfaceImpl,
+};
+
+struct FCortexGraphEntry
+{
+	UEdGraph* Graph = nullptr;
+	ECortexGraphKind Kind = ECortexGraphKind::Function;
+	FName OwningInterface = NAME_None;
+};
+
 class FCortexGraphNodeOps
 {
 public:
@@ -22,6 +38,10 @@ public:
 
 	// Shared helpers for reuse across CortexGraph operations
 	static UBlueprint* LoadBlueprint(const FString& AssetPath, FCortexCommandResult& OutError);
+	static void EnumerateUserGraphs(UBlueprint* Blueprint, TArray<FCortexGraphEntry>& OutEntries);
+	static FString GraphKindToString(ECortexGraphKind Kind);
+	static bool FindGraphEntry(UBlueprint* Blueprint, const FString& GraphName, FCortexGraphEntry& OutEntry);
+	static bool IsMutableGraphKind(ECortexGraphKind Kind);
 	static UEdGraph* FindGraph(UBlueprint* Blueprint, const FString& GraphName, FCortexCommandResult& OutError);
 	static UEdGraphNode* FindNode(UEdGraph* Graph, const FString& NodeId, FCortexCommandResult& OutError);
 	static UEdGraphPin* FindPin(UEdGraphNode* Node, const FString& PinName, FCortexCommandResult& OutError);
@@ -33,6 +53,7 @@ public:
 	 *   MCP commands (GetNode) pass bCompact explicitly based on the user-supplied compact param (default true).
 	 */
 	static TSharedRef<FJsonObject> SerializePin(const UEdGraphPin* Pin, bool bDetailed = true, bool bCompact = false);
+	static TSharedRef<FJsonObject> SerializeNode(const UEdGraphNode* Node, bool bIncludePins, bool bCompact);
 
 	/**
 	 * Returns true when a pin should be omitted in compact mode.

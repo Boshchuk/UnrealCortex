@@ -15,7 +15,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexGraphPinConnectionTest::RunTest(const FString& Parameters)
 {
-	UPackage* TestPackage = NewObject<UPackage>(nullptr, TEXT("/Temp/CortexGraphPinConnectionTest"), RF_Transient);
+	UPackage* TestPackage = CreatePackage(TEXT("/Game/Temp/CortexGraphPinConnectionTest"));
 	TestPackage->SetPackageFlags(PKG_PlayInEditor);
 
 	UBlueprint* TestBP = FKismetEditorUtilities::CreateBlueprint(
@@ -99,7 +99,7 @@ bool FCortexGraphPinConnectionTest::RunTest(const FString& Parameters)
 		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("asset_path"), AssetPath);
 		Params->SetStringField(TEXT("node_id"), NodeIdA);
-		const FCortexCommandResult R = Router.Execute(TEXT("graph.get_node"), Params);
+		const FCortexCommandResult R = Router.Execute(TEXT("graph.get_subgraph"), Params);
 		TestTrue(TEXT("get_node A should succeed"), R.bSuccess);
 
 		if (R.Data.IsValid())
@@ -164,7 +164,7 @@ bool FCortexGraphPinConnectionTest::RunTest(const FString& Parameters)
 		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("asset_path"), AssetPath);
 		Params->SetStringField(TEXT("node_id"), NodeIdB);
-		const FCortexCommandResult R = Router.Execute(TEXT("graph.get_node"), Params);
+		const FCortexCommandResult R = Router.Execute(TEXT("graph.get_subgraph"), Params);
 		TestTrue(TEXT("get_node B should succeed"), R.bSuccess);
 
 		if (R.Data.IsValid())

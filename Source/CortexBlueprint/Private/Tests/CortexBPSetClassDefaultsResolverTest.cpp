@@ -7,6 +7,7 @@
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Misc/Guid.h"
 
 namespace
 {
@@ -14,7 +15,10 @@ namespace
 	{
 		return FKismetEditorUtilities::CreateBlueprint(
 			ParentClass ? ParentClass : ACortexBPTestLiftActor::StaticClass(),
-			GetTransientPackage(),
+			CreatePackage(*FString::Printf(
+				TEXT("/Game/Temp/%s_%s"),
+				Name,
+				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8))),
 			FName(Name),
 			BPTYPE_Normal,
 			UBlueprint::StaticClass(),
@@ -241,6 +245,31 @@ bool FCortexBPSetClassDefaultsResolverAmbiguousShadowTest::RunTest(const FString
 			Candidates.Contains(FString::Printf(TEXT("OpenSeq@%s"), *ACortexBPTestLiftActor::StaticClass()->GetName())));
 	}
 
+	BP->MarkAsGarbage();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexBPSetClassDefaultsResolverExplicitSelfQualifierTest,
+	"Cortex.Blueprint.ClassDefaults.Resolver.ExplicitSelfQualifier",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexBPSetClassDefaultsResolverExplicitSelfQualifierTest::RunTest(const FString& Parameters)
+{
+	UBlueprint* BP = ResolverCreateLiftBlueprint(TEXT("BP_SetDefaultsResolverSelfQualifier"));
+	TestNotNull(TEXT("Blueprint created"), BP);
+	if (!BP)
+	{
+		return false;
+	}
+
+	TestNotNull(TEXT("OpenSeq SCS added"),
+		ResolverAddSCSNode(BP, UCortexBPTestSubobjComponent::StaticClass(), TEXT("OpenSeq"), false));
+
+	const FCortexCommandResult Result = FCortexBPClassDefaultsOps::SetClassDefaults(
+		ResolverMakeSetParams(BP, TEXT("OpenSeq"), TEXT("OpenSeq@self")));
+
+	TestTrue(TEXT("Explicit @self qualifier resolves the owned SCS node"), Result.bSuccess);
 	BP->MarkAsGarbage();
 	return true;
 }

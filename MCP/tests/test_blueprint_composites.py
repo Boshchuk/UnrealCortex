@@ -316,6 +316,15 @@ class TestBatchCommandGeneration:
         add_cmd = [c for c in commands if c["command"] == "graph.add_node"][0]
         assert add_cmd["params"]["graph_name"] == "MyGraph"
 
+    def test_castto_preserves_documented_class_param(self):
+        """CastTo forwards the documented params.class field unchanged to graph.add_node."""
+        nodes = [{"name": "CastToPawn", "class": "CastTo", "params": {"class": "Pawn"}}]
+        commands = _build_batch_commands("BP_Test", "/Game/", "Actor", [], [], nodes, [], "EventGraph")
+
+        add_cmd = [c for c in commands if c["command"] == "graph.add_node"][0]
+        assert add_cmd["params"]["node_class"] == "UK2Node_DynamicCast"
+        assert add_cmd["params"]["params"]["class"] == "Pawn"
+
 
 class TestTimeoutScaling:
     def test_small_batch_uses_minimum(self):
@@ -622,7 +631,7 @@ class TestBlueprintVerificationIntegration:
         #   Call 2: bp.compile
         #   Call 3: bp.save
         #   Call 4: bp.get_info  (verification readback)
-        #   Call 5: graph.list_nodes  (verification readback)
+        #   Call 5: graph.get_subgraph  (verification readback)
         mock_connection.send_command.side_effect = [
             {
                 "data": {
@@ -650,3 +659,4 @@ class TestBlueprintVerificationIntegration:
 
         assert result["success"] is True
         assert result["verification"]["verified"] is True
+
