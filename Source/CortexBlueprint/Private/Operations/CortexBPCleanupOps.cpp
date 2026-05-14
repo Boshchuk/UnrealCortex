@@ -26,6 +26,8 @@
 namespace
 {
 	TFunction<void(USCS_Node*, UBlueprint*)> GRemoveSCSComponentMidflightTestHook;
+	TFunction<void(UBlueprint*)> GRemoveSCSComponentPostCompileTestHook;
+	TFunction<void(UBlueprint*)> GRenameSCSComponentPostCompileTestHook;
 }
 #endif
 
@@ -194,6 +196,77 @@ namespace
 		}
 
 		return false;
+	}
+
+	void RestoreSCSComponentName(
+		UBlueprint* BP,
+		USimpleConstructionScript* SCS,
+		const FName CurrentName,
+		const FName OriginalName)
+	{
+		if (!BP || !SCS)
+		{
+			return;
+		}
+
+		if (USCS_Node* CurrentNode = FindOwnedSCSNodeByName(SCS, CurrentName))
+		{
+			CurrentNode->Modify();
+			FBlueprintEditorUtils::RenameMemberVariable(BP, CurrentName, OriginalName);
+			if (!FindOwnedSCSNodeByName(SCS, OriginalName))
+			{
+				FBlueprintEditorUtils::RenameComponentMemberVariable(BP, CurrentNode, OriginalName);
+			}
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
+		}
+	}
+
+	void RestoreRemovedSCSNode(
+		UBlueprint* BP,
+		USimpleConstructionScript* SCS,
+		USCS_Node* RemovedNode,
+		USCS_Node* OriginalParent,
+		const TArray<USCS_Node*>& OriginalChildren)
+	{
+		if (!BP || !SCS || !RemovedNode || FindOwnedSCSNodeByName(SCS, RemovedNode->GetVariableName()))
+		{
+			return;
+		}
+
+		USCS_Node* RestoredNode = SCS->CreateNode(RemovedNode->ComponentClass, RemovedNode->GetVariableName());
+		if (!RestoredNode)
+		{
+			return;
+		}
+
+		RestoredNode->Modify();
+		if (OriginalParent)
+		{
+			OriginalParent->Modify();
+			OriginalParent->AddChildNode(RestoredNode);
+		}
+		else
+		{
+			SCS->AddNode(RestoredNode);
+		}
+
+		for (USCS_Node* ChildNode : OriginalChildren)
+		{
+			if (!ChildNode)
+			{
+				continue;
+			}
+
+			ChildNode->Modify();
+			if (USCS_Node* CurrentParent = SCS->FindParentNode(ChildNode))
+			{
+				CurrentParent->Modify();
+				CurrentParent->RemoveChildNode(ChildNode, false);
+			}
+			RestoredNode->AddChildNode(ChildNode, false);
+		}
+
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
 	}
 }
 
@@ -695,10 +768,18 @@ FCortexCommandResult FCortexBPCleanupOps::RenameSCSComponent(const TSharedPtr<FJ
 	if (bCompile)
 	{
 		FKismetEditorUtilities::CompileBlueprint(BP);
+#if WITH_DEV_AUTOMATION_TESTS
+		if (GRenameSCSComponentPostCompileTestHook)
+		{
+			GRenameSCSComponentPostCompileTestHook(BP);
+		}
+#endif
 		bCompiled = IsBlueprintUpToDate(BP);
 		CompileStatus = bCompiled ? TEXT("UpToDate") : TEXT("Error");
 		if (!bCompiled)
 		{
+			RestoreSCSComponentName(BP, SCS, NewFName, OldFName);
+			Transaction.Cancel();
 			return FCortexCommandRouter::Error(
 				CortexErrorCodes::CompileFailed,
 				FString::Printf(TEXT("Blueprint compile failed after SCS rename: %s"), *BP->GetPathName()));
@@ -713,6 +794,12 @@ FCortexCommandResult FCortexBPCleanupOps::RenameSCSComponent(const TSharedPtr<FJ
 
 			DependentBP->Modify();
 			FKismetEditorUtilities::CompileBlueprint(DependentBP);
+#if WITH_DEV_AUTOMATION_TESTS
+			if (GRenameSCSComponentPostCompileTestHook)
+			{
+				GRenameSCSComponentPostCompileTestHook(DependentBP);
+			}
+#endif
 			const bool bDependentCompiled = IsBlueprintUpToDate(DependentBP);
 			TSharedPtr<FJsonObject> DependentEntry = MakeShared<FJsonObject>();
 			DependentEntry->SetStringField(TEXT("path"), DependentBP->GetPathName());
@@ -721,6 +808,8 @@ FCortexCommandResult FCortexBPCleanupOps::RenameSCSComponent(const TSharedPtr<FJ
 			DependentBlueprintEntries.Add(MakeShared<FJsonValueObject>(DependentEntry));
 			if (!bDependentCompiled)
 			{
+				RestoreSCSComponentName(BP, SCS, NewFName, OldFName);
+				Transaction.Cancel();
 				return FCortexCommandRouter::Error(
 					CortexErrorCodes::CompileFailed,
 					FString::Printf(
@@ -924,6 +1013,8 @@ FCortexCommandResult FCortexBPCleanupOps::RemoveSCSComponent(const TSharedPtr<FJ
 
 	// RemoveNodeAndPromoteChildren re-parents children to the removed node's parent
 	// and removes the node from all SCS arrays — it is the canonical API for this operation.
+	USCS_Node* OriginalParentNode = SCS->FindParentNode(TargetNode);
+	const TArray<USCS_Node*> OriginalChildNodes = TargetNode->GetChildNodes();
 	SCS->RemoveNodeAndPromoteChildren(TargetNode);
 
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
@@ -955,10 +1046,28 @@ FCortexCommandResult FCortexBPCleanupOps::RemoveSCSComponent(const TSharedPtr<FJ
 	if (bCompile)
 	{
 		FKismetEditorUtilities::CompileBlueprint(BP);
+#if WITH_DEV_AUTOMATION_TESTS
+		if (GRemoveSCSComponentPostCompileTestHook)
+		{
+			GRemoveSCSComponentPostCompileTestHook(BP);
+		}
+#endif
+		const bool bCompiled = BP->Status == BS_UpToDate || BP->Status == BS_UpToDateWithWarnings;
 		ResponseData->SetBoolField(TEXT("compiled"), true);
 		ResponseData->SetStringField(TEXT("compile_status"),
-			(BP->Status == BS_UpToDate || BP->Status == BS_UpToDateWithWarnings)
-				? TEXT("UpToDate") : TEXT("Error"));
+			bCompiled ? TEXT("UpToDate") : TEXT("Error"));
+		if (!bCompiled)
+		{
+			RestoreRemovedSCSNode(BP, SCS, TargetNode, OriginalParentNode, OriginalChildNodes);
+			Transaction.Cancel();
+			TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+			Details->SetStringField(TEXT("compile_status"), TEXT("Error"));
+			Details->SetObjectField(TEXT("partial_result"), ResponseData);
+			return FCortexCommandRouter::Error(
+				CortexErrorCodes::CompileFailed,
+				FString::Printf(TEXT("Blueprint compile failed after SCS removal: %s"), *BP->GetPathName()),
+				Details);
+		}
 	}
 	else
 	{
@@ -1006,5 +1115,15 @@ void FCortexBPCleanupOps::SetRemoveSCSComponentMidflightTestHook(
 	TFunction<void(USCS_Node*, UBlueprint*)> InHook)
 {
 	GRemoveSCSComponentMidflightTestHook = MoveTemp(InHook);
+}
+
+void FCortexBPCleanupOps::SetRemoveSCSComponentPostCompileTestHook(TFunction<void(UBlueprint*)> InHook)
+{
+	GRemoveSCSComponentPostCompileTestHook = MoveTemp(InHook);
+}
+
+void FCortexBPCleanupOps::SetRenameSCSComponentPostCompileTestHook(TFunction<void(UBlueprint*)> InHook)
+{
+	GRenameSCSComponentPostCompileTestHook = MoveTemp(InHook);
 }
 #endif

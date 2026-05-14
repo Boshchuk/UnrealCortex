@@ -404,49 +404,77 @@ FCortexBPSCSDiagnostics::FResolveResult FCortexBPSCSDiagnostics::ResolveComponen
 		return Result;
 	}
 
-	const FName TargetName(*Name);
+	FString LookupName = Name;
+	FString Qualifier;
+	if (Name.Split(TEXT("@"), &LookupName, &Qualifier))
+	{
+		LookupName.TrimStartAndEndInline();
+		Qualifier.TrimStartAndEndInline();
+	}
+
+	if (LookupName.IsEmpty())
+	{
+		Result.FailureReason = TEXT("Component name qualifier is missing a component name");
+		return Result;
+	}
+
+	const FName TargetName(*LookupName);
 	UBlueprintGeneratedClass* BPGC = Cast<UBlueprintGeneratedClass>(BP->GeneratedClass);
 
 	// Layer 1: own SCS node (non-walking lookup only).
 	if (USCS_Node* OwnNode = DiagnosticsFindOwnedSCSNodeByName(BP->SimpleConstructionScript, TargetName))
 	{
-		const TArray<FCollision> Collisions = DetectSCSInheritedCollisions(BP);
-		TArray<FString> AmbiguousCandidates;
-		for (const FCollision& Collision : Collisions)
+		if (!Qualifier.IsEmpty())
 		{
-			if (Collision.SCSNodeName != TargetName)
+			if (Qualifier.Equals(TEXT("self"), ESearchCase::IgnoreCase))
 			{
-				continue;
-			}
-
-			if (!AmbiguousCandidates.Contains(FString::Printf(TEXT("%s@self"), *Name)))
-			{
-				AmbiguousCandidates.Add(FString::Printf(TEXT("%s@self"), *Name));
-			}
-
-			const FString OwnerName = Collision.InheritedFromClass
-				? Collision.InheritedFromClass->GetName()
-				: TEXT("parent");
-			const FString Candidate = FString::Printf(TEXT("%s@%s"), *Name, *OwnerName);
-			if (!AmbiguousCandidates.Contains(Candidate))
-			{
-				AmbiguousCandidates.Add(Candidate);
+				Result.Component = ResolveNodeTemplate(OwnNode, BPGC);
+				if (Result.Component)
+				{
+					return Result;
+				}
 			}
 		}
-
-		if (!AmbiguousCandidates.IsEmpty())
+		else
 		{
-			AmbiguousCandidates.Sort();
-			Result.bIsAmbiguous = true;
-			Result.AmbiguousCandidates = MoveTemp(AmbiguousCandidates);
-			Result.FailureReason = TEXT("Bare-name component reference is ambiguous");
-			return Result;
-		}
+			const TArray<FCollision> Collisions = DetectSCSInheritedCollisions(BP);
+			TArray<FString> AmbiguousCandidates;
+			for (const FCollision& Collision : Collisions)
+			{
+				if (Collision.SCSNodeName != TargetName)
+				{
+					continue;
+				}
 
-		Result.Component = ResolveNodeTemplate(OwnNode, BPGC);
-		if (Result.Component)
-		{
-			return Result;
+				if (!AmbiguousCandidates.Contains(FString::Printf(TEXT("%s@self"), *Name)))
+				{
+					AmbiguousCandidates.Add(FString::Printf(TEXT("%s@self"), *Name));
+				}
+
+				const FString OwnerName = Collision.InheritedFromClass
+					? Collision.InheritedFromClass->GetName()
+					: TEXT("parent");
+				const FString Candidate = FString::Printf(TEXT("%s@%s"), *Name, *OwnerName);
+				if (!AmbiguousCandidates.Contains(Candidate))
+				{
+					AmbiguousCandidates.Add(Candidate);
+				}
+			}
+
+			if (!AmbiguousCandidates.IsEmpty())
+			{
+				AmbiguousCandidates.Sort();
+				Result.bIsAmbiguous = true;
+				Result.AmbiguousCandidates = MoveTemp(AmbiguousCandidates);
+				Result.FailureReason = TEXT("Bare-name component reference is ambiguous");
+				return Result;
+			}
+
+			Result.Component = ResolveNodeTemplate(OwnNode, BPGC);
+			if (Result.Component)
+			{
+				return Result;
+			}
 		}
 	}
 
@@ -461,12 +489,26 @@ FCortexBPSCSDiagnostics::FResolveResult FCortexBPSCSDiagnostics::ResolveComponen
 
 		if (USCS_Node* ParentNode = ParentBPGC->SimpleConstructionScript->FindSCSNode(TargetName))
 		{
+			if (!Qualifier.IsEmpty()
+				&& !Qualifier.Equals(ClassCursor->GetName(), ESearchCase::IgnoreCase))
+			{
+				continue;
+			}
+
 			Result.Component = ResolveNodeTemplate(ParentNode, ParentBPGC);
 			if (Result.Component)
 			{
 				return Result;
 			}
 		}
+	}
+
+	if (!Qualifier.IsEmpty())
+	{
+		Result.FailureReason = FString::Printf(
+			TEXT("No matching component found for qualified reference '%s'"),
+			*Name);
+		return Result;
 	}
 
 	// Layer 3: actor CDO component templates.

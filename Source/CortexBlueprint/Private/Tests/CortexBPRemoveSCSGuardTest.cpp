@@ -1,5 +1,6 @@
 #include "Misc/AutomationTest.h"
 #include "Operations/CortexBPCleanupOps.h"
+#include "CortexEditorUtils.h"
 #include "CortexBPTestLiftActor.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
@@ -7,15 +8,65 @@
 #include "Engine/SimpleConstructionScript.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/Guid.h"
+#include "Misc/PackageName.h"
+#include "Misc/Paths.h"
+#include "UObject/GarbageCollection.h"
+#include "UObject/Package.h"
+#include "UObject/UObjectIterator.h"
 
 namespace
 {
+	bool RemoveGuardIsPackageUnderRoot(const FString& PackageName, const FString& Root)
+	{
+		return PackageName == Root || PackageName.StartsWith(Root + TEXT("/"));
+	}
+
+	struct FScopedRemoveGuardWritableMountedRoot
+	{
+		FString Root;
+		FString PhysicalDir;
+
+		FScopedRemoveGuardWritableMountedRoot()
+		{
+			Root = FString::Printf(
+				TEXT("/CortexRemoveGuard%s"),
+				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
+			PhysicalDir = FPaths::ProjectSavedDir() / TEXT("CortexRemoveGuardBlueprintTests") / Root.RightChop(1);
+			IFileManager::Get().MakeDirectory(*PhysicalDir, true);
+			FPackageName::RegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
+			FCortexEditorUtils::AddTestWritableContentRoot(Root);
+		}
+
+		~FScopedRemoveGuardWritableMountedRoot()
+		{
+			for (TObjectIterator<UPackage> It; It; ++It)
+			{
+				UPackage* Package = *It;
+				if (Package && RemoveGuardIsPackageUnderRoot(Package->GetName(), Root))
+				{
+					Package->MarkAsGarbage();
+				}
+			}
+			CollectGarbage(RF_NoFlags);
+			FCortexEditorUtils::RemoveTestWritableContentRoot(Root);
+			FPackageName::UnRegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
+			IFileManager::Get().DeleteDirectory(*PhysicalDir, false, true);
+		}
+	};
+
+	const FString& RemoveGuardWritableRoot()
+	{
+		static FScopedRemoveGuardWritableMountedRoot MountedRoot;
+		return MountedRoot.Root;
+	}
+
 	UBlueprint* RemoveGuardCreateLiftBP(const TCHAR* Name, UClass* ParentClass = nullptr)
 	{
 		return FKismetEditorUtilities::CreateBlueprint(
 			ParentClass ? ParentClass : ACortexBPTestLiftActor::StaticClass(),
 			CreatePackage(*FString::Printf(
-				TEXT("/Game/Temp/%s_%s"),
+				TEXT("%s/%s_%s"),
+				*RemoveGuardWritableRoot(),
 				Name,
 				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8))),
 			FName(Name),
@@ -560,6 +611,52 @@ bool FCortexBPRemoveSCSGuardTOCTOUForceOverrideTest::RunTest(const FString& Para
 	return true;
 #else
 	AddInfo(TEXT("WITH_DEV_AUTOMATION_TESTS disabled; skipping TOCTOU force hook test."));
+	return true;
+#endif
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexBPRemoveSCSGuardCompileFailureRollbackTest,
+	"Cortex.Blueprint.Cleanup.RemoveSCSGuard.CompileFailureRollback",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexBPRemoveSCSGuardCompileFailureRollbackTest::RunTest(const FString& Parameters)
+{
+#if WITH_DEV_AUTOMATION_TESTS
+	UBlueprint* BP = RemoveGuardCreateLiftBP(TEXT("BP_RemoveGuardCompileFailure"));
+	TestNotNull(TEXT("BP created"), BP);
+	if (!BP)
+	{
+		return false;
+	}
+
+	TestNotNull(TEXT("GuardComp added"),
+		RemoveGuardAddSCSNode(BP, UCortexBPTestSubobjComponent::StaticClass(), TEXT("GuardComp")));
+
+	TSharedPtr<FJsonObject> Params = RemoveGuardMakeRemoveParams(BP, TEXT("GuardComp"));
+	Params->SetBoolField(TEXT("compile"), true);
+
+	FCortexBPCleanupOps::SetRemoveSCSComponentPostCompileTestHook(
+		[](UBlueprint* HookBP)
+		{
+			if (HookBP)
+			{
+				HookBP->Status = BS_Error;
+			}
+		});
+
+	const FCortexCommandResult Result = FCortexBPCleanupOps::RemoveSCSComponent(Params);
+	FCortexBPCleanupOps::SetRemoveSCSComponentPostCompileTestHook(nullptr);
+
+	TestFalse(TEXT("Compile failure returns an error"), Result.bSuccess);
+	TestEqual(TEXT("Error code is CompileFailed"), Result.ErrorCode, CortexErrorCodes::CompileFailed);
+	TestNotNull(TEXT("Node restored after compile failure"),
+		BP->SimpleConstructionScript->FindSCSNode(FName(TEXT("GuardComp"))));
+
+	BP->MarkAsGarbage();
+	return true;
+#else
+	AddInfo(TEXT("WITH_DEV_AUTOMATION_TESTS disabled; skipping compile failure rollback test."));
 	return true;
 #endif
 }
