@@ -12,7 +12,7 @@
 
 Your AI assistant can already write code. UnrealCortex lets it work *inside* the editor — querying DataTables, editing Blueprint graphs, building UMG hierarchies, placing actors, converting Blueprints to C++, analyzing Blueprints for bugs and performance issues, generating 3D assets, and even playing and testing your game autonomously. No copy-pasting, no file exports. Changes appear live with full undo support.
 
-> **Status:** v0.1.0 Beta — All 12 modules shipped and tested.
+> **Status:** v0.1.0 Beta — All 13 modules shipped and tested.
 
 ---
 
@@ -313,7 +313,7 @@ Add the plugin to your `.uproject`:
 }
 ```
 
-Rebuild your project. All 12 modules load automatically at `PostEngineInit` — after `IAssetRegistry` and the Blueprint compilation system are ready. All modules are `Type: Editor` and are stripped from shipping builds.
+Rebuild your project. All 13 modules load automatically at `PostEngineInit` — after `IAssetRegistry` and the Blueprint compilation system are ready. All modules are `Type: Editor` and are stripped from shipping builds.
 
 ### Step 2 — Install Python Dependencies
 
@@ -475,6 +475,7 @@ void FMyDomainModule::StartupModule()
 | **CortexData** | CortexCore | `GameplayTags` · `AssetRegistry` · `UnrealEd` |
 | **CortexEditor** | CortexCore | `LevelEditor` · `Slate` · `SlateCore` · `EnhancedInput` · `ImageWrapper` · `RenderCore` |
 | **CortexQA** | CortexCore · CortexEditor | `NavigationSystem` · `AIModule` · `GameplayTags` |
+| **CortexStateTree** | CortexCore | `CoreUObject` · `Engine` · `Json` · `JsonUtilities` · `AssetRegistry` · `AssetTools` · `UnrealEd` · `GameplayTags` · `StateTreeModule` · `StateTreeEditorModule` |
 | **CortexLevel** | CortexCore | `LevelEditor` · `DataLayerEditor` |
 | **CortexUMG** | CortexCore | `UMG` · `UMGEditor` · `Slate` · `SlateCore` · `MovieScene` |
 | **CortexReflect** | CortexCore | `AssetRegistry` · `BlueprintGraph` · `Kismet` |
@@ -485,7 +486,7 @@ Domain modules depend only on CortexCore (and shared infrastructure: CortexGraph
 
 ### Cook and Packaging Safety
 
-All 12 modules declare `"Type": "Editor"` in `UnrealCortex.uplugin`. Because `Type: Editor` modules are not loaded in non-editor targets (cook, server, game), the `PostEngineInit` load phase is only relevant in the editor. The plugin is never included in cooked or packaged builds.
+All 13 modules declare `"Type": "Editor"` in `UnrealCortex.uplugin`. Because `Type: Editor` modules are not loaded in non-editor targets (cook, server, game), the `PostEngineInit` load phase is only relevant in the editor. The plugin is never included in cooked or packaged builds.
 
 ### Generic Serialization
 
