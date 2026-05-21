@@ -18,7 +18,7 @@ void FCortexStateTreeModule::StartupModule()
 	Registry.RegisterDomain(
 		TEXT("statetree"),
 		TEXT("Cortex StateTree"),
-		TEXT("1.0.0"),
+		TEXT("1.0.1"),
 		MakeShared<FCortexStateTreeCommandHandler>());
 
 	UE_LOG(LogCortexStateTree, Log, TEXT("CortexStateTree registered with CortexCore"));

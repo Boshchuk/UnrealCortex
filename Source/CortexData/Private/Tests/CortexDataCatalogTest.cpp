@@ -23,7 +23,7 @@ bool FCortexDataCatalogTest::RunTest(const FString& Parameters)
 	// Arrange: Start TCP server on a unique test port
 	const int32 TestPort = 18744;
 	FCortexCommandRouter CommandHandler;
-	CommandHandler.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.0"),
+	CommandHandler.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.1"),
 		MakeShared<FCortexDataCommandHandler>());
 	FCortexTcpServer Server;
 	const bool bStarted = Server.Start(TestPort,

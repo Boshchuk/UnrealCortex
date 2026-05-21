@@ -138,7 +138,7 @@ bool FCortexDataAssetSubclassFilterTest::RunTest(const FString& Parameters)
 
 	const int32 TestPort = 18745;
 	FCortexCommandRouter CommandHandler;
-	CommandHandler.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.0"),
+	CommandHandler.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.1"),
 		MakeShared<FCortexDataCommandHandler>());
 	FCortexTcpServer Server;
 	const bool bStarted = Server.Start(TestPort,

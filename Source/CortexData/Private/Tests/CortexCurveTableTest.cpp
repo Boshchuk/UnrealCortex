@@ -18,7 +18,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCortexListCurveTablesTest::RunTest(const FString& Parameters)
 {
 	FCortexCommandRouter Handler;
-	Handler.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.0"),
+	Handler.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.1"),
 		MakeShared<FCortexDataCommandHandler>());
 
 	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
@@ -71,7 +71,7 @@ bool FCortexGetCurveTableTest::RunTest(const FString& Parameters)
 	FString TablePath = TempTable->GetPathName();
 
 	FCortexCommandRouter Handler;
-	Handler.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.0"),
+	Handler.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.1"),
 		MakeShared<FCortexDataCommandHandler>());
 
 	// Test: get all curves
@@ -178,7 +178,7 @@ bool FCortexUpdateCurveTableRowTest::RunTest(const FString& Parameters)
 	FString TablePath = TempTable->GetPathName();
 
 	FCortexCommandRouter Handler;
-	Handler.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.0"),
+	Handler.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.1"),
 		MakeShared<FCortexDataCommandHandler>());
 
 	// Update the curve row with new keys

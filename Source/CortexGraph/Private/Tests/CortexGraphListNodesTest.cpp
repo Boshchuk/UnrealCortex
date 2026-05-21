@@ -17,7 +17,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCortexGraphRelativeLevelBPPathTest::RunTest(const FString& Parameters)
 {
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>());
 
 	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
@@ -63,7 +63,7 @@ bool FCortexGraphListNodesTest::RunTest(const FString& Parameters)
     FString AssetPath = TestBP->GetPathName();
 
     FCortexCommandRouter Router;
-    Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+    Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"),
         MakeShared<FCortexGraphCommandHandler>());
 
     // Add a node via command so we know what to expect

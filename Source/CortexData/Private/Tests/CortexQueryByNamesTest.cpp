@@ -14,7 +14,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCortexQueryByNamesTest::RunTest(const FString& Parameters)
 {
 	FCortexCommandRouter Handler;
-	Handler.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.0"),
+	Handler.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.1"),
 		MakeShared<FCortexDataCommandHandler>());
 
 	// --- Test 1: query_datatable with row_names returns only requested rows ---

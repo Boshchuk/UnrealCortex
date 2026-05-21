@@ -39,7 +39,7 @@ bool FCortexGraphRemoveNodeTest::RunTest(const FString& Parameters)
     TestNotNull(TEXT("EventGraph should exist"), EventGraph);
 
     FCortexCommandRouter Router;
-    Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+    Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"),
         MakeShared<FCortexGraphCommandHandler>());
 
     // Add two nodes and connect them

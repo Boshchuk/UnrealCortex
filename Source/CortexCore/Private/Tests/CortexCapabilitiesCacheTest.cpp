@@ -63,7 +63,7 @@ bool FCortexCapabilitiesParamSerializationTest::RunTest(const FString& Parameter
 	CoreModule.GetCommandRegistry().RegisterDomain(
 		TEXT("capabilities_test"),
 		TEXT("Capabilities Test"),
-		TEXT("1.0.0"),
+		TEXT("1.0.1"),
 		MakeShared<FCapabilitiesTestHandler>());
 
 	FCortexCommandRouter& Router = CoreModule.GetCommandRouter();
@@ -229,7 +229,7 @@ bool FCortexCapabilitiesCacheCreationTest::RunTest(const FString& Parameters)
 		Router.RegisterDomain(
 			TEXT("cache_test"),
 			TEXT("Cache Test"),
-			TEXT("1.0.0"),
+			TEXT("1.0.1"),
 			MakeShared<FCapabilitiesTestHandler>());
 
 		FTSTicker::GetCoreTicker().Tick(0.016f);
@@ -255,7 +255,7 @@ bool FCortexCapabilitiesCacheRecreationTest::RunTest(const FString& Parameters)
 	Router.RegisterDomain(
 		TEXT("cache_test"),
 		TEXT("Cache Test"),
-		TEXT("1.0.0"),
+		TEXT("1.0.1"),
 		MakeShared<FCapabilitiesTestHandler>());
 
 	FTSTicker::GetCoreTicker().Tick(0.016f);
@@ -289,7 +289,7 @@ bool FCortexCapabilitiesCacheDestroyBeforeTickerTest::RunTest(const FString& Par
 		Router.RegisterDomain(
 			TEXT("cache_test"),
 			TEXT("Cache Test"),
-			TEXT("1.0.0"),
+			TEXT("1.0.1"),
 			MakeShared<FCapabilitiesTestHandler>());
 		// Router destroyed here before ticker fires — destructor must not crash
 	}

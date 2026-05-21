@@ -29,7 +29,7 @@ void FCortexBlueprintModule::StartupModule()
 	Registry.RegisterDomain(
 		TEXT("blueprint"),
 		TEXT("Cortex Blueprint"),
-		TEXT("1.0.0"),
+		TEXT("1.0.1"),
 		MakeShared<FCortexBPCommandHandler>()
 	);
 

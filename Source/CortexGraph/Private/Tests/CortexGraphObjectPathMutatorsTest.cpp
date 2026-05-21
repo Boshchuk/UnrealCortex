@@ -59,7 +59,7 @@ bool FCortexGraphObjectPathMutatorsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("test input uses object-path shape"), ObjectPath, PackagePath + TEXT(".") + FPackageName::GetShortName(PackagePath));
 
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"), MakeShared<FCortexGraphCommandHandler>());
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"), MakeShared<FCortexGraphCommandHandler>());
 
 	FCortexCommandResult AddAResult = Router.Execute(TEXT("graph.add_node"), MakePrintStringAddParams(ObjectPath));
 	TestTrue(TEXT("graph.add_node accepts Blueprint object path"), AddAResult.bSuccess);

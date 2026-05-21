@@ -16,7 +16,7 @@ void FCortexUMGModule::StartupModule()
     Registry.RegisterDomain(
         TEXT("umg"),
         TEXT("Cortex UMG"),
-        TEXT("1.0.0"),
+        TEXT("1.0.1"),
         MakeShared<FCortexUMGCommandHandler>()
     );
 

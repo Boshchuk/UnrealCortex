@@ -37,7 +37,7 @@ bool FCortexGraphSearchNodesTest::RunTest(const FString& Parameters)
 	const FString AssetPath = TestBP->GetPathName();
 
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"), MakeShared<FCortexGraphCommandHandler>());
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"), MakeShared<FCortexGraphCommandHandler>());
 
 	for (int32 i = 0; i < 2; ++i)
 	{
@@ -189,7 +189,7 @@ bool FCortexGraphSearchNodesMacroGraphTest::RunTest(const FString& Parameters)
 	MacroNode->AllocateDefaultPins();
 
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"), MakeShared<FCortexGraphCommandHandler>());
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"), MakeShared<FCortexGraphCommandHandler>());
 
 	const FString AssetPath = TestBP->GetPathName();
 

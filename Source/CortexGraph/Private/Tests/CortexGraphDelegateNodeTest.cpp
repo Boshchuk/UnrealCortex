@@ -36,7 +36,7 @@ bool FCortexGraphDelegateNodeTest::RunTest(const FString& Parameters)
 
 	// Register handler
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>());
 
 	// ---- Test 1: AddDelegate with external class delegate ----

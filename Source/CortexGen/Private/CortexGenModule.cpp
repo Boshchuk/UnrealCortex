@@ -89,7 +89,7 @@ void FCortexGenModule::StartupModule()
     Registry.RegisterDomain(
         TEXT("gen"),
         TEXT("Cortex Gen"),
-        TEXT("1.0.0"),
+        TEXT("1.0.1"),
         MakeShared<FCortexGenCommandHandler>(JobManager)
     );
 

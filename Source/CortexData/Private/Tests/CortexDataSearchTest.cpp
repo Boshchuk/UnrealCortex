@@ -16,7 +16,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCortexDataSearchRowNameTest::RunTest(const FString& Parameters)
 {
 	FCortexCommandRouter Handler;
-	Handler.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.0"),
+	Handler.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.1"),
 		MakeShared<FCortexDataCommandHandler>());
 
 	// Step 1: list available datatables to find one with rows

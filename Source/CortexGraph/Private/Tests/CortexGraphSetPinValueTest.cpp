@@ -34,7 +34,7 @@ bool FCortexGraphSetPinValueTest::RunTest(const FString& Parameters)
 
 	// Register handler
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>());
 
 	// Add a Delay node

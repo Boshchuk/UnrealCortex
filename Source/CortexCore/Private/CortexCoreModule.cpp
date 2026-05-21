@@ -31,7 +31,7 @@ void FCortexCoreModule::StartupModule()
     CommandRouter->RegisterDomain(
         TEXT("core"),
         TEXT("Cortex Core"),
-        TEXT("1.0.0"),
+        TEXT("1.0.1"),
         MakeShared<FCortexCoreCommandHandler>()
     );
 }

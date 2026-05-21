@@ -704,7 +704,7 @@ bool FCortexMaterialBatchDeferredTest::RunTest(const FString& Parameters)
 	FCortexCommandRouter Router;
 
 	// Register material domain so batch can route commands
-	Router.RegisterDomain(TEXT("material"), TEXT("Cortex Material"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("material"), TEXT("Cortex Material"), TEXT("1.0.1"),
 		MakeShared<FCortexMaterialCommandHandler>());
 
 	TSharedPtr<FJsonObject> AddNodeParams = MakeShared<FJsonObject>();

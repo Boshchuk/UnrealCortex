@@ -34,7 +34,7 @@ bool FCortexGraphTraceExecTest::RunTest(const FString& Parameters)
 	const FString AssetPath = TestBP->GetPathName();
 
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"), MakeShared<FCortexGraphCommandHandler>());
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"), MakeShared<FCortexGraphCommandHandler>());
 
 	const auto AddPrintStringNode = [&](const TCHAR* Label) -> FString
 	{

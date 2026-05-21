@@ -23,7 +23,7 @@ bool FCortexUMGModuleLoadTest::RunTest(const FString& Parameters)
         {
             bFound = true;
             TestEqual(TEXT("Domain display name"), Domain.DisplayName, FString(TEXT("Cortex UMG")));
-            TestEqual(TEXT("Domain version"), Domain.Version, FString(TEXT("1.0.0")));
+            TestEqual(TEXT("Domain version"), Domain.Version, FString(TEXT("1.0.1")));
             TestTrue(TEXT("Handler should be valid"), Domain.Handler.IsValid());
             break;
         }

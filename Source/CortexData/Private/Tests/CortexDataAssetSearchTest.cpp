@@ -13,7 +13,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCortexDataAssetSearchNoFilterTest::RunTest(const FString& Parameters)
 {
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.0"), MakeShared<FCortexDataCommandHandler>());
+	Router.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.1"), MakeShared<FCortexDataCommandHandler>());
 
 	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 	Params->SetStringField(TEXT("query"), TEXT("Default"));

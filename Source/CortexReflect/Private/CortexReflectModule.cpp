@@ -18,7 +18,7 @@ void FCortexReflectModule::StartupModule()
 	Registry.RegisterDomain(
 		TEXT("reflect"),
 		TEXT("Cortex Reflect"),
-		TEXT("1.0.0"),
+		TEXT("1.0.1"),
 		MakeShared<FCortexReflectCommandHandler>()
 	);
 

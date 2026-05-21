@@ -36,7 +36,7 @@ bool FCortexGraphListGraphsTest::RunTest(const FString& Parameters)
 
 	// Register handler via router (consistent with other tests)
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>());
 
 	// Test: Call list_graphs with valid asset_path

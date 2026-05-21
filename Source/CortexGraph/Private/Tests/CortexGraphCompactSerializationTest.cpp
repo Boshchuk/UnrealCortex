@@ -43,7 +43,7 @@ bool FCortexGraphCompactPinSkippingTest::RunTest(const FString& Parameters)
 	}
 
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>());
 
 	const FString AssetPath = TestBP->GetPathName();
@@ -170,7 +170,7 @@ bool FCortexGraphListNodesCompactTest::RunTest(const FString& Parameters)
 	}
 
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>());
 
 	const FString AssetPath = TestBP->GetPathName();
@@ -283,7 +283,7 @@ bool FCortexGraphGetNodeCompactTest::RunTest(const FString& Parameters)
 	}
 
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>());
 
 	const FString AssetPath = TestBP->GetPathName();
@@ -475,7 +475,7 @@ bool FCortexGraphSearchNodesCompactTest::RunTest(const FString& Parameters)
 	}
 
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>());
 
 	const FString AssetPath = TestBP->GetPathName();

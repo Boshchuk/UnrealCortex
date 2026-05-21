@@ -37,7 +37,7 @@ bool FCortexGraphPinMismatchTest::RunTest(const FString& Parameters)
 	FString AssetPath = TestBP->GetPathName();
 
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>());
 
 	// Add two PrintString nodes

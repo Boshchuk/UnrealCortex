@@ -16,7 +16,7 @@ void FCortexMaterialModule::StartupModule()
 	Registry.RegisterDomain(
 		TEXT("material"),
 		TEXT("Cortex Material"),
-		TEXT("1.0.0"),
+		TEXT("1.0.1"),
 		MakeShared<FCortexMaterialCommandHandler>()
 	);
 

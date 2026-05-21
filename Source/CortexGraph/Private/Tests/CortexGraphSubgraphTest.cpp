@@ -228,7 +228,7 @@ bool FCortexGraphSubgraphDiscoveryTest::RunTest(const FString& Parameters)
 	// Use command router to call get_subgraph
 	FCortexCommandRouter Router;
 	Router.RegisterDomain(
-		TEXT("graph"), TEXT("Graph"), TEXT("1.0.0"),
+		TEXT("graph"), TEXT("Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>()
 	);
 
@@ -329,7 +329,7 @@ bool FCortexGraphSubgraphListNodesTest::RunTest(const FString& Parameters)
 	// Call list_nodes with subgraph_path
 	FCortexCommandRouter Router;
 	Router.RegisterDomain(
-		TEXT("graph"), TEXT("Graph"), TEXT("1.0.0"),
+		TEXT("graph"), TEXT("Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>()
 	);
 
@@ -395,7 +395,7 @@ bool FCortexGraphSubgraphSearchRecursiveTest::RunTest(const FString& Parameters)
 	// search_nodes WITHOUT subgraph_path should still find the inner node
 	FCortexCommandRouter Router;
 	Router.RegisterDomain(
-		TEXT("graph"), TEXT("Graph"), TEXT("1.0.0"),
+		TEXT("graph"), TEXT("Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>()
 	);
 
@@ -450,7 +450,7 @@ bool FCortexGraphSubgraphWriteTest::RunTest(const FString& Parameters)
 
 	FCortexCommandRouter Router;
 	Router.RegisterDomain(
-		TEXT("graph"), TEXT("Graph"), TEXT("1.0.0"),
+		TEXT("graph"), TEXT("Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>()
 	);
 
@@ -520,7 +520,7 @@ bool FCortexGraphSubgraphConnectTest::RunTest(const FString& Parameters)
 
 	FCortexCommandRouter Router;
 	Router.RegisterDomain(
-		TEXT("graph"), TEXT("Graph"), TEXT("1.0.0"),
+		TEXT("graph"), TEXT("Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>()
 	);
 
@@ -583,7 +583,7 @@ bool FCortexGraphSubgraphListGraphsTest::RunTest(const FString& Parameters)
 
 	FCortexCommandRouter Router;
 	Router.RegisterDomain(
-		TEXT("graph"), TEXT("Graph"), TEXT("1.0.0"),
+		TEXT("graph"), TEXT("Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>()
 	);
 
@@ -667,7 +667,7 @@ bool FCortexGraphSubgraphCreateCompositeTest::RunTest(const FString& Parameters)
 
 	FCortexCommandRouter Router;
 	Router.RegisterDomain(
-		TEXT("graph"), TEXT("Graph"), TEXT("1.0.0"),
+		TEXT("graph"), TEXT("Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>()
 	);
 
