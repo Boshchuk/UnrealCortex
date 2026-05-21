@@ -386,7 +386,8 @@ The session-start hook injects `context.md` automatically. Domain agents read th
 
 ```
 .cortex/
-├── config.yaml          ← engine path, active domains
+├── config.yaml          ← shared engine defaults, active domains
+├── config.local.yaml    ← optional per-machine overrides, not committed
 ├── context.md           ← shared project knowledge (read every session)
 └── domains/
     ├── data.md          ← table schemas, balance rules
@@ -399,6 +400,8 @@ The session-start hook injects `context.md` automatically. Domain agents read th
     ├── reflect.md       ← class hierarchy notes, scan scope
     └── gen.md           ← generation providers, import destinations, job patterns
 ```
+
+Check `.cortex/config.yaml` into version control for shared project defaults. Put workstation-specific values, especially a local Unreal Engine install path, in `.cortex/config.local.yaml`. Cortex Toolkit merges the local file over the shared config when present, and editor helpers fall back to `UE_PATH` only when the effective Cortex config has no `engine.path`.
 
 ---
 
