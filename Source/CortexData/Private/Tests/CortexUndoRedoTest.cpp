@@ -97,7 +97,7 @@ bool FCortexUndoAddRowTest::RunTest(const FString& Parameters)
 
 	// Add a row via command handler (which wraps in FScopedTransaction internally)
 	FCortexCommandRouter Handler;
-	Handler.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.0"),
+	Handler.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.1"),
 		MakeShared<FCortexDataCommandHandler>());
 	TSharedPtr<FJsonObject> AddParams = MakeShared<FJsonObject>();
 	AddParams->SetStringField(TEXT("table_path"), TablePath);

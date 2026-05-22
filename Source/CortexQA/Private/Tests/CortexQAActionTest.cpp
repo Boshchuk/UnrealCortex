@@ -8,7 +8,7 @@ namespace
     FCortexCommandRouter CreateQARouterActions()
     {
         FCortexCommandRouter Router;
-        Router.RegisterDomain(TEXT("qa"), TEXT("Cortex QA"), TEXT("1.0.0"),
+        Router.RegisterDomain(TEXT("qa"), TEXT("Cortex QA"), TEXT("1.0.1"),
             MakeShared<FCortexQACommandHandler>());
         return Router;
     }

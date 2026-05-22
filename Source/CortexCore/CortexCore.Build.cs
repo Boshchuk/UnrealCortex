@@ -16,12 +16,14 @@ public class CortexCore : ModuleRules
             "CoreUObject",
             "Engine",
             "DeveloperSettings",
+            "Projects",
             "Sockets",
             "Networking",
             "Json",
             "JsonUtilities",
             "GameplayTags",
             "UnrealEd",
+            // Shared asset registry access is used by asset operations and fingerprinting.
             "AssetRegistry",
             // Test-only: required for CortexSerializerInstancedSubObjectTest.cpp (InputMappingContext, InputModifiers)
             // Not used in production CortexCore code.

@@ -6,6 +6,7 @@
 #include "Async/Async.h"
 #include "Containers/Ticker.h"
 #include "CortexFrontendSettings.h"
+#include "CortexFrontendProviderSettings.h"
 #include "Editor.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Input/Events.h"
@@ -24,6 +25,7 @@
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "Context/CortexEditorContextGatherer.h"
 #include "Session/CortexSessionTypes.h"
+#include "Providers/CortexProviderRegistry.h"
 #include "Styling/AppStyle.h"
 #include "Styling/CoreStyle.h"
 #include "Widgets/Input/SButton.h"
@@ -61,6 +63,50 @@ namespace
         }();
         return Style;
     }
+
+    FString GetEffortDisplayName(ECortexEffortLevel Level)
+    {
+        switch (Level)
+        {
+        case ECortexEffortLevel::Default:
+            return TEXT("Default");
+        case ECortexEffortLevel::Low:
+            return TEXT("Low");
+        case ECortexEffortLevel::Medium:
+            return TEXT("Medium");
+        case ECortexEffortLevel::High:
+            return TEXT("High");
+        case ECortexEffortLevel::Maximum:
+            return TEXT("Max");
+        }
+
+        return TEXT("Default");
+    }
+}
+
+TArray<ECortexEffortLevel> SCortexInputArea::GetEffortOptionsForActiveProvider()
+{
+    check(IsInGameThread());
+
+    const UCortexFrontendProviderSettings* ProviderSettings = UCortexFrontendProviderSettings::Get();
+    const FString ProviderId = ProviderSettings != nullptr
+        ? ProviderSettings->GetEffectiveProviderId()
+        : FCortexProviderRegistry::GetDefaultProviderId();
+    const FCortexProviderDefinition& ProviderDefinition = FCortexProviderRegistry::ResolveDefinition(ProviderId);
+    const FCortexResolvedSessionOptions Resolved = FCortexFrontendSettings::Get().ResolveForActiveProvider();
+    const FCortexProviderModelDefinition& ModelDefinition =
+        FCortexProviderRegistry::ValidateOrGetDefaultModel(ProviderDefinition, Resolved.ModelId);
+
+    TArray<ECortexEffortLevel> Options;
+    for (const ECortexEffortLevel Level : ModelDefinition.SupportedEffortLevels)
+    {
+        if (ProviderDefinition.SupportedEffortLevels.Contains(Level))
+        {
+            Options.Add(Level);
+        }
+    }
+
+    return Options;
 }
 
 void SCortexInputArea::Construct(const FArguments& InArgs)
@@ -171,11 +217,7 @@ void SCortexInputArea::Construct(const FArguments& InArgs)
                         // Ctrl+Alt+K: attach editor context snapshot as context chip
                         if (KeyEvent.GetKey() == EKeys::K && KeyEvent.IsControlDown() && KeyEvent.IsAltDown())
                         {
-                            FCortexContextChip Chip;
-                            Chip.Kind = ECortexContextChipKind::Provider;
-                            Chip.Label = TEXT("editorContext");
-                            Chip.DisplayName = TEXT("Editor Context");
-                            AddContextChip(Chip);
+                            HandleAttachEditorContextShortcut();
                             return FReply::Handled();
                         }
                         if (KeyEvent.GetKey() == EKeys::Enter && !KeyEvent.IsShiftDown() && !bAutoCompleteOpen)
@@ -313,8 +355,10 @@ void SCortexInputArea::Construct(const FArguments& InArgs)
                         .ColorAndOpacity(FSlateColor(CortexColors::ToolLabelColor))
                     ];
 
-                    const FString CurrentModel = FCortexFrontendSettings::Get().GetSelectedModel();
-                    for (const FString& ModelId : FCortexFrontendSettings::Get().GetAvailableModels())
+                    const FCortexResolvedSessionOptions ResolvedOptions =
+                        FCortexFrontendSettings::Get().ResolveForActiveProvider();
+                    const FString CurrentModel = ResolvedOptions.ModelId;
+                    for (const FString& ModelId : FCortexFrontendSettings::Get().GetAvailableModelsForActiveProvider())
                     {
                         const bool bIsSelected = (ModelId == CurrentModel);
                         Menu->AddSlot()
@@ -328,8 +372,9 @@ void SCortexInputArea::Construct(const FArguments& InArgs)
                                 FCortexFrontendSettings::Get().SetSelectedModel(ModelId);
                                 if (Self->ModelLabel.IsValid())
                                 {
-                                    Self->ModelLabel->SetText(FText::FromString(
-                                        FCortexFrontendSettings::Get().GetSelectedModel()));
+                                    const FCortexResolvedSessionOptions UpdatedResolvedOptions =
+                                        FCortexFrontendSettings::Get().ResolveForActiveProvider();
+                                    Self->ModelLabel->SetText(FText::FromString(UpdatedResolvedOptions.ModelId));
                                 }
                                 Self->ModelDropdown->SetIsOpen(false);
                                 return FReply::Handled();
@@ -383,23 +428,11 @@ void SCortexInputArea::Construct(const FArguments& InArgs)
                         .ColorAndOpacity(FSlateColor(CortexColors::ToolLabelColor))
                     ];
 
-                    const ECortexEffortLevel CurrentEffort = FCortexFrontendSettings::Get().GetEffortLevel();
-                    for (ECortexEffortLevel Level : {
-                        ECortexEffortLevel::Default,
-                        ECortexEffortLevel::Low,
-                        ECortexEffortLevel::Medium,
-                        ECortexEffortLevel::High,
-                        ECortexEffortLevel::Maximum })
+                    const FCortexResolvedSessionOptions EffortResolvedOptions = FCortexFrontendSettings::Get().ResolveForActiveProvider();
+                    const ECortexEffortLevel CurrentEffort = EffortResolvedOptions.EffortLevel;
+                    for (ECortexEffortLevel Level : SCortexInputArea::GetEffortOptionsForActiveProvider())
                     {
-                        FString LevelStr;
-                        switch (Level)
-                        {
-                        case ECortexEffortLevel::Default: LevelStr = TEXT("Default"); break;
-                        case ECortexEffortLevel::Low:     LevelStr = TEXT("Low"); break;
-                        case ECortexEffortLevel::Medium:  LevelStr = TEXT("Medium"); break;
-                        case ECortexEffortLevel::High:    LevelStr = TEXT("High"); break;
-                        case ECortexEffortLevel::Maximum: LevelStr = TEXT("Max"); break;
-                        }
+                        const FString LevelStr = GetEffortDisplayName(Level);
                         const bool bIsSelected = (Level == CurrentEffort);
                         Menu->AddSlot()
                         .AutoHeight()
@@ -412,8 +445,9 @@ void SCortexInputArea::Construct(const FArguments& InArgs)
                                 FCortexFrontendSettings::Get().SetEffortLevel(Level);
                                 if (Self->EffortLabel.IsValid())
                                 {
-                                    const bool bShowEffort = (Level != ECortexEffortLevel::Default);
-                                    Self->EffortLabel->SetText(FText::FromString(bShowEffort ? LevelStr : TEXT("")));
+                                    const FCortexResolvedSessionOptions UpdatedOptions = FCortexFrontendSettings::Get().ResolveForActiveProvider();
+                                    const bool bShowEffort = (UpdatedOptions.EffortLevel != ECortexEffortLevel::Default);
+                                    Self->EffortLabel->SetText(FText::FromString(bShowEffort ? GetEffortDisplayName(UpdatedOptions.EffortLevel) : TEXT("")));
                                     Self->EffortLabel->SetVisibility(bShowEffort ? EVisibility::Visible : EVisibility::Collapsed);
                                 }
                                 Self->ModelDropdown->SetIsOpen(false);
@@ -464,25 +498,37 @@ void SCortexInputArea::Construct(const FArguments& InArgs)
                         + SHorizontalBox::Slot()
                         .AutoWidth()
                         .VAlign(VAlign_Center)
-                        [
-                            SAssignNew(ModelLabel, STextBlock)
-                            .Text(FText::FromString(FCortexFrontendSettings::Get().GetSelectedModel()))
-                            .Font(FCoreStyle::GetDefaultFontStyle("Regular", 10))
-                            .ColorAndOpacity(FSlateColor(CortexColors::TextSecondary))
-                        ]
+                            [
+                                SAssignNew(ModelLabel, STextBlock)
+                                .Text_Lambda([]()
+                                {
+                                    return FText::FromString(
+                                        FCortexFrontendSettings::Get().ResolveForActiveProvider().ModelId);
+                                })
+                                .Font(FCoreStyle::GetDefaultFontStyle("Regular", 10))
+                                .ColorAndOpacity(FSlateColor(CortexColors::TextSecondary))
+                            ]
                         + SHorizontalBox::Slot()
                         .AutoWidth()
                         .VAlign(VAlign_Center)
                         .Padding(4.0f, 0.0f, 0.0f, 0.0f)
                         [
                             SAssignNew(EffortLabel, STextBlock)
-                            .Text(FText::FromString(
-                                FCortexFrontendSettings::Get().GetEffortLevel() == ECortexEffortLevel::Default
-                                    ? TEXT("") : FCortexFrontendSettings::Get().GetEffortLevelString()))
+                            .Text_Lambda([]()
+                            {
+                                const FCortexResolvedSessionOptions ResolvedOptions = FCortexFrontendSettings::Get().ResolveForActiveProvider();
+                                return FText::FromString(ResolvedOptions.EffortLevel == ECortexEffortLevel::Default
+                                    ? TEXT("")
+                                    : GetEffortDisplayName(ResolvedOptions.EffortLevel));
+                            })
                             .Font(FCoreStyle::GetDefaultFontStyle("Regular", 9))
                             .ColorAndOpacity(FSlateColor(CortexColors::ToolLabelColor))
-                            .Visibility(FCortexFrontendSettings::Get().GetEffortLevel() == ECortexEffortLevel::Default
-                                ? EVisibility::Collapsed : EVisibility::Visible)
+                            .Visibility_Lambda([]()
+                            {
+                                return FCortexFrontendSettings::Get().ResolveForActiveProvider().EffortLevel == ECortexEffortLevel::Default
+                                    ? EVisibility::Collapsed
+                                    : EVisibility::Visible;
+                            })
                         ]
                         + SHorizontalBox::Slot()
                         .AutoWidth()
@@ -1231,7 +1277,11 @@ void SCortexInputArea::LoadAssetCache()
         Item->Kind = ECortexAutoCompleteKind::Asset;
         AssetCache.Add(Item);
         return true; // Continue enumeration
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 5
+    }, true);  // bOnlyOnDiskAssets — UE 5.4 uses bool, 5.5+ uses EEnumerateAssetsFlags
+#else
     }, UE::AssetRegistry::EEnumerateAssetsFlags::OnlyOnDiskAssets);
+#endif
 }
 
 void SCortexInputArea::PopulateCoreCommands()
@@ -1246,7 +1296,7 @@ void SCortexInputArea::PopulateCoreCommands()
     };
 
     CommandCache.Reset();
-    CommandCache.Add(MakeCmd(TEXT("help"),    TEXT("Get help with Claude Code"),    ECortexAutoCompleteKind::CoreCommand));
+    CommandCache.Add(MakeCmd(TEXT("help"),    TEXT("Get help with the active AI provider"), ECortexAutoCompleteKind::CoreCommand));
     CommandCache.Add(MakeCmd(TEXT("clear"),   TEXT("Clear conversation history"),  ECortexAutoCompleteKind::CoreCommand));
     CommandCache.Add(MakeCmd(TEXT("compact"), TEXT("Compact conversation context"), ECortexAutoCompleteKind::CoreCommand));
 }
@@ -1535,6 +1585,15 @@ FString SCortexInputArea::ResolveAssetChip(const FCortexContextChip& Chip, bool&
     return TEXT("");
 }
 
+void SCortexInputArea::HandleAttachEditorContextShortcut()
+{
+    FCortexContextChip Chip;
+    Chip.Kind = ECortexContextChipKind::Provider;
+    Chip.Label = TEXT("editorContext");
+    Chip.DisplayName = TEXT("Editor Context");
+    AddContextChip(Chip);
+}
+
 FReply SCortexInputArea::OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
 {
     // Autocomplete navigation duplicated here because:
@@ -1576,11 +1635,7 @@ FReply SCortexInputArea::OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent&
     // Ctrl+Alt+K: attach editor context snapshot as context chip
     if (InKeyEvent.GetKey() == EKeys::K && InKeyEvent.IsControlDown() && InKeyEvent.IsAltDown())
     {
-        FCortexContextChip Chip;
-        Chip.Kind = ECortexContextChipKind::Provider;
-        Chip.Label = TEXT("editorContext");
-        Chip.DisplayName = TEXT("Editor Context");
-        AddContextChip(Chip);
+        HandleAttachEditorContextShortcut();
         return FReply::Handled();
     }
     if (InputTextBox.IsValid())

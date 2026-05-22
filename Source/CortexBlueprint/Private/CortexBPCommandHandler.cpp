@@ -86,6 +86,16 @@ FCortexCommandResult FCortexBPCommandHandler::Execute(
 		return FCortexBPClassDefaultsOps::GetClassDefaults(Params);
 	}
 
+	if (Command == TEXT("list_inherited_properties"))
+	{
+		return FCortexBPClassDefaultsOps::ListInheritedProperties(Params);
+	}
+
+	if (Command == TEXT("list_settable_defaults"))
+	{
+		return FCortexBPClassDefaultsOps::ListSettableDefaults(Params);
+	}
+
 	if (Command == TEXT("set_class_defaults"))
 	{
 		return FCortexBPClassDefaultsOps::SetClassDefaults(Params);
@@ -99,6 +109,11 @@ FCortexCommandResult FCortexBPCommandHandler::Execute(
 	if (Command == TEXT("set_component_defaults"))
 	{
 		return FCortexBPComponentOps::SetComponentDefaults(Params);
+	}
+
+	if (Command == TEXT("list_scs_components"))
+	{
+		return FCortexBPComponentOps::ListSCSComponents(Params);
 	}
 
 	if (Command == TEXT("add_scs_component"))
@@ -119,6 +134,11 @@ FCortexCommandResult FCortexBPCommandHandler::Execute(
 	if (Command == TEXT("remove_scs_component"))
 	{
 		return FCortexBPCleanupOps::RemoveSCSComponent(Params);
+	}
+
+	if (Command == TEXT("rename_scs_component"))
+	{
+		return FCortexBPCleanupOps::RenameSCSComponent(Params);
 	}
 
 	if (Command == TEXT("recompile_dependents"))
@@ -192,7 +212,8 @@ TArray<FCortexCommandInfo> FCortexBPCommandHandler::GetSupportedCommands() const
 		.Optional(TEXT("type"), TEXT("string"), TEXT("Optional Blueprint type filter")));
 	Commands.Add(FCortexCommandInfo{TEXT("get_info"), TEXT("Get Blueprint info")}
 		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
-		.Optional(TEXT("include_inherited"), TEXT("boolean"), TEXT("Include inherited C++ functions (default: true)")));
+		.Optional(TEXT("include_inherited"), TEXT("boolean"), TEXT("Include inherited C++ functions (default: true)"))
+		.Optional(TEXT("compact"), TEXT("boolean"), TEXT("Omit empty inputs/outputs arrays and source field (default: true)")));
 	Commands.Add(FCortexCommandInfo{TEXT("delete"), TEXT("Delete a Blueprint asset")}
 		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
 		.Optional(TEXT("force"), TEXT("boolean"), TEXT("Delete without additional confirmation")));
@@ -201,8 +222,12 @@ TArray<FCortexCommandInfo> FCortexBPCommandHandler::GetSupportedCommands() const
 		.Required(TEXT("new_name"), TEXT("string"), TEXT("New Blueprint asset name"))
 		.Required(TEXT("new_path"), TEXT("string"), TEXT("Destination content path")));
 	Commands.Add(FCortexCommandInfo{TEXT("compile"), TEXT("Compile a Blueprint")}
+		.OptionalBatchItems(TEXT("Batch items with target and expected_fingerprint"))
+		.OptionalExpectedFingerprint()
 		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path")));
 	Commands.Add(FCortexCommandInfo{TEXT("save"), TEXT("Save a Blueprint")}
+		.OptionalBatchItems(TEXT("Batch items with target and expected_fingerprint"))
+		.OptionalExpectedFingerprint()
 		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path")));
 	Commands.Add(FCortexCommandInfo{TEXT("rename"), TEXT("Rename/move a Blueprint asset")}
 		.Required(TEXT("source_path"), TEXT("string"), TEXT("Source Blueprint asset path"))
@@ -234,7 +259,13 @@ TArray<FCortexCommandInfo> FCortexBPCommandHandler::GetSupportedCommands() const
 		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
 		.Optional(TEXT("properties"), TEXT("array"), TEXT("Specific properties to read"))
 		.Optional(TEXT("blueprint_path"), TEXT("string"), TEXT("Optional alternate Blueprint path")));
+	Commands.Add(FCortexCommandInfo{TEXT("list_inherited_properties"), TEXT("List inherited class-default properties in settable form")}
+		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path")));
+	Commands.Add(FCortexCommandInfo{TEXT("list_settable_defaults"), TEXT("List settable class-default properties with accepted formats")}
+		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path")));
 	Commands.Add(FCortexCommandInfo{TEXT("set_class_defaults"), TEXT("Set default property values on a Blueprint CDO")}
+		.OptionalBatchItems(TEXT("Batch items with target, properties, compile, save, expected_fingerprint"))
+		.OptionalExpectedFingerprint()
 		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
 		.Required(TEXT("properties"), TEXT("object"), TEXT("Class default values to set"))
 		.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after applying defaults"))
@@ -246,10 +277,16 @@ TArray<FCortexCommandInfo> FCortexBPCommandHandler::GetSupportedCommands() const
 		.Required(TEXT("length"), TEXT("number"), TEXT("Timeline length in seconds"))
 		.Optional(TEXT("loop"), TEXT("boolean"), TEXT("Loop the timeline"))
 		.Optional(TEXT("tracks"), TEXT("array"), TEXT("Track and keyframe definitions")));
-	Commands.Add(FCortexCommandInfo{TEXT("set_component_defaults"), TEXT("Set object-reference properties on a Blueprint component template")}
+	Commands.Add(FCortexCommandInfo{TEXT("set_component_defaults"), TEXT("Set JSON-valued properties on an owned Blueprint SCS component template")}
+		.OptionalBatchItems(TEXT("Batch items with target, component_name, properties, compile, save, expected_fingerprint"))
+		.OptionalExpectedFingerprint()
 		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
-		.Required(TEXT("component_name"), TEXT("string"), TEXT("Component template name"))
-		.Required(TEXT("properties"), TEXT("object"), TEXT("Properties to apply")));
+		.Required(TEXT("component_name"), TEXT("string"), TEXT("Owned SCS component template name from this Blueprint"))
+		.Required(TEXT("properties"), TEXT("object"), TEXT("JSON property values. Supports StaticMesh object paths, OverrideMaterials[N], bools, numbers, enums, and structs such as RelativeLocation"))
+		.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after applying successful property writes, default true"))
+		.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save after successful writes only when there are no partial failures, default false")));
+	Commands.Add(FCortexCommandInfo{TEXT("list_scs_components"), TEXT("List Blueprint SCS components in writer-ready reference form")}
+		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path")));
 	Commands.Add(FCortexCommandInfo{TEXT("add_scs_component"), TEXT("Add an SCS component to a Blueprint")}
 		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
 		.Required(TEXT("component_class"), TEXT("string"), TEXT("Component class name (e.g. StaticMeshComponent)"))
@@ -268,7 +305,14 @@ TArray<FCortexCommandInfo> FCortexBPCommandHandler::GetSupportedCommands() const
 	Commands.Add(FCortexCommandInfo{TEXT("remove_scs_component"), TEXT("Remove an SCS component node from a Blueprint (use after migrating to C++ UPROPERTY)")}
 		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
 		.Required(TEXT("component_name"), TEXT("string"), TEXT("SCS component node name"))
+		.Optional(TEXT("acknowledged_losses"), TEXT("array"), TEXT("Keys from required_acknowledgment to confirm sub-object loss"))
+		.Optional(TEXT("force"), TEXT("boolean"), TEXT("Override dirty-state protection and remove anyway"))
 		.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after removal")));
+	Commands.Add(FCortexCommandInfo{TEXT("rename_scs_component"), TEXT("Rename an SCS component node on a Blueprint")}
+		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
+		.Required(TEXT("old_name"), TEXT("string"), TEXT("Current SCS component node name"))
+		.Required(TEXT("new_name"), TEXT("string"), TEXT("New SCS component node name"))
+		.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after rename")));
 	Commands.Add(FCortexCommandInfo{TEXT("recompile_dependents"), TEXT("Recompile Blueprints that depend on a target Blueprint")}
 		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path")));
 	Commands.Add(FCortexCommandInfo{TEXT("fixup_redirectors"), TEXT("Fix up redirectors under a content path")}

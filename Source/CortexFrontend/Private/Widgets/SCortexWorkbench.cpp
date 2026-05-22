@@ -4,6 +4,7 @@
 #include "Framework/Docking/TabManager.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/SNullWidget.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/SCortexChatPanel.h"
 #include "Session/CortexCliSession.h"
@@ -20,8 +21,7 @@ void SCortexWorkbench::Construct(const FArguments& InArgs)
 		[
 			SNew(SCortexChatPanel)
 			.Session(SessionWeak)
-			.OnNewChatTab(FSimpleDelegate::CreateSP(
-				this, &SCortexWorkbench::SpawnNewChatTab))
+			.OnNewChatTab(MakeNewChatTabDelegate())
 		]
 	];
 }
@@ -44,6 +44,34 @@ SCortexWorkbench::~SCortexWorkbench()
 		TabManager->UnregisterTabSpawner(TEXT("CortexChat"));
 		TabManager->CloseAllAreas();
 	}
+
+	if (ContentContainer.IsValid())
+	{
+		ContentContainer->SetContent(SNullWidget::NullWidget);
+	}
+
+	if (TSharedPtr<FCortexCliSession> RootSession = SessionWeak.Pin())
+	{
+		FCortexFrontendModule& FrontendModule =
+			FModuleManager::GetModuleChecked<FCortexFrontendModule>(TEXT("CortexFrontend"));
+		FrontendModule.ReleaseMainChatSession(RootSession);
+	}
+	SessionWeak.Reset();
+}
+
+bool SCortexWorkbench::CanSpawnNewChatTab() const
+{
+	return TabManager.IsValid() || OwnerTabWeak.IsValid();
+}
+
+FSimpleDelegate SCortexWorkbench::MakeNewChatTabDelegate()
+{
+	if (!CanSpawnNewChatTab())
+	{
+		return FSimpleDelegate();
+	}
+
+	return FSimpleDelegate::CreateSP(this, &SCortexWorkbench::SpawnNewChatTab);
 }
 
 void SCortexWorkbench::SwitchToMultiTabMode()
@@ -90,8 +118,7 @@ TSharedRef<SDockTab> SCortexWorkbench::SpawnChatTab(const FSpawnTabArgs& /*Args*
 	DockTab->SetContent(
 		SNew(SCortexChatPanel)
 		.Session(SessionWeak)
-		.OnNewChatTab(FSimpleDelegate::CreateSP(
-			this, &SCortexWorkbench::SpawnNewChatTab))
+		.OnNewChatTab(MakeNewChatTabDelegate())
 	);
 
 	return DockTab;
@@ -112,8 +139,7 @@ TSharedRef<SDockTab> SCortexWorkbench::BuildChatTab(
 		[
 			SNew(SCortexChatPanel)
 			.Session(Session)
-			.OnNewChatTab(FSimpleDelegate::CreateSP(
-				this, &SCortexWorkbench::SpawnNewChatTab))
+			.OnNewChatTab(MakeNewChatTabDelegate())
 		];
 	return Tab;
 }

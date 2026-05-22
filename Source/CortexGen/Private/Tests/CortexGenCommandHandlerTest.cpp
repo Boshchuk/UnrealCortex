@@ -18,7 +18,7 @@ struct FGenTestContext
     {
         JobManager = MakeShared<FCortexGenJobManager>();
         JobManager->Initialize();
-        Router.RegisterDomain(TEXT("gen"), TEXT("Cortex Gen"), TEXT("1.0.0"),
+        Router.RegisterDomain(TEXT("gen"), TEXT("Cortex Gen"), TEXT("1.0.1"),
             MakeShared<FCortexGenCommandHandler>(JobManager));
     }
 };

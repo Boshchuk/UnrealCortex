@@ -7,6 +7,7 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Engine/Blueprint.h"
 #include "GameFramework/Actor.h"
+#include "Misc/Guid.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexBlueprintLayoutE2ETest,
@@ -16,7 +17,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBlueprintLayoutE2ETest::RunTest(const FString& Parameters)
 {
-	UPackage* TestPackage = NewObject<UPackage>(nullptr, TEXT("/Temp/CortexGraphLayoutE2E"), RF_Transient);
+	UPackage* TestPackage = CreatePackage(*FString::Printf(
+		TEXT("/Game/Temp/CortexGraphLayoutE2E_%s"),
+		*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8)));
 	TestPackage->SetPackageFlags(PKG_PlayInEditor);
 	UBlueprint* TestBP = FKismetEditorUtilities::CreateBlueprint(
 		AActor::StaticClass(), TestPackage, TEXT("BP_LayoutE2E"),
@@ -27,9 +30,9 @@ bool FCortexBlueprintLayoutE2ETest::RunTest(const FString& Parameters)
 
 	FString AssetPath = TestBP->GetPathName();
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>());
-	Router.RegisterDomain(TEXT("bp"), TEXT("Cortex Blueprint"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("bp"), TEXT("Cortex Blueprint"), TEXT("1.0.1"),
 		MakeShared<FCortexBPCommandHandler>());
 
 	// Add two PrintString nodes and collect their IDs
@@ -71,11 +74,11 @@ bool FCortexBlueprintLayoutE2ETest::RunTest(const FString& Parameters)
 	FCortexCommandResult LR = Router.Execute(TEXT("graph.auto_layout"), LP);
 	TestTrue(TEXT("auto_layout succeeded"), LR.bSuccess);
 
-	// Verify positions were set via list_nodes
+	// Verify positions were set via get_subgraph
 	TSharedPtr<FJsonObject> ListP = MakeShared<FJsonObject>();
 	ListP->SetStringField(TEXT("asset_path"), AssetPath);
-	FCortexCommandResult ListR = Router.Execute(TEXT("graph.list_nodes"), ListP);
-	TestTrue(TEXT("list_nodes succeeded"), ListR.bSuccess);
+	FCortexCommandResult ListR = Router.Execute(TEXT("graph.get_subgraph"), ListP);
+	TestTrue(TEXT("get_subgraph succeeded"), ListR.bSuccess);
 
 	if (ListR.bSuccess && ListR.Data.IsValid())
 	{

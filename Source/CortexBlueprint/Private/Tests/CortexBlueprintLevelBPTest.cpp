@@ -18,7 +18,7 @@ bool FCortexBlueprintLevelBPSaveRejectionTest::RunTest(const FString& Parameters
 	(void)Parameters;
 
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("blueprint"), TEXT("Cortex Blueprint"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("blueprint"), TEXT("Cortex Blueprint"), TEXT("1.0.1"),
 		MakeShared<FCortexBPCommandHandler>());
 
 	TSharedPtr<FJsonObject> SaveParams = MakeShared<FJsonObject>();
@@ -71,7 +71,7 @@ bool FCortexBlueprintLevelBPLoadTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("LSB should be a valid Blueprint"), IsValid(LSB));
 
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>());
 
 	TSharedPtr<FJsonObject> ListParams = MakeShared<FJsonObject>();

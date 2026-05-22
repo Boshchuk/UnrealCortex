@@ -17,7 +17,7 @@ void FCortexEditorModule::StartupModule()
 	Registry.RegisterDomain(
 		TEXT("editor"),
 		TEXT("Cortex Editor"),
-		TEXT("1.0.0"),
+		TEXT("1.0.1"),
 		Handler);
 
 	CoreModule.SetClientDisconnectCallback([Handler]()

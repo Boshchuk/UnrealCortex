@@ -9,7 +9,7 @@ namespace
     FCortexCommandRouter CreateLevelRouterDiscovery()
     {
         FCortexCommandRouter Router;
-        Router.RegisterDomain(TEXT("level"), TEXT("Cortex Level"), TEXT("1.0.0"),
+        Router.RegisterDomain(TEXT("level"), TEXT("Cortex Level"), TEXT("1.0.1"),
             MakeShared<FCortexLevelCommandHandler>());
         return Router;
     }
@@ -47,6 +47,11 @@ bool FCortexLevelListActorClassesTest::RunTest(const FString& Parameters)
                     FString Name;
                     if ((*Obj)->TryGetStringField(TEXT("name"), Name) && Name == TEXT("PointLight"))
                     {
+                        FString SpawnActorValue;
+                        TestTrue(
+                            TEXT("PointLight includes spawn_actor_value"),
+                            (*Obj)->TryGetStringField(TEXT("spawn_actor_value"), SpawnActorValue));
+                        TestEqual(TEXT("spawn_actor_value uses class token"), SpawnActorValue, FString(TEXT("PointLight")));
                         bFoundPointLight = true;
                         break;
                     }

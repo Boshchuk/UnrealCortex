@@ -16,9 +16,11 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexGraphRemoveNodeTest::RunTest(const FString& Parameters)
 {
+    UPackage* TestPackage = CreatePackage(TEXT("/Game/Temp/CortexGraphRemoveNodeTest"));
+    TestPackage->SetPackageFlags(PKG_PlayInEditor);
     UBlueprint* TestBP = FKismetEditorUtilities::CreateBlueprint(
         AActor::StaticClass(),
-        GetTransientPackage(),
+        TestPackage,
         FName(TEXT("BP_CortexGraphTest_RemoveNode")),
         BPTYPE_Normal,
         UBlueprint::StaticClass(),
@@ -28,6 +30,7 @@ bool FCortexGraphRemoveNodeTest::RunTest(const FString& Parameters)
 
     if (TestBP == nullptr)
     {
+        TestPackage->MarkAsGarbage();
         return true;
     }
 
@@ -36,7 +39,7 @@ bool FCortexGraphRemoveNodeTest::RunTest(const FString& Parameters)
     TestNotNull(TEXT("EventGraph should exist"), EventGraph);
 
     FCortexCommandRouter Router;
-    Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+    Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"),
         MakeShared<FCortexGraphCommandHandler>());
 
     // Add two nodes and connect them
@@ -119,7 +122,7 @@ bool FCortexGraphRemoveNodeTest::RunTest(const FString& Parameters)
         Params->SetStringField(TEXT("asset_path"), AssetPath);
         Params->SetStringField(TEXT("node_id"), Node2Id);
 
-        FCortexCommandResult Result = Router.Execute(TEXT("graph.get_node"), Params);
+        FCortexCommandResult Result = Router.Execute(TEXT("graph.get_subgraph"), Params);
         TestTrue(TEXT("get_node on Node2 should succeed"), Result.bSuccess);
 
         if (Result.Data.IsValid())
@@ -161,6 +164,7 @@ bool FCortexGraphRemoveNodeTest::RunTest(const FString& Parameters)
 
     // Cleanup
     TestBP->MarkAsGarbage();
+    TestPackage->MarkAsGarbage();
 
     return true;
 }

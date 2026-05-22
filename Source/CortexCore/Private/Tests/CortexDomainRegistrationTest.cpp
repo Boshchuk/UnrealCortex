@@ -45,7 +45,7 @@ bool FCortexDomainRegistrationTest::RunTest(const FString& Parameters)
 	Registry.RegisterDomain(
 		TEXT("test"),
 		TEXT("Test Domain"),
-		TEXT("1.0.0"),
+		TEXT("1.0.1"),
 		MakeShared<FTestHandler>()
 	);
 

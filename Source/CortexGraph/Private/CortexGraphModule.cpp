@@ -16,7 +16,7 @@ void FCortexGraphModule::StartupModule()
 	Registry.RegisterDomain(
 		TEXT("graph"),
 		TEXT("Cortex Graph"),
-		TEXT("1.0.0"),
+		TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>()
 	);
 

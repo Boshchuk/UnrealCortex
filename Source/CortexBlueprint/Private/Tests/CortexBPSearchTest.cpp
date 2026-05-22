@@ -224,9 +224,9 @@ bool FCortexBPSearchPinMatchTest::RunTest(const FString& Parameters)
 	}
 
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("bp"), TEXT("Cortex Blueprint"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("bp"), TEXT("Cortex Blueprint"), TEXT("1.0.1"),
 		MakeShared<FCortexBPCommandHandler>());
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>());
 
 	const TSharedPtr<FJsonObject> AddNodeParams = MakeShared<FJsonObject>();
@@ -320,7 +320,7 @@ bool FCortexBPSearchPinTextMatchTest::RunTest(const FString& Parameters)
 	}
 
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>());
 
 	const TSharedPtr<FJsonObject> AddNodeParams = MakeShared<FJsonObject>();

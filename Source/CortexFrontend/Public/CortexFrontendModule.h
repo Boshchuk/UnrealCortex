@@ -26,11 +26,17 @@ public:
     /** Create a default session config using project paths. */
     static FCortexSessionConfig CreateDefaultSessionConfig();
 
+    /** Create a lightweight session config that preserves provider selection without MCP/project context. */
+    static FCortexSessionConfig CreateLightweightSessionConfig();
+
     /** Register a conversion session for PreExit cleanup. */
     void RegisterSession(TSharedPtr<FCortexCliSession> Session);
 
     /** Unregister a conversion session. */
     void UnregisterSession(TSharedPtr<FCortexCliSession> Session);
+
+    /** Release the main workbench chat session when the owning UI surface closes. */
+    void ReleaseMainChatSession(TSharedPtr<FCortexCliSession> Session);
 
     /** Register a build process for PreExit cleanup. */
     void RegisterBuildProcess(TSharedPtr<FMonitoredProcess> Process);
@@ -57,6 +63,8 @@ private:
     void OnAnalysisRequested(const FCortexAnalysisPayload& Payload);
     void OnConversionWindowClosed(const TSharedRef<SWindow>&, TSharedPtr<FCortexConversionContext> Context);
     void OnAnalysisWindowClosed(const TSharedRef<SWindow>&, TSharedPtr<FCortexAnalysisContext> Context);
+    void RegisterFrontendSettings();
+    void UnregisterFrontendSettings();
     void ReleaseSessions();
     void HandlePreExit();
 
@@ -65,10 +73,12 @@ private:
     FDelegateHandle StartupCallbackHandle;
     FDelegateHandle ConversionDelegateHandle;
     FDelegateHandle AnalysisDelegateHandle;
+    TSharedPtr<FCortexCliSession> MainChatSession;
     TArray<TSharedPtr<FCortexCliSession>> Sessions;
     TArray<TSharedPtr<FMonitoredProcess>> BuildProcesses;
     TArray<FConversionWindowEntry> ConversionWindows;
     TArray<FAnalysisWindowEntry> AnalysisWindows;
     bool bGenStudioTabRegistered = false;
+    bool bHasHandledPreExit = false;
     FDelegateHandle StatusBarCallbackHandle;
 };

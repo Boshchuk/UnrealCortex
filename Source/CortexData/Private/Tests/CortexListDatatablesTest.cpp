@@ -22,7 +22,7 @@ bool FCortexListDatatablesTest::RunTest(const FString& Parameters)
 	// Arrange: Start the TCP server on a test port (different from ping test)
 	const int32 TestPort = 18743;
 	FCortexCommandRouter CommandHandler;
-	CommandHandler.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.0"),
+	CommandHandler.RegisterDomain(TEXT("data"), TEXT("Cortex Data"), TEXT("1.0.1"),
 		MakeShared<FCortexDataCommandHandler>());
 	FCortexTcpServer Server;
 	const bool bStarted = Server.Start(TestPort,

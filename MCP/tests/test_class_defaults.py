@@ -139,6 +139,31 @@ class TestSetClassDefaults:
             },
         )
 
+    def test_expected_fingerprint_is_forwarded_for_single_target(self):
+        connection = MagicMock()
+        connection.send_command.return_value = _fake_success_data()
+
+        tools = _register_tools(connection)
+        tools["set_class_defaults"](
+            "/Game/Test/BP_Test",
+            {"bReplicates": True},
+            compile=False,
+            save=False,
+            expected_fingerprint={"dirty_epoch": 42},
+        )
+
+        connection.send_command.assert_called_once_with(
+            "blueprint.set_class_defaults",
+            {
+                "asset_path": "/Game/Test/BP_Test",
+                "blueprint_path": "/Game/Test/BP_Test",
+                "properties": {"bReplicates": True},
+                "compile": False,
+                "save": False,
+                "expected_fingerprint": {"dirty_epoch": 42},
+            },
+        )
+
     def test_object_reference_values_are_passed_as_strings(self):
         connection = MagicMock()
         connection.send_command.return_value = _fake_success_data()
@@ -156,3 +181,45 @@ class TestSetClassDefaults:
         props = call.args[1]["properties"]
         assert props["MoveAction"] == "/Game/Sim/Input/IA_Move"
         assert props["LookAction"] == "/Game/Sim/Input/IA_Look"
+
+    def test_batch_items_use_single_tcp_call(self):
+        connection = MagicMock()
+        connection.send_command.return_value = {"data": {"status": "committed", "per_item": []}}
+
+        tools = _register_tools(connection)
+        tools["set_class_defaults"](
+            items=[
+                {
+                    "target": "/Game/Test/BP_A",
+                    "properties": {"Value": 1},
+                    "compile": False,
+                    "save": False,
+                },
+                {
+                    "target": "/Game/Test/BP_B",
+                    "properties": {"Value": 2},
+                    "compile": False,
+                    "save": False,
+                },
+            ]
+        )
+
+        connection.send_command.assert_called_once_with(
+            "blueprint.set_class_defaults",
+            {
+                "items": [
+                    {
+                        "target": "/Game/Test/BP_A",
+                        "properties": {"Value": 1},
+                        "compile": False,
+                        "save": False,
+                    },
+                    {
+                        "target": "/Game/Test/BP_B",
+                        "properties": {"Value": 2},
+                        "compile": False,
+                        "save": False,
+                    },
+                ]
+            },
+        )

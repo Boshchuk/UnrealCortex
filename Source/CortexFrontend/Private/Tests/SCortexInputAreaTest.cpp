@@ -2,7 +2,48 @@
 #include "Widgets/SCortexInputArea.h"
 #include "AutoComplete/CortexAutoCompleteTypes.h"
 #include "CortexFrontendSettings.h"
+#include "CortexFrontendProviderSettings.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Widgets/Text/STextBlock.h"
+
+namespace
+{
+void CollectInputAreaWidgets(const TSharedRef<SWidget>& Widget, TArray<TSharedRef<SWidget>>& OutWidgets)
+{
+    OutWidgets.Add(Widget);
+
+    FChildren* Children = Widget->GetChildren();
+    if (Children == nullptr)
+    {
+        return;
+    }
+
+    for (int32 ChildIndex = 0; ChildIndex < Children->Num(); ++ChildIndex)
+    {
+        CollectInputAreaWidgets(Children->GetChildAt(ChildIndex), OutWidgets);
+    }
+}
+
+bool InputAreaWidgetTreeContainsText(const TSharedRef<SWidget>& RootWidget, const FString& ExpectedText)
+{
+    TArray<TSharedRef<SWidget>> Widgets;
+    CollectInputAreaWidgets(RootWidget, Widgets);
+
+    for (const TSharedRef<SWidget>& Widget : Widgets)
+    {
+        if (Widget->GetType() == FName(TEXT("STextBlock")))
+        {
+            const TSharedRef<STextBlock> TextBlock = StaticCastSharedRef<STextBlock>(Widget);
+            if (TextBlock->GetText().ToString() == ExpectedText)
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexInputAreaEffortSettingTest,
     "Cortex.Frontend.InputArea.EffortSettingPersists",
@@ -206,19 +247,21 @@ bool FCortexInputAreaProvidersTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("Popup open"), Widget->IsAutoCompleteOpen());
 
     const auto& Items = Widget->GetFilteredItems();
-    TestTrue(TEXT("At least 3 items (providers)"), Items.Num() >= 3);
+    TestTrue(TEXT("At least 4 items (providers)"), Items.Num() >= 4);
 
     // Verify provider names
-    bool bFoundThisAsset = false, bFoundSelection = false, bFoundProblems = false;
+    bool bFoundThisAsset = false, bFoundSelection = false, bFoundProblems = false, bFoundEditorContext = false;
     for (const TSharedPtr<FCortexAutoCompleteItem>& Item : Items)
     {
         if (Item->Name == TEXT("thisAsset")) bFoundThisAsset = true;
         if (Item->Name == TEXT("selection")) bFoundSelection = true;
         if (Item->Name == TEXT("problems")) bFoundProblems = true;
+        if (Item->Name == TEXT("editorContext")) bFoundEditorContext = true;
     }
     TestTrue(TEXT("@thisAsset present"), bFoundThisAsset);
     TestTrue(TEXT("@selection present"), bFoundSelection);
     TestTrue(TEXT("@problems present"), bFoundProblems);
+    TestTrue(TEXT("@editorContext present"), bFoundEditorContext);
 
     return true;
 }
@@ -428,6 +471,37 @@ bool FCortexInputAreaEmptyProviderDropTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexInputAreaAutoContextSuppressedTest,
+    "Cortex.Frontend.InputArea.Resolution.AutoContextSuppressedWhenDisabled",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexInputAreaAutoContextSuppressedTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    if (!FSlateApplication::IsInitialized()) { AddInfo(TEXT("Slate not initialized")); return true; }
+
+    FCortexFrontendSettings& Settings = FCortexFrontendSettings::Get();
+    const bool bOriginal = Settings.GetAutoContext();
+
+    // Disable auto-context
+    Settings.SetAutoContext(false);
+
+    FString CapturedPrompt;
+    TSharedRef<SCortexInputArea> Widget = SNew(SCortexInputArea)
+        .OnSendMessage_Lambda([&CapturedPrompt](const FString& Prompt) { CapturedPrompt = Prompt; });
+
+    Widget->TestResolveAndSend(TEXT("Hello"));
+
+    // Auto-context disabled → header must not appear
+    TestFalse(TEXT("No auto-context header when disabled"),
+        CapturedPrompt.Contains(TEXT("## Editor Context (auto)")));
+    TestTrue(TEXT("User message preserved"), CapturedPrompt.Contains(TEXT("Hello")));
+
+    // Restore
+    Settings.SetAutoContext(bOriginal);
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexInputAreaAssetFallbackTest,
     "Cortex.Frontend.InputArea.Resolution.AssetRouterErrorFallback",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -460,6 +534,18 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexInputAreaSelectionDescriptionTest,
     "Cortex.Frontend.InputArea.Selection.DescriptionMentionsNodesAndActors",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexInputAreaProviderResolvedModelLabelTest,
+    "Cortex.Frontend.InputArea.ProviderResolvedModelLabel",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexInputAreaProviderHelpCopyTest,
+    "Cortex.Frontend.InputArea.ProviderHelpCopy",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexInputAreaEffortOptionsUseActiveProviderTest,
+    "Cortex.Frontend.InputArea.EffortOptionsUseActiveProvider",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
 bool FCortexInputAreaSelectionDescriptionTest::RunTest(const FString& Parameters)
 {
     (void)Parameters;
@@ -485,5 +571,85 @@ bool FCortexInputAreaSelectionDescriptionTest::RunTest(const FString& Parameters
         SelectionDesc.Contains(TEXT("node"), ESearchCase::IgnoreCase) ||
         SelectionDesc.Contains(TEXT("graph"), ESearchCase::IgnoreCase));
 
+    return true;
+}
+
+bool FCortexInputAreaProviderResolvedModelLabelTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    if (!FSlateApplication::IsInitialized()) { AddInfo(TEXT("Slate not initialized")); return true; }
+
+    UCortexFrontendProviderSettings* ProviderSettings = GetMutableDefault<UCortexFrontendProviderSettings>();
+    FCortexFrontendSettings& Settings = FCortexFrontendSettings::Get();
+    const FString OriginalProviderId = ProviderSettings->ActiveProviderId;
+    const FString OriginalModel = Settings.GetSelectedModel();
+
+    ON_SCOPE_EXIT
+    {
+        ProviderSettings->ActiveProviderId = OriginalProviderId;
+        Settings.SetSelectedModel(OriginalModel);
+        Settings.ClearPendingChanges();
+    };
+
+    ProviderSettings->ActiveProviderId = TEXT("codex");
+    Settings.SetSelectedModel(TEXT("claude-opus-4-6"));
+
+    TSharedRef<SCortexInputArea> Widget = SNew(SCortexInputArea);
+
+    TestTrue(TEXT("Input area should display the active provider's resolved model"),
+        InputAreaWidgetTreeContainsText(Widget, TEXT("gpt-5.4")));
+    TestFalse(TEXT("Input area should not display the stale provider-incompatible model"),
+        InputAreaWidgetTreeContainsText(Widget, TEXT("claude-opus-4-6")));
+
+    return true;
+}
+
+bool FCortexInputAreaProviderHelpCopyTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    if (!FSlateApplication::IsInitialized()) { AddInfo(TEXT("Slate not initialized")); return true; }
+
+    TSharedRef<SCortexInputArea> Widget = SNew(SCortexInputArea);
+    Widget->HandleTextChanged(FText::FromString(TEXT("/")));
+
+    const TArray<TSharedPtr<FCortexAutoCompleteItem>>& Items = Widget->GetFilteredItems();
+    const TSharedPtr<FCortexAutoCompleteItem>* HelpItem = Items.FindByPredicate(
+        [](const TSharedPtr<FCortexAutoCompleteItem>& Item)
+        {
+            return Item.IsValid() && Item->Name == TEXT("help");
+        });
+
+    TestNotNull(TEXT("/help item should be present"), HelpItem);
+    if (HelpItem != nullptr)
+    {
+        TestEqual(TEXT("/help should use provider-neutral help copy"),
+            (*HelpItem)->Description,
+            FString(TEXT("Get help with the active AI provider")));
+    }
+
+    return true;
+}
+
+bool FCortexInputAreaEffortOptionsUseActiveProviderTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+
+    UCortexFrontendProviderSettings* ProviderSettings = GetMutableDefault<UCortexFrontendProviderSettings>();
+    FCortexFrontendSettings& Settings = FCortexFrontendSettings::Get();
+    const FString OriginalProviderId = ProviderSettings->ActiveProviderId;
+    const FString OriginalModel = Settings.GetSelectedModel();
+    ON_SCOPE_EXIT
+    {
+        ProviderSettings->ActiveProviderId = OriginalProviderId;
+        Settings.SetSelectedModel(OriginalModel);
+        Settings.ClearPendingChanges();
+    };
+
+    ProviderSettings->ActiveProviderId = TEXT("codex");
+    Settings.SetSelectedModel(TEXT("gpt-5.4"));
+
+    const TArray<ECortexEffortLevel> Options = SCortexInputArea::GetEffortOptionsForActiveProvider();
+    TestFalse(TEXT("Codex effort menu should not expose unsupported Default effort"), Options.Contains(ECortexEffortLevel::Default));
+    TestTrue(TEXT("Codex effort menu should expose Maximum/xhigh effort"), Options.Contains(ECortexEffortLevel::Maximum));
     return true;
 }

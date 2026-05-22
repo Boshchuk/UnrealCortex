@@ -5,16 +5,23 @@
 #include "Analysis/CortexAnalysisContext.h"
 #include "Conversion/CortexConversionContext.h"
 #include "CortexCoreModule.h"
+#include "CortexFrontendShutdown.h"
+#include "CortexFrontendProviderSettings.h"
 #include "CortexAnalysisTypes.h"
 #include "CortexConversionTypes.h"
+#include "CortexFrontendSettings.h"
 #include "Framework/Docking/TabManager.h"
 #include "IToolMenusModule.h"
+#include "ISettingsModule.h"
+#include "CoreGlobals.h"
 #include "Misc/CoreDelegates.h"
 #include "Misc/MonitoredProcess.h"
+#include "Modules/ModuleManager.h"
 #include "Rendering/CortexRichTextStyle.h"
 #include "Session/CortexCliSession.h"
 #include "Styling/AppStyle.h"
 #include "ToolMenus.h"
+#include "ToolMenuOwner.h"
 #include "Widgets/SCortexWorkbench.h"
 #include "Widgets/SCortexGenPanel.h"
 #include "Widgets/SCortexConversionTab.h"
@@ -36,6 +43,8 @@ const FName FCortexFrontendModule::GenStudioTabId(TEXT("CortexGenStudio"));
 void FCortexFrontendModule::StartupModule()
 {
     UE_LOG(LogCortexFrontend, Log, TEXT("CortexFrontend module starting up"));
+
+    RegisterFrontendSettings();
 
     FCortexRichTextStyle::Initialize();
 
@@ -63,6 +72,7 @@ void FCortexFrontendModule::StartupModule()
     StartupCallbackHandle = UToolMenus::RegisterStartupCallback(
         FSimpleMulticastDelegate::FDelegate::CreateLambda([this]()
         {
+            FToolMenuOwnerScoped OwnerScoped(this);
             UToolMenu* Menu = UToolMenus::Get()->ExtendMenu(TEXT("LevelEditor.MainMenu.Tools"));
             FToolMenuSection& Section = Menu->FindOrAddSection(TEXT("Cortex"));
             Section.AddEntry(FToolMenuEntry::InitMenuEntry(
@@ -92,6 +102,7 @@ void FCortexFrontendModule::StartupModule()
     StatusBarCallbackHandle = UToolMenus::RegisterStartupCallback(
         FSimpleMulticastDelegate::FDelegate::CreateLambda([this]()
         {
+            FToolMenuOwnerScoped OwnerScoped(this);
             UToolMenu* StatusBar = UToolMenus::Get()->ExtendMenu(TEXT("LevelEditor.StatusBar.ToolBar"));
             FToolMenuSection& Section = StatusBar->FindOrAddSection(TEXT("Cortex"),
                 FText::GetEmpty(),
@@ -125,6 +136,8 @@ void FCortexFrontendModule::ShutdownModule()
 {
     UE_LOG(LogCortexFrontend, Log, TEXT("CortexFrontend module shutting down"));
 
+    UnregisterFrontendSettings();
+
     FCoreDelegates::OnPreExit.RemoveAll(this);
 
     if (FModuleManager::Get().IsModuleLoaded(TEXT("CortexCore")))
@@ -149,9 +162,11 @@ void FCortexFrontendModule::ShutdownModule()
         UToolMenus::UnRegisterStartupCallback(StartupCallbackHandle);
         UToolMenus::UnRegisterStartupCallback(StatusBarCallbackHandle);
 
-        if (UToolMenus* ToolMenus = UToolMenus::TryGet())
+        if (UE::CortexFrontend::ShouldTraverseToolMenusDuringShutdown(
+            IsEngineExitRequested() || bHasHandledPreExit,
+            true))
         {
-            ToolMenus->RemoveSection(TEXT("LevelEditor.StatusBar.ToolBar"), TEXT("Cortex"));
+            UToolMenus::UnregisterOwner(this);
         }
     }
 
@@ -167,11 +182,57 @@ void FCortexFrontendModule::ShutdownModule()
     FCortexRichTextStyle::Shutdown();
 }
 
+void FCortexFrontendModule::RegisterFrontendSettings()
+{
+    ISettingsModule* SettingsModule = FModuleManager::LoadModulePtr<ISettingsModule>(TEXT("Settings"));
+    if (SettingsModule == nullptr)
+    {
+        UE_LOG(LogCortexFrontend, Warning, TEXT("Settings module unavailable; Cortex frontend provider settings were not registered"));
+        return;
+    }
+
+    SettingsModule->RegisterSettings(
+        TEXT("Editor"),
+        TEXT("Unreal Cortex"),
+        TEXT("Frontend"),
+        FText::FromString(TEXT("Frontend")),
+        FText::FromString(TEXT("Configure the active AI provider used by newly created Cortex frontend sessions.")),
+        GetMutableDefault<UCortexFrontendProviderSettings>());
+}
+
+void FCortexFrontendModule::UnregisterFrontendSettings()
+{
+    ISettingsModule* SettingsModule = FModuleManager::GetModulePtr<ISettingsModule>(TEXT("Settings"));
+    if (SettingsModule == nullptr)
+    {
+        return;
+    }
+
+    SettingsModule->UnregisterSettings(TEXT("Editor"), TEXT("Unreal Cortex"), TEXT("Frontend"));
+}
+
 FCortexSessionConfig FCortexFrontendModule::CreateDefaultSessionConfig()
 {
     FCortexSessionConfig Config;
     Config.SessionId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
     Config.WorkingDirectory = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+    Config.LifetimePolicy = ECortexSessionLifetimePolicy::Persistent;
+
+    FCortexFrontendSettings& Settings = FCortexFrontendSettings::Get();
+    const FCortexResolvedSessionOptions ResolvedOptions = Settings.ResolveForActiveProvider();
+    Config.ProviderId = ResolvedOptions.ProviderId;
+    Config.ResolvedOptions = ResolvedOptions;
+    Config.ModelId = Config.ResolvedOptions.ModelId;
+    Config.EffortLevel = Config.ResolvedOptions.EffortLevel;
+
+    Config.LaunchOptions.AccessMode = Settings.GetAccessMode();
+    Config.LaunchOptions.bSkipPermissions = Settings.GetSkipPermissions();
+    Config.LaunchOptions.WorkflowMode = Settings.GetWorkflowMode();
+    Config.LaunchOptions.bProjectContext = Settings.GetProjectContext();
+    Config.LaunchOptions.bAutoContext = Settings.GetAutoContext();
+    Config.LaunchOptions.CustomDirective = Settings.GetCustomDirective();
+    Config.bHasLaunchOptions = true;
+    Config.bSkipPermissions = Config.LaunchOptions.bSkipPermissions;
 
     const FString McpPath = FPaths::Combine(FPaths::ProjectDir(), TEXT(".mcp.json"));
     if (FPaths::FileExists(McpPath))
@@ -182,16 +243,30 @@ FCortexSessionConfig FCortexFrontendModule::CreateDefaultSessionConfig()
     return Config;
 }
 
+FCortexSessionConfig FCortexFrontendModule::CreateLightweightSessionConfig()
+{
+    FCortexSessionConfig Config = CreateDefaultSessionConfig();
+    Config.McpConfigPath.Empty();
+    Config.LaunchOptions.bProjectContext = false;
+    Config.LaunchOptions.bAutoContext = false;
+    Config.LaunchOptions.CustomDirective.Empty();
+    Config.bConversionMode = true;
+    Config.LifetimePolicy = ECortexSessionLifetimePolicy::TurnBound;
+    return Config;
+}
+
 TWeakPtr<FCortexCliSession> FCortexFrontendModule::GetOrCreateSession()
 {
-    if (Sessions.Num() > 0 && Sessions[0].IsValid())
+    if (MainChatSession.IsValid())
     {
-        return Sessions[0];
+        const TSharedPtr<FCortexCliSession>& ExistingSession = MainChatSession;
+        RegisterSession(ExistingSession);
+        return ExistingSession;
     }
 
     TSharedPtr<FCortexCliSession> Session = MakeShared<FCortexCliSession>(CreateDefaultSessionConfig());
-    Sessions.Reset();
-    Sessions.Add(Session);
+    MainChatSession = Session;
+    RegisterSession(Session);
     return Session;
 }
 
@@ -358,6 +433,25 @@ void FCortexFrontendModule::RegisterSession(TSharedPtr<FCortexCliSession> Sessio
 void FCortexFrontendModule::UnregisterSession(TSharedPtr<FCortexCliSession> Session)
 {
     Sessions.Remove(Session);
+    if (MainChatSession == Session)
+    {
+        MainChatSession.Reset();
+    }
+}
+
+void FCortexFrontendModule::ReleaseMainChatSession(TSharedPtr<FCortexCliSession> Session)
+{
+    if (!Session.IsValid() || MainChatSession != Session)
+    {
+        return;
+    }
+
+    if (Session->GetState() != ECortexSessionState::Terminated)
+    {
+        Session->Shutdown();
+    }
+
+    UnregisterSession(Session);
 }
 
 void FCortexFrontendModule::RegisterBuildProcess(TSharedPtr<FMonitoredProcess> Process)
@@ -427,10 +521,12 @@ void FCortexFrontendModule::ReleaseSessions()
     }
 
     Sessions.Reset();
+    MainChatSession.Reset();
 }
 
 void FCortexFrontendModule::HandlePreExit()
 {
+    bHasHandledPreExit = true;
     UE_LOG(LogCortexFrontend, Log, TEXT("PreExit: releasing sessions"));
     ReleaseSessions();
 }
