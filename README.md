@@ -350,14 +350,16 @@ codex plugin add cortex-toolkit@cortex-toolkit
 Then restart Codex if it was already running.
 For Cursor setup, see the [Cortex Toolkit README](https://github.com/etelyatn/cortex-toolkit).
 
-**Initialize your project** — run `/cortex-init` inside Claude Code. It will:
+**Start the assisted workflow** — run `/cortex-start` (or `cortex-start` in Codex) first. It verifies the editor/MCP connection, checks project context, and recommends the next action for your project.
+
+If you only want setup without the full guided flow, run `/cortex-init` (or `cortex-init`) directly. It will:
 
 1. Detect your Unreal Engine installation
 2. Scan the plugin for enabled domain modules
 3. Create `.mcp.json` with the correct MCP server configuration
 4. Set up `.cortex/` project memory directory with domain knowledge templates
 
-After that, `/cortex-start` verifies the connection and walks you through your first task. Use `/cortex-help` anytime for contextual suggestions. Codex users can also configure `.mcp.json` manually using Option B below; the Codex plugin supplies skills and setup guidance while the project-local MCP config supplies the live UnrealCortex connection.
+After init, run `/cortex-schema-refresh` (or `cortex-schema-refresh`) to regenerate `.cortex/schema/` from live editor data. Use `/cortex-help` anytime for contextual suggestions. Codex users can also configure `.mcp.json` manually using Option B below; the Codex plugin supplies skills and setup guidance while the project-local MCP config supplies the live UnrealCortex connection.
 
 #### Option B — Manual Setup *(Cursor, Windsurf, or any MCP client)*
 
