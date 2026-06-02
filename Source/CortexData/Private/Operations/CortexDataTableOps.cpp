@@ -30,6 +30,26 @@ namespace
 		DataTable->AddRow(RowName, RowMemory, RowStruct);
 #endif
 	}
+
+	struct FCortexValidatedImportRow
+	{
+		FString RowName;
+		FName RowFName;
+		uint8* RowMemory = nullptr;
+		bool bRowExists = false;
+	};
+
+	void FreeValidatedImportRows(const TArray<FCortexValidatedImportRow>& Rows, const UScriptStruct* RowStruct)
+	{
+		for (const FCortexValidatedImportRow& Row : Rows)
+		{
+			if (Row.RowMemory != nullptr)
+			{
+				RowStruct->DestroyStruct(Row.RowMemory);
+				FMemory::Free(Row.RowMemory);
+			}
+		}
+	}
 }
 #include "Internationalization/Text.h"
 #include "Internationalization/StringTable.h"
@@ -763,21 +783,30 @@ FCortexCommandResult FCortexDataTableOps::UpdateDatatableRow(const TSharedPtr<FJ
 		return Result;
 	}
 
-	// Normal (non-dry_run) path: apply changes
-	FScopedTransaction Transaction(FText::FromString(
-		FString::Printf(TEXT("Cortex:Update Row '%s' in '%s'"), *RowName, *DataTable->GetName())
-	));
-	DataTable->Modify();
+	uint8* TempRowPtr = static_cast<uint8*>(FMemory::Malloc(RowStruct->GetStructureSize(), RowStruct->GetMinAlignment()));
+	RowStruct->InitializeStruct(TempRowPtr);
+	RowStruct->CopyScriptStruct(TempRowPtr, RowPtr);
 
-	bool bDeserializeSuccess = FCortexSerializer::JsonToStruct(*RowData, RowStruct, RowPtr, DataTable, Warnings);
+	bool bDeserializeSuccess = FCortexSerializer::JsonToStruct(*RowData, RowStruct, TempRowPtr, DataTable, Warnings);
 
 	if (!bDeserializeSuccess)
 	{
+		RowStruct->DestroyStruct(TempRowPtr);
+		FMemory::Free(TempRowPtr);
 		return FCortexCommandRouter::Error(
 			CortexErrorCodes::SerializationError,
 			TEXT("Failed to deserialize row_data into existing row")
 		);
 	}
+
+	// Normal (non-dry_run) path: apply validated changes
+	FScopedTransaction Transaction(FText::FromString(
+		FString::Printf(TEXT("Cortex:Update Row '%s' in '%s'"), *RowName, *DataTable->GetName())
+	));
+	DataTable->Modify();
+	RowStruct->CopyScriptStruct(RowPtr, TempRowPtr);
+	RowStruct->DestroyStruct(TempRowPtr);
+	FMemory::Free(TempRowPtr);
 
 	DataTable->HandleDataTableChanged(RowFName);
 	DataTable->MarkPackageDirty();
@@ -968,26 +997,14 @@ FCortexCommandResult FCortexDataTableOps::ImportDatatableJson(const TSharedPtr<F
 		);
 	}
 
-	// Wrap entire import in a single undo transaction (skip for dry_run)
-	TOptional<FScopedTransaction> Transaction;
-	if (!bDryRun)
-	{
-		Transaction.Emplace(FText::FromString(
-			FString::Printf(TEXT("Cortex:Import %d rows into '%s' (mode: %s)"), RowsArray->Num(), *DataTable->GetName(), *Mode)
-		));
-		DataTable->Modify();
-	}
-
-	if (Mode == TEXT("replace") && !bDryRun)
-	{
-		DataTable->EmptyTable();
-	}
-
 	int32 CreatedCount = 0;
 	int32 UpdatedCount = 0;
 	int32 SkippedCount = 0;
 	TArray<FString> Errors;
 	TArray<FString> Warnings;
+	TArray<FCortexValidatedImportRow> ValidatedRows;
+	TMap<FName, int32> ValidatedRowIndexByName;
+	TSet<FName> PendingRowNames;
 
 	for (int32 Index = 0; Index < RowsArray->Num(); ++Index)
 	{
@@ -1015,106 +1032,130 @@ FCortexCommandResult FCortexDataTableOps::ImportDatatableJson(const TSharedPtr<F
 
 		const FName EntryRowFName(*EntryRowName);
 		uint8* ExistingRow = DataTable->FindRowUnchecked(EntryRowFName);
-		bool bRowExists = (ExistingRow != nullptr);
+		const int32* PendingRowIndex = ValidatedRowIndexByName.Find(EntryRowFName);
+		const bool bHasPendingRow = PendingRowNames.Contains(EntryRowFName);
+		const bool bHasPendingMemory = PendingRowIndex != nullptr;
+		bool bRowExists = (ExistingRow != nullptr) || bHasPendingRow;
 
-		if (bDryRun)
-		{
-			// Validate by attempting deserialization into temp memory
-			uint8* TempMemory = static_cast<uint8*>(FMemory::Malloc(RowStruct->GetStructureSize()));
-			RowStruct->InitializeStruct(TempMemory);
-
-			TArray<FString> RowWarnings;
-			bool bSuccess = FCortexSerializer::JsonToStruct(*EntryRowData, RowStruct, TempMemory, DataTable, RowWarnings);
-
-			RowStruct->DestroyStruct(TempMemory);
-			FMemory::Free(TempMemory);
-
-			if (!bSuccess)
-			{
-				Errors.Add(FString::Printf(TEXT("Row %d (%s): deserialization failed"), Index, *EntryRowName));
-			}
-			else
-			{
-				for (const FString& W : RowWarnings)
-				{
-					Warnings.Add(FString::Printf(TEXT("Row %d (%s): %s"), Index, *EntryRowName, *W));
-				}
-
-				if (bRowExists && Mode == TEXT("create"))
-				{
-					++SkippedCount;
-				}
-				else if (bRowExists)
-				{
-					++UpdatedCount;
-				}
-				else
-				{
-					++CreatedCount;
-				}
-			}
-			continue;
-		}
-
-		// Non-dry-run execution
 		if (bRowExists && Mode == TEXT("create"))
 		{
 			++SkippedCount;
 			continue;
 		}
 
+		uint8* TempMemory = static_cast<uint8*>(FMemory::Malloc(RowStruct->GetStructureSize(), RowStruct->GetMinAlignment()));
+		RowStruct->InitializeStruct(TempMemory);
+		if (bHasPendingMemory && Mode == TEXT("upsert"))
+		{
+			RowStruct->CopyScriptStruct(TempMemory, ValidatedRows[*PendingRowIndex].RowMemory);
+		}
+		else if (ExistingRow != nullptr && Mode == TEXT("upsert"))
+		{
+			RowStruct->CopyScriptStruct(TempMemory, ExistingRow);
+		}
+
+		TArray<FString> RowWarnings;
+		bool bSuccess = FCortexSerializer::JsonToStruct(*EntryRowData, RowStruct, TempMemory, DataTable, RowWarnings);
+		if (!bSuccess)
+		{
+			RowStruct->DestroyStruct(TempMemory);
+			FMemory::Free(TempMemory);
+			Errors.Add(FString::Printf(TEXT("Row %d (%s): deserialization failed"), Index, *EntryRowName));
+			continue;
+		}
+
+		for (const FString& W : RowWarnings)
+		{
+			Warnings.Add(FString::Printf(TEXT("Row %d (%s): %s"), Index, *EntryRowName, *W));
+		}
+
 		if (bRowExists && Mode == TEXT("upsert"))
 		{
-			// Update existing row in place
-			TArray<FString> RowWarnings;
-			bool bSuccess = FCortexSerializer::JsonToStruct(*EntryRowData, RowStruct, ExistingRow, DataTable, RowWarnings);
-			if (!bSuccess)
-			{
-				Errors.Add(FString::Printf(TEXT("Row %d (%s): deserialization failed"), Index, *EntryRowName));
-				continue;
-			}
-			for (const FString& W : RowWarnings)
-			{
-				Warnings.Add(FString::Printf(TEXT("Row %d (%s): %s"), Index, *EntryRowName, *W));
-			}
-			DataTable->HandleDataTableChanged(EntryRowFName);
 			++UpdatedCount;
 		}
 		else
 		{
-			// Create new row
-			uint8* RowMemory = static_cast<uint8*>(FMemory::Malloc(RowStruct->GetStructureSize()));
-			RowStruct->InitializeStruct(RowMemory);
-
-			TArray<FString> RowWarnings;
-			bool bSuccess = FCortexSerializer::JsonToStruct(*EntryRowData, RowStruct, RowMemory, DataTable, RowWarnings);
-
-			if (!bSuccess)
-			{
-				RowStruct->DestroyStruct(RowMemory);
-				FMemory::Free(RowMemory);
-				Errors.Add(FString::Printf(TEXT("Row %d (%s): deserialization failed"), Index, *EntryRowName));
-				continue;
-			}
-
-			for (const FString& W : RowWarnings)
-			{
-				Warnings.Add(FString::Printf(TEXT("Row %d (%s): %s"), Index, *EntryRowName, *W));
-			}
-
-			AddDataTableRowCompat(DataTable, EntryRowFName, RowMemory, RowStruct);
-
-			RowStruct->DestroyStruct(RowMemory);
-			FMemory::Free(RowMemory);
 			++CreatedCount;
+		}
+
+		if (!bDryRun)
+		{
+			if (bHasPendingMemory && Mode == TEXT("upsert"))
+			{
+				FCortexValidatedImportRow& ValidatedRow = ValidatedRows[*PendingRowIndex];
+				RowStruct->DestroyStruct(ValidatedRow.RowMemory);
+				FMemory::Free(ValidatedRow.RowMemory);
+				ValidatedRow.RowMemory = TempMemory;
+			}
+			else
+			{
+				const int32 NewValidatedIndex = ValidatedRows.Num();
+				FCortexValidatedImportRow& ValidatedRow = ValidatedRows.AddDefaulted_GetRef();
+				ValidatedRow.RowName = EntryRowName;
+				ValidatedRow.RowFName = EntryRowFName;
+				ValidatedRow.RowMemory = TempMemory;
+				ValidatedRow.bRowExists = bRowExists;
+				ValidatedRowIndexByName.Add(EntryRowFName, NewValidatedIndex);
+				PendingRowNames.Add(EntryRowFName);
+			}
+		}
+		else
+		{
+			PendingRowNames.Add(EntryRowFName);
+			RowStruct->DestroyStruct(TempMemory);
+			FMemory::Free(TempMemory);
+		}
+	}
+
+	if (Errors.Num() > 0)
+	{
+		FreeValidatedImportRows(ValidatedRows, RowStruct);
+		TSharedPtr<FJsonObject> ErrorDetails = MakeShared<FJsonObject>();
+		TArray<TSharedPtr<FJsonValue>> ErrorsArray;
+		for (const FString& Err : Errors)
+		{
+			ErrorsArray.Add(MakeShared<FJsonValueString>(Err));
+		}
+		ErrorDetails->SetArrayField(TEXT("errors"), ErrorsArray);
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::SerializationError,
+			TEXT("Failed to deserialize one or more rows"),
+			ErrorDetails);
+	}
+
+	if (!bDryRun)
+	{
+		FScopedTransaction Transaction(FText::FromString(
+			FString::Printf(TEXT("Cortex:Import %d rows into '%s' (mode: %s)"), RowsArray->Num(), *DataTable->GetName(), *Mode)
+		));
+		DataTable->Modify();
+
+		if (Mode == TEXT("replace"))
+		{
+			DataTable->EmptyTable();
+		}
+
+		for (const FCortexValidatedImportRow& Row : ValidatedRows)
+		{
+			uint8* ExistingRow = DataTable->FindRowUnchecked(Row.RowFName);
+			if (ExistingRow != nullptr && Mode == TEXT("upsert"))
+			{
+				RowStruct->CopyScriptStruct(ExistingRow, Row.RowMemory);
+				DataTable->HandleDataTableChanged(Row.RowFName);
+			}
+			else
+			{
+				AddDataTableRowCompat(DataTable, Row.RowFName, Row.RowMemory, RowStruct);
+			}
 		}
 	}
 
 	if (!bDryRun)
 	{
 		DataTable->MarkPackageDirty();
-	FCortexEditorUtils::NotifyAssetModified(DataTable);
+		FCortexEditorUtils::NotifyAssetModified(DataTable);
 	}
+	FreeValidatedImportRows(ValidatedRows, RowStruct);
 
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetNumberField(TEXT("created"), CreatedCount);
@@ -1327,6 +1368,143 @@ static void SearchRowFields(
 	}
 }
 
+static bool ShouldScanStructForStringTableRefs(const UScriptStruct* StructType)
+{
+	return StructType != nullptr
+		&& StructType != FGameplayTag::StaticStruct()
+		&& StructType != TBaseStructure<FSoftObjectPath>::Get()
+		&& StructType != FInstancedStruct::StaticStruct();
+}
+
+static bool MatchesStringTableRefFilter(
+	const FName& TableId,
+	const FString& Key,
+	const FString& StringTablePath,
+	const FString& KeyPattern,
+	const TSet<FString>& Keys)
+{
+	if (!StringTablePath.IsEmpty() && TableId.ToString() != StringTablePath)
+	{
+		return false;
+	}
+	if (!KeyPattern.IsEmpty() && !Key.MatchesWildcard(KeyPattern))
+	{
+		return false;
+	}
+	if (Keys.Num() > 0 && !Keys.Contains(Key))
+	{
+		return false;
+	}
+	return true;
+}
+
+void FCortexDataTableOps::ScanStringTableReferences(
+	const UStruct* StructType,
+	const void* StructData,
+	const FString& TablePath,
+	const FString& RowName,
+	const FString& StringTablePath,
+	const FString& KeyPattern,
+	const TSet<FString>& Keys,
+	const FString& FieldPrefix,
+	TArray<TSharedPtr<FJsonValue>>& OutReferences)
+{
+	if (StructType == nullptr || StructData == nullptr)
+	{
+		return;
+	}
+
+	for (TFieldIterator<FProperty> It(StructType); It; ++It)
+	{
+		const FProperty* Property = *It;
+		const void* ValuePtr = Property->ContainerPtrToValuePtr<void>(StructData);
+		const FString FieldPath = FieldPrefix.IsEmpty()
+			? Property->GetName()
+			: FieldPrefix + TEXT(".") + Property->GetName();
+
+		if (const FTextProperty* TextProp = CastField<FTextProperty>(Property))
+		{
+			const FText& TextValue = TextProp->GetPropertyValue(ValuePtr);
+			FName TableId;
+			FString Key;
+			if (FTextInspector::GetTableIdAndKey(TextValue, TableId, Key)
+				&& MatchesStringTableRefFilter(TableId, Key, StringTablePath, KeyPattern, Keys))
+			{
+				TSharedRef<FJsonObject> Reference = MakeShared<FJsonObject>();
+				Reference->SetStringField(TEXT("table_path"), TablePath);
+				Reference->SetStringField(TEXT("row_name"), RowName);
+				Reference->SetStringField(TEXT("field_path"), FieldPath);
+				Reference->SetStringField(TEXT("string_table_id"), TableId.ToString());
+				Reference->SetStringField(TEXT("key"), Key);
+				Reference->SetStringField(TEXT("value"), TextValue.ToString());
+				OutReferences.Add(MakeShared<FJsonValueObject>(Reference));
+			}
+			continue;
+		}
+
+		if (const FStructProperty* StructProp = CastField<FStructProperty>(Property))
+		{
+			if (ShouldScanStructForStringTableRefs(StructProp->Struct))
+			{
+				ScanStringTableReferences(
+					StructProp->Struct,
+					ValuePtr,
+					TablePath,
+					RowName,
+					StringTablePath,
+					KeyPattern,
+					Keys,
+					FieldPath,
+					OutReferences);
+			}
+			continue;
+		}
+
+		if (const FArrayProperty* ArrayProp = CastField<FArrayProperty>(Property))
+		{
+			FScriptArrayHelper ArrayHelper(ArrayProp, ValuePtr);
+			for (int32 Index = 0; Index < ArrayHelper.Num(); ++Index)
+			{
+				const FString ElementPath = FString::Printf(TEXT("%s[%d]"), *FieldPath, Index);
+				if (const FTextProperty* InnerTextProp = CastField<FTextProperty>(ArrayProp->Inner))
+				{
+					const FText& TextValue = InnerTextProp->GetPropertyValue(ArrayHelper.GetRawPtr(Index));
+					FName TableId;
+					FString Key;
+					if (FTextInspector::GetTableIdAndKey(TextValue, TableId, Key)
+						&& MatchesStringTableRefFilter(TableId, Key, StringTablePath, KeyPattern, Keys))
+					{
+						TSharedRef<FJsonObject> Reference = MakeShared<FJsonObject>();
+						Reference->SetStringField(TEXT("table_path"), TablePath);
+						Reference->SetStringField(TEXT("row_name"), RowName);
+						Reference->SetStringField(TEXT("field_path"), ElementPath);
+						Reference->SetStringField(TEXT("string_table_id"), TableId.ToString());
+						Reference->SetStringField(TEXT("key"), Key);
+						Reference->SetStringField(TEXT("value"), TextValue.ToString());
+						OutReferences.Add(MakeShared<FJsonValueObject>(Reference));
+					}
+				}
+				else if (const FStructProperty* InnerStructProp = CastField<FStructProperty>(ArrayProp->Inner))
+				{
+					if (ShouldScanStructForStringTableRefs(InnerStructProp->Struct))
+					{
+						ScanStringTableReferences(
+							InnerStructProp->Struct,
+							ArrayHelper.GetRawPtr(Index),
+							TablePath,
+							RowName,
+							StringTablePath,
+							KeyPattern,
+							Keys,
+							ElementPath,
+							OutReferences);
+					}
+				}
+			}
+		}
+	}
+}
+
 FCortexCommandResult FCortexDataTableOps::SearchDatatableContent(const TSharedPtr<FJsonObject>& Params)
 {
 	FString TablePath;
@@ -1338,8 +1516,20 @@ FCortexCommandResult FCortexDataTableOps::SearchDatatableContent(const TSharedPt
 		);
 	}
 
+	FString SearchMode;
+	Params->TryGetStringField(TEXT("search_mode"), SearchMode);
+	const bool bSearchStringTableRefs = SearchMode == TEXT("string_table_refs");
+	if (!SearchMode.IsEmpty() && !bSearchStringTableRefs)
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidValue,
+			FString::Printf(TEXT("Unsupported search_mode: %s"), *SearchMode)
+		);
+	}
+
 	FString SearchText;
-	if (!Params->TryGetStringField(TEXT("search_text"), SearchText) || SearchText.IsEmpty())
+	if (!bSearchStringTableRefs
+		&& (!Params->TryGetStringField(TEXT("search_text"), SearchText) || SearchText.IsEmpty()))
 	{
 		// Accept "query" as alias for "search_text"
 		if (!Params->TryGetStringField(TEXT("query"), SearchText) || SearchText.IsEmpty())
@@ -1403,6 +1593,70 @@ FCortexCommandResult FCortexDataTableOps::SearchDatatableContent(const TSharedPt
 	if (Params->TryGetNumberField(TEXT("limit"), LimitVal))
 	{
 		Limit = FMath::Max(1, static_cast<int32>(LimitVal));
+	}
+
+	if (bSearchStringTableRefs)
+	{
+		FString StringTablePath;
+		FString KeyPattern;
+		Params->TryGetStringField(TEXT("string_table_path"), StringTablePath);
+		Params->TryGetStringField(TEXT("key_pattern"), KeyPattern);
+
+		TSet<FString> Keys;
+		const TArray<TSharedPtr<FJsonValue>>* KeysArray = nullptr;
+		if (Params->TryGetArrayField(TEXT("keys"), KeysArray) && KeysArray != nullptr)
+		{
+			for (const TSharedPtr<FJsonValue>& KeyValue : *KeysArray)
+			{
+				FString Key;
+				if (KeyValue.IsValid() && KeyValue->TryGetString(Key))
+				{
+					Keys.Add(Key);
+				}
+			}
+		}
+
+		TArray<TSharedPtr<FJsonValue>> ReferencesArray;
+		for (const FName& RowName : DataTable->GetRowNames())
+		{
+			if (ReferencesArray.Num() >= Limit)
+			{
+				break;
+			}
+
+			const void* RowData = DataTable->FindRowUnchecked(RowName);
+			if (RowData == nullptr)
+			{
+				continue;
+			}
+
+			ScanStringTableReferences(
+				RowStruct,
+				RowData,
+				TablePath,
+				RowName.ToString(),
+				StringTablePath,
+				KeyPattern,
+				Keys,
+				FString(),
+				ReferencesArray);
+
+			if (ReferencesArray.Num() > Limit)
+			{
+				ReferencesArray.SetNum(Limit);
+			}
+		}
+
+		TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+		Data->SetStringField(TEXT("table_path"), TablePath);
+		Data->SetStringField(TEXT("search_mode"), SearchMode);
+		Data->SetStringField(TEXT("string_table_path"), StringTablePath);
+		Data->SetStringField(TEXT("key_pattern"), KeyPattern);
+		Data->SetNumberField(TEXT("total_matches"), ReferencesArray.Num());
+		Data->SetNumberField(TEXT("limit"), Limit);
+		Data->SetArrayField(TEXT("results"), ReferencesArray);
+
+		return FCortexCommandRouter::Success(Data);
 	}
 
 	// Search all rows
