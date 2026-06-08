@@ -14,6 +14,7 @@
 #include "Engine/DataAsset.h"
 #include "Engine/DataTable.h"
 #include "Internationalization/StringTable.h"
+#include "Internationalization/StringTableCore.h"
 #include "UObject/UnrealType.h"
 
 namespace
@@ -128,6 +129,80 @@ namespace
 	FCortexCommandResult InvalidFieldError(const FString& Message)
 	{
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, Message);
+	}
+
+	void SetStringArrayOrNull(TSharedRef<FJsonObject> Object, const FString& FieldName, const TArray<FString>& Values)
+	{
+		if (Values.Num() == 0)
+		{
+			Object->SetField(FieldName, MakeShared<FJsonValueNull>());
+			return;
+		}
+
+		TArray<TSharedPtr<FJsonValue>> JsonValues;
+		JsonValues.Reserve(Values.Num());
+		for (const FString& Value : Values)
+		{
+			JsonValues.Add(MakeShared<FJsonValueString>(Value));
+		}
+		Object->SetArrayField(FieldName, JsonValues);
+	}
+
+	TArray<FName> FilterAndSortRowNames(
+		const TArray<FName>& SourceRowNames,
+		const TSet<FName>& ExactRowNames,
+		const FString& RowNamePattern)
+	{
+		TArray<FName> FilteredRowNames;
+		for (const FName& RowName : SourceRowNames)
+		{
+			const FString RowNameString = RowName.ToString();
+			if (ExactRowNames.Num() > 0)
+			{
+				if (!ExactRowNames.Contains(RowName))
+				{
+					continue;
+				}
+			}
+			else if (!RowNamePattern.IsEmpty() && !RowNameString.MatchesWildcard(RowNamePattern))
+			{
+				continue;
+			}
+
+			FilteredRowNames.Add(RowName);
+		}
+
+		FilteredRowNames.Sort([](const FName& Left, const FName& Right)
+		{
+			return Left.ToString() < Right.ToString();
+		});
+
+		return FilteredRowNames;
+	}
+
+	void ResolveRequestedRowNames(
+		const TArray<FName>& SourceRowNames,
+		const TArray<FString>& RequestedRowNames,
+		TSet<FName>& OutResolvedRowNames,
+		TArray<FString>& OutMissingRowNames)
+	{
+		for (const FString& RequestedRowName : RequestedRowNames)
+		{
+			const FName RequestedName(*RequestedRowName);
+			const FName* ResolvedRowName = SourceRowNames.FindByPredicate(
+				[RequestedName](const FName& SourceRowName)
+				{
+					return SourceRowName == RequestedName;
+				});
+
+			if (ResolvedRowName == nullptr)
+			{
+				OutMissingRowNames.Add(RequestedRowName);
+				continue;
+			}
+
+			OutResolvedRowNames.Add(*ResolvedRowName);
+		}
 	}
 }
 
@@ -557,22 +632,89 @@ FCortexCommandResult FCortexDataExportOps::ExportDatatableJson(const TSharedPtr<
 		return LoadError;
 	}
 
+	const UScriptStruct* RowStruct = DataTable->GetRowStruct();
+	if (RowStruct == nullptr)
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::SerializationError,
+			FString::Printf(TEXT("DataTable has no row struct: %s"), *TablePath));
+	}
+
+	const TArray<FString> FieldsProjectionArray = ParseStringArrayParam(Params, TEXT("fields"));
+	TSet<FString> FieldsProjection;
+	for (const FString& FieldName : FieldsProjectionArray)
+	{
+		FieldsProjection.Add(FieldName);
+	}
+
+	const TArray<FName> SourceRowNames = DataTable->GetRowNames();
+	const TArray<FString> RequestedRowNames = ParseStringArrayParam(Params, TEXT("row_names"));
+	TSet<FName> ExactRowNames;
+	TArray<FString> MissingRowNames;
+	ResolveRequestedRowNames(SourceRowNames, RequestedRowNames, ExactRowNames, MissingRowNames);
+	if (MissingRowNames.Num() > 0)
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::RowNotFound,
+			FString::Printf(
+				TEXT("DataTable export requested missing row_names in %s: %s"),
+				*TablePath,
+				*FString::Join(MissingRowNames, TEXT(", "))));
+	}
+
+	FString RowNamePattern;
+	Params->TryGetStringField(TEXT("row_name_pattern"), RowNamePattern);
+
+	bool bIncludeSchema = false;
+	Params->TryGetBoolField(TEXT("include_schema"), bIncludeSchema);
+
+	const TArray<FName> FilteredRowNames = FilterAndSortRowNames(SourceRowNames, ExactRowNames, RowNamePattern);
+	TArray<TSharedPtr<FJsonValue>> RowsArray;
+	RowsArray.Reserve(FilteredRowNames.Num());
+	for (const FName& RowName : FilteredRowNames)
+	{
+		const uint8* RowData = DataTable->FindRowUnchecked(RowName);
+		if (RowData == nullptr)
+		{
+			return FCortexCommandRouter::Error(
+				CortexErrorCodes::SerializationError,
+				FString::Printf(TEXT("Could not resolve row '%s' in DataTable: %s"), *RowName.ToString(), *TablePath));
+		}
+
+		TSharedPtr<FJsonObject> RowJson = FieldsProjection.Num() > 0
+			? FCortexSerializer::StructToJson(RowStruct, RowData, FieldsProjection)
+			: FCortexSerializer::StructToJson(RowStruct, RowData);
+		if (!RowJson.IsValid())
+		{
+			return FCortexCommandRouter::Error(
+				CortexErrorCodes::SerializationError,
+				FString::Printf(TEXT("Failed to serialize row '%s' in DataTable: %s"), *RowName.ToString(), *TablePath));
+		}
+
+		TSharedRef<FJsonObject> RowEntryJson = MakeShared<FJsonObject>();
+		RowEntryJson->SetStringField(TEXT("row_name"), RowName.ToString());
+		RowEntryJson->SetObjectField(TEXT("row_data"), RowJson);
+		RowsArray.Add(MakeShared<FJsonValueObject>(RowEntryJson));
+	}
+
 	TSharedRef<FJsonObject> Payload = MakeShared<FJsonObject>();
-	Payload->SetStringField(TEXT("z_marker"), TEXT("data_export_skeleton"));
-
-	TArray<TSharedPtr<FJsonValue>> ArrayOrder;
-	ArrayOrder.Add(MakeShared<FJsonValueString>(TEXT("first")));
-	ArrayOrder.Add(MakeShared<FJsonValueString>(TEXT("second")));
-	Payload->SetArrayField(TEXT("array_order"), ArrayOrder);
-
-	TSharedRef<FJsonObject> NestedOrder = MakeShared<FJsonObject>();
-	NestedOrder->SetStringField(TEXT("beta"), TEXT("second"));
-	NestedOrder->SetStringField(TEXT("alpha"), TEXT("first"));
-
-	TSharedRef<FJsonObject> Summary = MakeShared<FJsonObject>();
-	Summary->SetStringField(TEXT("status"), TEXT("skeleton"));
-	Summary->SetObjectField(TEXT("nested_order"), NestedOrder);
-	Payload->SetObjectField(TEXT("summary"), Summary);
+	Payload->SetStringField(TEXT("table_path"), TablePath);
+	Payload->SetStringField(TEXT("row_struct"), RowStruct->GetName());
+	Payload->SetNumberField(TEXT("total_count"), FilteredRowNames.Num());
+	Payload->SetNumberField(TEXT("exported_count"), RowsArray.Num());
+	SetStringArrayOrNull(Payload, TEXT("fields"), FieldsProjectionArray);
+	if (bIncludeSchema)
+	{
+		TSharedPtr<FJsonObject> Schema = FCortexSerializer::GetStructSchema(RowStruct, true);
+		if (!Schema.IsValid())
+		{
+			return FCortexCommandRouter::Error(
+				CortexErrorCodes::SerializationError,
+				FString::Printf(TEXT("Failed to serialize row struct schema for DataTable: %s"), *TablePath));
+		}
+		Payload->SetObjectField(TEXT("schema"), Schema);
+	}
+	Payload->SetArrayField(TEXT("rows"), RowsArray);
 
 	const FExportWriteResult WriteResult = WriteJsonFile(ResolvedOutPath.AbsolutePath, Payload);
 	if (!WriteResult.bWritten)
@@ -581,13 +723,13 @@ FCortexCommandResult FCortexDataExportOps::ExportDatatableJson(const TSharedPtr<
 	}
 
 	return FCortexCommandRouter::Success(MakeSingleSummary(
-		false,
+		true,
 		false,
 		ResolvedOutPath.AbsolutePath,
 		WriteResult.BytesWritten,
-		0,
+		RowsArray.Num(),
 		TArray<FString>(),
-		TArray<FString>{ TEXT("DataTable export payload is not implemented yet") }));
+		TArray<FString>()));
 }
 
 FCortexCommandResult FCortexDataExportOps::ExportStringTableJson(const TSharedPtr<FJsonObject>& Params)
@@ -615,14 +757,62 @@ FCortexCommandResult FCortexDataExportOps::ExportStringTableJson(const TSharedPt
 		return LoadError;
 	}
 
+	FString KeyPattern;
+	Params->TryGetStringField(TEXT("key_pattern"), KeyPattern);
+
+	struct FStringTableExportEntry
+	{
+		FString Key;
+		FString SourceString;
+	};
+
+	TArray<FStringTableExportEntry> Entries;
+	StringTable->GetStringTable()->EnumerateSourceStrings(
+		[&Entries, &KeyPattern](const FString& InKey, const FString& InSourceString) -> bool
+		{
+			if (!KeyPattern.IsEmpty() && !InKey.MatchesWildcard(KeyPattern))
+			{
+				return true;
+			}
+
+			Entries.Add(FStringTableExportEntry{ InKey, InSourceString });
+			return true;
+		});
+
+	Entries.Sort([](const FStringTableExportEntry& Left, const FStringTableExportEntry& Right)
+	{
+		return Left.Key < Right.Key;
+	});
+
+	TArray<TSharedPtr<FJsonValue>> EntriesArray;
+	EntriesArray.Reserve(Entries.Num());
+	for (const FStringTableExportEntry& Entry : Entries)
+	{
+		TSharedRef<FJsonObject> EntryJson = MakeShared<FJsonObject>();
+		EntryJson->SetStringField(TEXT("key"), Entry.Key);
+		EntryJson->SetStringField(TEXT("source_string"), Entry.SourceString);
+		EntriesArray.Add(MakeShared<FJsonValueObject>(EntryJson));
+	}
+
+	TSharedRef<FJsonObject> Payload = MakeShared<FJsonObject>();
+	Payload->SetStringField(TEXT("string_table_path"), StringTablePath);
+	Payload->SetNumberField(TEXT("count"), EntriesArray.Num());
+	Payload->SetArrayField(TEXT("entries"), EntriesArray);
+
+	const FExportWriteResult WriteResult = WriteJsonFile(ResolvedOutPath.AbsolutePath, Payload);
+	if (!WriteResult.bWritten)
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::SaveFailed, WriteResult.Error);
+	}
+
 	return FCortexCommandRouter::Success(MakeSingleSummary(
-		false,
+		true,
 		false,
 		ResolvedOutPath.AbsolutePath,
-		0,
-		0,
+		WriteResult.BytesWritten,
+		EntriesArray.Num(),
 		TArray<FString>(),
-		TArray<FString>{ TEXT("StringTable export payload is not implemented yet") }));
+		TArray<FString>()));
 }
 
 FCortexCommandResult FCortexDataExportOps::ExportDataAssetsJson(const TSharedPtr<FJsonObject>& Params)

@@ -42,6 +42,7 @@ namespace
 	{
 		FCortexDataLocalizationTestRow Row;
 		Row.Title = FText::FromString(Title);
+		Row.row_name = FString::Printf(TEXT("Data %s"), *Title);
 
 		FCortexDataLocalizationStepTestRow Step;
 		Step.Description = FText::FromString(StepText);
@@ -189,6 +190,7 @@ namespace
 			Table->GetMutableStringTable()->SetSourceString(TEXT("zeta.key"), TEXT("Zeta text"));
 			Table->GetMutableStringTable()->SetSourceString(TEXT("alpha.key"), TEXT("Alpha text"));
 			Table->GetMutableStringTable()->SetSourceString(TEXT("middle.key"), TEXT("Middle text"));
+			Table->GetMutableStringTable()->SetSourceString(TEXT("ignored.other"), TEXT("Ignored text"));
 			return Table;
 		}
 
@@ -239,6 +241,17 @@ namespace
 			return true;
 		}
 
+		bool TryReadFileBytes(const FString& FilePath, TArray<uint8>& OutBytes, FString& OutError) const
+		{
+			if (!FFileHelper::LoadFileToArray(OutBytes, *FilePath))
+			{
+				OutError = FString::Printf(TEXT("Could not read file bytes: %s"), *FilePath);
+				return false;
+			}
+
+			return true;
+		}
+
 		void Cleanup()
 		{
 			IFileManager::Get().DeleteDirectory(*GetSavedRunDir(), false, true);
@@ -281,6 +294,65 @@ namespace
 		FString RunId;
 		TArray<FString> CreatedPackageNames;
 	};
+
+	void AddStringArrayField(TSharedRef<FJsonObject> Params, const FString& FieldName, const TArray<FString>& Values)
+	{
+		TArray<TSharedPtr<FJsonValue>> JsonValues;
+		for (const FString& Value : Values)
+		{
+			JsonValues.Add(MakeShared<FJsonValueString>(Value));
+		}
+		Params->SetArrayField(FieldName, JsonValues);
+	}
+
+	TArray<FString> GetRowNamesFromExport(const TArray<TSharedPtr<FJsonValue>>& Rows)
+	{
+		TArray<FString> RowNames;
+		for (const TSharedPtr<FJsonValue>& RowValue : Rows)
+		{
+			const TSharedPtr<FJsonObject>* RowObject = nullptr;
+			if (RowValue.IsValid() && RowValue->TryGetObject(RowObject) && RowObject != nullptr && RowObject->IsValid())
+			{
+				RowNames.Add((*RowObject)->GetStringField(TEXT("row_name")));
+			}
+		}
+
+		return RowNames;
+	}
+
+	TSharedPtr<FJsonObject> GetRowDataFromExportRow(const TSharedPtr<FJsonObject>& RowObject)
+	{
+		if (!RowObject.IsValid())
+		{
+			return nullptr;
+		}
+
+		const TSharedPtr<FJsonObject>* RowDataObject = nullptr;
+		if (!RowObject->TryGetObjectField(TEXT("row_data"), RowDataObject) || RowDataObject == nullptr || !RowDataObject->IsValid())
+		{
+			return nullptr;
+		}
+
+		return *RowDataObject;
+	}
+
+	FString GetExportedTextValue(const TSharedPtr<FJsonObject>& RowObject, const FString& FieldName)
+	{
+		if (!RowObject.IsValid())
+		{
+			return TEXT("");
+		}
+
+		const TSharedPtr<FJsonObject>* TextObject = nullptr;
+		if (!RowObject->TryGetObjectField(FieldName, TextObject) || TextObject == nullptr || !TextObject->IsValid())
+		{
+			return TEXT("");
+		}
+
+		FString Value;
+		(*TextObject)->TryGetStringField(TEXT("value"), Value);
+		return Value;
+	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -476,12 +548,12 @@ bool FCortexDataExportPathSafetyTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FCortexDataExportCanonicalWriterTest,
-	"Cortex.Data.Export.CanonicalWriter",
+	FCortexDataExportDatatableProjectionSchemaTest,
+	"Cortex.Data.Export.Datatable.ProjectionSchema",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
-bool FCortexDataExportCanonicalWriterTest::RunTest(const FString& Parameters)
+bool FCortexDataExportDatatableProjectionSchemaTest::RunTest(const FString& Parameters)
 {
 	FCortexDataExportTestFixture Fixture;
 	UDataTable* RegularTable = Fixture.CreateRegularDataTable();
@@ -492,43 +564,479 @@ bool FCortexDataExportCanonicalWriterTest::RunTest(const FString& Parameters)
 	}
 
 	FCortexCommandRouter Router = CreateDataExportTestRouter();
-	const FString FirstOutPath = Fixture.MakeSavedOutputPath(TEXT("canonical-a.json"));
-	const FString SecondOutPath = Fixture.MakeSavedOutputPath(TEXT("canonical-b.json"));
+	const FString OutPath = Fixture.MakeSavedOutputPath(TEXT("projection-schema.json"));
+
+	TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("table_path"), RegularTable->GetPathName());
+	Params->SetStringField(TEXT("out_path"), OutPath);
+	Params->SetStringField(TEXT("row_name_pattern"), TEXT("*a"));
+	Params->SetBoolField(TEXT("include_schema"), true);
+	AddStringArrayField(Params, TEXT("fields"), TArray<FString>{ TEXT("Title") });
+
+	const FCortexCommandResult Result = Router.Execute(TEXT("data.export_datatable_json"), Params);
+	TestTrue(TEXT("DataTable export succeeds"), Result.bSuccess);
+	TestTrue(TEXT("DataTable export returns data"), Result.Data.IsValid());
+
+	if (Result.Data.IsValid())
+	{
+		TestTrue(TEXT("summary omits raw rows"), !Result.Data->HasField(TEXT("rows")));
+		TestTrue(TEXT("summary remains compact"), !Result.Data->HasField(TEXT("schema")));
+		TestTrue(TEXT("summary reports byte count"), Result.Data->GetNumberField(TEXT("bytes_written")) > 0.0);
+		TestEqual(TEXT("summary reports exported count"), static_cast<int32>(Result.Data->GetNumberField(TEXT("exported_count"))), 2);
+	}
+
+	TSharedPtr<FJsonObject> FileJson;
+	FString ParseError;
+	TestTrue(TEXT("DataTable export file parses"), Fixture.TryReadJsonFile(OutPath, FileJson, ParseError));
+	if (!ParseError.IsEmpty())
+	{
+		AddError(ParseError);
+	}
+
+	if (FileJson.IsValid())
+	{
+		TestTrue(TEXT("file contains stable row array"), FileJson->HasTypedField<EJson::Array>(TEXT("rows")));
+		TestTrue(TEXT("file contains row_struct"), FileJson->HasTypedField<EJson::String>(TEXT("row_struct")));
+		TestTrue(TEXT("file contains schema only when requested"), FileJson->HasTypedField<EJson::Object>(TEXT("schema")));
+		TestTrue(TEXT("file contains projected fields array"), FileJson->HasTypedField<EJson::Array>(TEXT("fields")));
+		TestEqual(TEXT("total filtered count is reported"), static_cast<int32>(FileJson->GetNumberField(TEXT("total_count"))), 2);
+		TestEqual(TEXT("exported count is reported"), static_cast<int32>(FileJson->GetNumberField(TEXT("exported_count"))), 2);
+
+		const TArray<TSharedPtr<FJsonValue>>* Rows = nullptr;
+		if (FileJson->TryGetArrayField(TEXT("rows"), Rows) && Rows != nullptr)
+		{
+			TestEqual(TEXT("row_name_pattern filters matching rows"), Rows->Num(), 2);
+			TestTrue(TEXT("filtered rows are sorted by row_name"), GetRowNamesFromExport(*Rows) == TArray<FString>{ TEXT("alpha"), TEXT("zeta") });
+
+			for (const TSharedPtr<FJsonValue>& RowValue : *Rows)
+			{
+				const TSharedPtr<FJsonObject>* RowObject = nullptr;
+				if (RowValue.IsValid() && RowValue->TryGetObject(RowObject) && RowObject != nullptr && RowObject->IsValid())
+				{
+					TSharedPtr<FJsonObject> RowData = GetRowDataFromExportRow(*RowObject);
+					TestTrue(TEXT("row wrapper includes row_name metadata"), (*RowObject)->HasTypedField<EJson::String>(TEXT("row_name")));
+					TestTrue(TEXT("row wrapper includes row_data object"), RowData.IsValid());
+					if (RowData.IsValid())
+					{
+						TestTrue(TEXT("projected row_data includes requested Title"), RowData->HasField(TEXT("Title")));
+						TestFalse(TEXT("projected row_data omits unrequested Steps"), RowData->HasField(TEXT("Steps")));
+						TestFalse(TEXT("projected row_data omits unrequested row_name field"), RowData->HasField(TEXT("row_name")));
+					}
+				}
+			}
+		}
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataExportDatatableRowWrapperTest,
+	"Cortex.Data.Export.Datatable.RowWrapperAvoidsNameCollision",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataExportDatatableRowWrapperTest::RunTest(const FString& Parameters)
+{
+	FCortexDataExportTestFixture Fixture;
+	UDataTable* RegularTable = Fixture.CreateRegularDataTable();
+	TestNotNull(TEXT("regular DataTable fixture is created"), RegularTable);
+	if (RegularTable == nullptr)
+	{
+		return true;
+	}
+
+	FCortexCommandRouter Router = CreateDataExportTestRouter();
+	const FString OutPath = Fixture.MakeSavedOutputPath(TEXT("row-wrapper.json"));
+
+	TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("table_path"), RegularTable->GetPathName());
+	Params->SetStringField(TEXT("out_path"), OutPath);
+	AddStringArrayField(Params, TEXT("row_names"), TArray<FString>{ TEXT("alpha") });
+
+	const FCortexCommandResult Result = Router.Execute(TEXT("data.export_datatable_json"), Params);
+	TestTrue(TEXT("DataTable export succeeds"), Result.bSuccess);
+
+	TSharedPtr<FJsonObject> FileJson;
+	FString ParseError;
+	TestTrue(TEXT("DataTable export file parses"), Fixture.TryReadJsonFile(OutPath, FileJson, ParseError));
+	if (!ParseError.IsEmpty())
+	{
+		AddError(ParseError);
+	}
+
+	if (FileJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Rows = nullptr;
+		if (FileJson->TryGetArrayField(TEXT("rows"), Rows) && Rows != nullptr)
+		{
+			TestEqual(TEXT("exact row filter exports one row"), Rows->Num(), 1);
+			if (Rows->Num() == 1)
+			{
+				const TSharedPtr<FJsonObject>* RowObject = nullptr;
+				if ((*Rows)[0].IsValid() && (*Rows)[0]->TryGetObject(RowObject) && RowObject != nullptr && RowObject->IsValid())
+				{
+					TestEqual(TEXT("wrapper row_name is export metadata"), (*RowObject)->GetStringField(TEXT("row_name")), TEXT("alpha"));
+					TSharedPtr<FJsonObject> RowData = GetRowDataFromExportRow(*RowObject);
+					TestTrue(TEXT("wrapper preserves serialized row_data"), RowData.IsValid());
+					if (RowData.IsValid())
+					{
+						TestEqual(TEXT("row_data preserves real row_name field"), RowData->GetStringField(TEXT("row_name")), TEXT("Data Alpha"));
+						TestEqual(TEXT("row_data preserves other fields"), GetExportedTextValue(RowData, TEXT("Title")), TEXT("Alpha"));
+					}
+				}
+			}
+		}
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataExportDatatableMissingExplicitRowTest,
+	"Cortex.Data.Export.Datatable.MissingExplicitRowFails",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataExportDatatableMissingExplicitRowTest::RunTest(const FString& Parameters)
+{
+	FCortexDataExportTestFixture Fixture;
+	UDataTable* RegularTable = Fixture.CreateRegularDataTable();
+	TestNotNull(TEXT("regular DataTable fixture is created"), RegularTable);
+	if (RegularTable == nullptr)
+	{
+		return true;
+	}
+
+	FCortexCommandRouter Router = CreateDataExportTestRouter();
+	const FString OutPath = Fixture.MakeSavedOutputPath(TEXT("missing-explicit-row.json"));
+
+	TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("table_path"), RegularTable->GetPathName());
+	Params->SetStringField(TEXT("out_path"), OutPath);
+	AddStringArrayField(Params, TEXT("row_names"), TArray<FString>{ TEXT("alpha"), TEXT("missing") });
+
+	const FCortexCommandResult Result = Router.Execute(TEXT("data.export_datatable_json"), Params);
+	TestFalse(TEXT("missing explicit row_names fail export"), Result.bSuccess);
+	TestEqual(TEXT("missing explicit row_names use RowNotFound"), Result.ErrorCode, CortexErrorCodes::RowNotFound);
+	TestFalse(TEXT("missing explicit row_names do not write partial file"), IFileManager::Get().FileExists(*OutPath));
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataExportDatatableMixedCaseExplicitRowTest,
+	"Cortex.Data.Export.Datatable.MixedCaseExplicitRowResolvesActualName",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataExportDatatableMixedCaseExplicitRowTest::RunTest(const FString& Parameters)
+{
+	FCortexDataExportTestFixture Fixture;
+	UDataTable* RegularTable = Fixture.CreateRegularDataTable();
+	TestNotNull(TEXT("regular DataTable fixture is created"), RegularTable);
+	if (RegularTable == nullptr)
+	{
+		return true;
+	}
+
+	FCortexCommandRouter Router = CreateDataExportTestRouter();
+	const FString OutPath = Fixture.MakeSavedOutputPath(TEXT("mixed-case-explicit-row.json"));
+
+	TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("table_path"), RegularTable->GetPathName());
+	Params->SetStringField(TEXT("out_path"), OutPath);
+	AddStringArrayField(Params, TEXT("row_names"), TArray<FString>{ TEXT("ALPHA") });
+
+	const FCortexCommandResult Result = Router.Execute(TEXT("data.export_datatable_json"), Params);
+	TestTrue(TEXT("mixed-case explicit row_names export succeeds"), Result.bSuccess);
+
+	TSharedPtr<FJsonObject> FileJson;
+	FString ParseError;
+	TestTrue(TEXT("mixed-case explicit row export file parses"), Fixture.TryReadJsonFile(OutPath, FileJson, ParseError));
+	if (!ParseError.IsEmpty())
+	{
+		AddError(ParseError);
+	}
+
+	if (FileJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Rows = nullptr;
+		if (FileJson->TryGetArrayField(TEXT("rows"), Rows) && Rows != nullptr)
+		{
+			TestEqual(TEXT("mixed-case explicit row exports one resolved row"), Rows->Num(), 1);
+			TestTrue(TEXT("mixed-case explicit row uses actual stored row name"), GetRowNamesFromExport(*Rows) == TArray<FString>{ TEXT("alpha") });
+		}
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataExportCompositeDatatableTest,
+	"Cortex.Data.Export.Datatable.CompositeResolvedRows",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataExportCompositeDatatableTest::RunTest(const FString& Parameters)
+{
+	FCortexDataExportTestFixture Fixture;
+	UCompositeDataTable* CompositeTable = Fixture.CreateCompositeDataTable();
+	TestNotNull(TEXT("CompositeDataTable fixture is created"), CompositeTable);
+	if (CompositeTable == nullptr)
+	{
+		return true;
+	}
+
+	FCortexCommandRouter Router = CreateDataExportTestRouter();
+	const FString OutPath = Fixture.MakeSavedOutputPath(TEXT("composite.json"));
+
+	TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("table_path"), CompositeTable->GetPathName());
+	Params->SetStringField(TEXT("out_path"), OutPath);
+
+	const FCortexCommandResult Result = Router.Execute(TEXT("data.export_datatable_json"), Params);
+	TestTrue(TEXT("CompositeDataTable export succeeds"), Result.bSuccess);
+	if (Result.Data.IsValid())
+	{
+		TestTrue(TEXT("summary omits raw rows"), !Result.Data->HasField(TEXT("rows")));
+		TestTrue(TEXT("summary reports byte count"), Result.Data->GetNumberField(TEXT("bytes_written")) > 0.0);
+	}
+
+	TSharedPtr<FJsonObject> FileJson;
+	FString ParseError;
+	TestTrue(TEXT("CompositeDataTable export file parses"), Fixture.TryReadJsonFile(OutPath, FileJson, ParseError));
+	if (!ParseError.IsEmpty())
+	{
+		AddError(ParseError);
+	}
+
+	FString FileContents;
+	TestTrue(TEXT("CompositeDataTable export file can be read as text"), FFileHelper::LoadFileToString(FileContents, *OutPath));
+	TestFalse(TEXT("file does not include parent A table path"), FileContents.Contains(TEXT("DT_CortexExportParentA")));
+	TestFalse(TEXT("file does not include parent B table path"), FileContents.Contains(TEXT("DT_CortexExportParentB")));
+	TestFalse(TEXT("file does not include parent-table sections"), FileContents.Contains(TEXT("parent_tables")));
+	TestFalse(TEXT("file does not include source-table sections"), FileContents.Contains(TEXT("source_tables")));
+	TestFalse(TEXT("overridden parent row payload is not exported"), FileContents.Contains(TEXT("Base Shared")));
+
+	if (FileJson.IsValid())
+	{
+		TestTrue(TEXT("file contains stable row array"), FileJson->HasTypedField<EJson::Array>(TEXT("rows")));
+		TestTrue(TEXT("file contains row_struct"), FileJson->HasTypedField<EJson::String>(TEXT("row_struct")));
+
+		const TArray<TSharedPtr<FJsonValue>>* Rows = nullptr;
+		if (FileJson->TryGetArrayField(TEXT("rows"), Rows) && Rows != nullptr)
+		{
+			TestEqual(TEXT("composite export returns merged resolved rows"), Rows->Num(), 3);
+			TestTrue(TEXT("composite rows are sorted by row_name"), GetRowNamesFromExport(*Rows) == TArray<FString>{ TEXT("alpha"), TEXT("beta"), TEXT("shared") });
+
+			const TSharedPtr<FJsonObject>* SharedRowObject = nullptr;
+			if ((*Rows)[2].IsValid() && (*Rows)[2]->TryGetObject(SharedRowObject) && SharedRowObject != nullptr && SharedRowObject->IsValid())
+			{
+				TSharedPtr<FJsonObject> SharedRowData = GetRowDataFromExportRow(*SharedRowObject);
+				TestTrue(TEXT("composite row wrapper includes row_data"), SharedRowData.IsValid());
+				if (SharedRowData.IsValid())
+				{
+					TestEqual(TEXT("later parent override wins for duplicate row names"), GetExportedTextValue(SharedRowData, TEXT("Title")), TEXT("Override Shared"));
+					TestEqual(TEXT("row_data includes overridden real row_name field"), SharedRowData->GetStringField(TEXT("row_name")), TEXT("Data Override Shared"));
+				}
+			}
+		}
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataExportDatatableDeterministicBytesTest,
+	"Cortex.Data.Export.Datatable.DeterministicBytes",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataExportDatatableDeterministicBytesTest::RunTest(const FString& Parameters)
+{
+	FCortexDataExportTestFixture Fixture;
+	UDataTable* RegularTable = Fixture.CreateRegularDataTable();
+	TestNotNull(TEXT("regular DataTable fixture is created"), RegularTable);
+	if (RegularTable == nullptr)
+	{
+		return true;
+	}
+
+	FCortexCommandRouter Router = CreateDataExportTestRouter();
+	const FString FirstOutPath = Fixture.MakeSavedOutputPath(TEXT("deterministic-a.json"));
+	const FString SecondOutPath = Fixture.MakeSavedOutputPath(TEXT("deterministic-b.json"));
 
 	auto ExecuteDatatableExport = [&Router, RegularTable](const FString& OutPath)
 	{
-		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("table_path"), RegularTable->GetPathName());
 		Params->SetStringField(TEXT("out_path"), OutPath);
+		Params->SetBoolField(TEXT("include_schema"), true);
 		return Router.Execute(TEXT("data.export_datatable_json"), Params);
 	};
 
 	const FCortexCommandResult FirstResult = ExecuteDatatableExport(FirstOutPath);
-	TestTrue(TEXT("DataTable skeleton export succeeds"), FirstResult.bSuccess);
+	TestTrue(TEXT("first DataTable export succeeds"), FirstResult.bSuccess);
 	const FCortexCommandResult SecondResult = ExecuteDatatableExport(SecondOutPath);
-	TestTrue(TEXT("Repeated DataTable skeleton export succeeds"), SecondResult.bSuccess);
+	TestTrue(TEXT("second DataTable export succeeds"), SecondResult.bSuccess);
+
+	TArray<uint8> FirstBytes;
+	TArray<uint8> SecondBytes;
+	FString FirstReadError;
+	FString SecondReadError;
+	TestTrue(TEXT("first export file reads as bytes"), Fixture.TryReadFileBytes(FirstOutPath, FirstBytes, FirstReadError));
+	TestTrue(TEXT("second export file reads as bytes"), Fixture.TryReadFileBytes(SecondOutPath, SecondBytes, SecondReadError));
+	if (!FirstReadError.IsEmpty())
+	{
+		AddError(FirstReadError);
+	}
+	if (!SecondReadError.IsEmpty())
+	{
+		AddError(SecondReadError);
+	}
+
+	TestTrue(TEXT("first export bytes are non-empty"), FirstBytes.Num() > 0);
+	TestTrue(TEXT("second export bytes are non-empty"), SecondBytes.Num() > 0);
+	TestTrue(TEXT("DataTable exports are byte-for-byte stable"), FirstBytes == SecondBytes);
 
 	FString FirstContents;
-	FString SecondContents;
-	TestTrue(TEXT("first skeleton export writes JSON"), FFileHelper::LoadFileToString(FirstContents, *FirstOutPath));
-	TestTrue(TEXT("second skeleton export writes JSON"), FFileHelper::LoadFileToString(SecondContents, *SecondOutPath));
+	TestTrue(TEXT("first export file reads as text"), FFileHelper::LoadFileToString(FirstContents, *FirstOutPath));
+	TestFalse(TEXT("first export text is non-empty"), FirstContents.IsEmpty());
+	const int32 ExportedCountIndex = FirstContents.Find(TEXT("\"exported_count\""));
+	const int32 FieldsIndex = FirstContents.Find(TEXT("\"fields\""));
+	const int32 RowStructIndex = FirstContents.Find(TEXT("\"row_struct\""));
+	const int32 RowsIndex = FirstContents.Find(TEXT("\"rows\""));
+	const int32 SchemaIndex = FirstContents.Find(TEXT("\"schema\""));
+	const int32 TablePathIndex = FirstContents.Find(TEXT("\"table_path\""));
+	const int32 TotalCountIndex = FirstContents.Find(TEXT("\"total_count\""));
+	TestTrue(TEXT("canonical writer sorts top-level export keys"),
+		ExportedCountIndex != INDEX_NONE
+		&& ExportedCountIndex < FieldsIndex
+		&& FieldsIndex < RowStructIndex
+		&& RowStructIndex < RowsIndex
+		&& RowsIndex < SchemaIndex
+		&& SchemaIndex < TablePathIndex
+		&& TablePathIndex < TotalCountIndex);
+	const int32 RowDataIndex = RowsIndex != INDEX_NONE
+		? FirstContents.Find(TEXT("\"row_data\""), ESearchCase::CaseSensitive, ESearchDir::FromStart, RowsIndex)
+		: INDEX_NONE;
+	const int32 NestedStepsIndex = RowDataIndex != INDEX_NONE
+		? FirstContents.Find(TEXT("\"Steps\""), ESearchCase::CaseSensitive, ESearchDir::FromStart, RowDataIndex)
+		: INDEX_NONE;
+	const int32 NestedTitleIndex = NestedStepsIndex != INDEX_NONE
+		? FirstContents.Find(TEXT("\"Title\""), ESearchCase::CaseSensitive, ESearchDir::FromStart, NestedStepsIndex)
+		: INDEX_NONE;
+	const int32 NestedRowNameIndex = NestedTitleIndex != INDEX_NONE
+		? FirstContents.Find(TEXT("\"row_name\""), ESearchCase::CaseSensitive, ESearchDir::FromStart, NestedTitleIndex)
+		: INDEX_NONE;
+	const int32 WrapperRowNameIndex = NestedRowNameIndex != INDEX_NONE
+		? FirstContents.Find(TEXT("\"row_name\""), ESearchCase::CaseSensitive, ESearchDir::FromStart, NestedRowNameIndex + 1)
+		: INDEX_NONE;
+	TestTrue(TEXT("canonical writer sorts nested row wrapper keys"),
+		RowDataIndex != INDEX_NONE
+		&& NestedStepsIndex != INDEX_NONE
+		&& NestedTitleIndex != INDEX_NONE
+		&& NestedRowNameIndex != INDEX_NONE
+		&& WrapperRowNameIndex != INDEX_NONE
+		&& RowDataIndex < NestedStepsIndex
+		&& NestedStepsIndex < NestedTitleIndex
+		&& NestedTitleIndex < NestedRowNameIndex
+		&& NestedRowNameIndex < WrapperRowNameIndex);
 
-	if (!FirstContents.IsEmpty() && !SecondContents.IsEmpty())
+	TSharedPtr<FJsonObject> FirstJson;
+	FString ParseError;
+	TestTrue(TEXT("first deterministic export parses"), Fixture.TryReadJsonFile(FirstOutPath, FirstJson, ParseError));
+	if (!ParseError.IsEmpty())
 	{
-		TestEqual(TEXT("canonical skeleton exports are byte-for-byte stable"), FirstContents, SecondContents);
+		AddError(ParseError);
+	}
+	if (FirstJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Rows = nullptr;
+		if (FirstJson->TryGetArrayField(TEXT("rows"), Rows) && Rows != nullptr)
+		{
+			TestEqual(TEXT("deterministic export writes expected row count"), Rows->Num(), 3);
+			TestTrue(TEXT("export preserves sorted rows array order"), GetRowNamesFromExport(*Rows) == TArray<FString>{ TEXT("alpha"), TEXT("middle"), TEXT("zeta") });
+		}
+	}
 
-		const int32 ArrayOrderIndex = FirstContents.Find(TEXT("\"array_order\""));
-		const int32 SummaryIndex = FirstContents.Find(TEXT("\"summary\""));
-		const int32 ZMarkerIndex = FirstContents.Find(TEXT("\"z_marker\""));
-		TestTrue(TEXT("canonical writer sorts root keys"), ArrayOrderIndex != INDEX_NONE && ArrayOrderIndex < SummaryIndex && SummaryIndex < ZMarkerIndex);
+	return true;
+}
 
-		const int32 AlphaIndex = FirstContents.Find(TEXT("\"alpha\""));
-		const int32 BetaIndex = FirstContents.Find(TEXT("\"beta\""));
-		TestTrue(TEXT("canonical writer sorts nested object keys"), AlphaIndex != INDEX_NONE && AlphaIndex < BetaIndex);
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataExportStringTableJsonTest,
+	"Cortex.Data.Export.StringTable.FilteredEntries",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
 
-		const int32 FirstIndex = FirstContents.Find(TEXT("\"first\""));
-		const int32 SecondIndex = FirstContents.Find(TEXT("\"second\""));
-		TestTrue(TEXT("canonical writer preserves array order"), FirstIndex != INDEX_NONE && FirstIndex < SecondIndex);
+bool FCortexDataExportStringTableJsonTest::RunTest(const FString& Parameters)
+{
+	FCortexDataExportTestFixture Fixture;
+	UStringTable* StringTable = Fixture.CreateStringTable();
+	TestNotNull(TEXT("StringTable fixture is created"), StringTable);
+	if (StringTable == nullptr)
+	{
+		return true;
+	}
+
+	FCortexCommandRouter Router = CreateDataExportTestRouter();
+	const FString OutPath = Fixture.MakeSavedOutputPath(TEXT("string-table.json"));
+
+	TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("string_table_path"), StringTable->GetPathName());
+	Params->SetStringField(TEXT("out_path"), OutPath);
+	Params->SetStringField(TEXT("key_pattern"), TEXT("*.key"));
+
+	const FCortexCommandResult Result = Router.Execute(TEXT("data.export_string_table_json"), Params);
+	TestTrue(TEXT("StringTable export succeeds"), Result.bSuccess);
+	TestTrue(TEXT("StringTable export returns data"), Result.Data.IsValid());
+	if (Result.Data.IsValid())
+	{
+		TestTrue(TEXT("summary omits raw entries"), !Result.Data->HasField(TEXT("entries")));
+		TestTrue(TEXT("summary reports byte count"), Result.Data->GetNumberField(TEXT("bytes_written")) > 0.0);
+		TestEqual(TEXT("summary reports exported entry count"), static_cast<int32>(Result.Data->GetNumberField(TEXT("exported_count"))), 3);
+	}
+
+	TSharedPtr<FJsonObject> FileJson;
+	FString ParseError;
+	TestTrue(TEXT("StringTable export file parses"), Fixture.TryReadJsonFile(OutPath, FileJson, ParseError));
+	if (!ParseError.IsEmpty())
+	{
+		AddError(ParseError);
+	}
+
+	FString FileContents;
+	TestTrue(TEXT("StringTable export file can be read as text"), FFileHelper::LoadFileToString(FileContents, *OutPath));
+	TestFalse(TEXT("key_pattern excludes non-matching keys"), FileContents.Contains(TEXT("ignored.other")));
+	TestFalse(TEXT("key_pattern excludes non-matching source strings"), FileContents.Contains(TEXT("Ignored text")));
+
+	if (FileJson.IsValid())
+	{
+		TestTrue(TEXT("file contains entries array"), FileJson->HasTypedField<EJson::Array>(TEXT("entries")));
+		TestTrue(TEXT("file contains count"), FileJson->HasTypedField<EJson::Number>(TEXT("count")));
+		TestEqual(TEXT("file reports filtered entry count"), static_cast<int32>(FileJson->GetNumberField(TEXT("count"))), 3);
+
+		const TArray<TSharedPtr<FJsonValue>>* Entries = nullptr;
+		if (FileJson->TryGetArrayField(TEXT("entries"), Entries) && Entries != nullptr)
+		{
+			TestEqual(TEXT("string entries are sorted by key"), Entries->Num(), 3);
+			if (Entries->Num() == 3)
+			{
+				const TSharedPtr<FJsonObject>* FirstEntry = nullptr;
+				const TSharedPtr<FJsonObject>* SecondEntry = nullptr;
+				const TSharedPtr<FJsonObject>* ThirdEntry = nullptr;
+				if ((*Entries)[0].IsValid() && (*Entries)[0]->TryGetObject(FirstEntry) && FirstEntry != nullptr && FirstEntry->IsValid()
+					&& (*Entries)[1].IsValid() && (*Entries)[1]->TryGetObject(SecondEntry) && SecondEntry != nullptr && SecondEntry->IsValid()
+					&& (*Entries)[2].IsValid() && (*Entries)[2]->TryGetObject(ThirdEntry) && ThirdEntry != nullptr && ThirdEntry->IsValid())
+				{
+					TestEqual(TEXT("first key is alpha"), (*FirstEntry)->GetStringField(TEXT("key")), TEXT("alpha.key"));
+					TestEqual(TEXT("second key is middle"), (*SecondEntry)->GetStringField(TEXT("key")), TEXT("middle.key"));
+					TestEqual(TEXT("third key is zeta"), (*ThirdEntry)->GetStringField(TEXT("key")), TEXT("zeta.key"));
+					TestEqual(TEXT("entry contains source string"), (*FirstEntry)->GetStringField(TEXT("source_string")), TEXT("Alpha text"));
+				}
+			}
+		}
 	}
 
 	return true;
