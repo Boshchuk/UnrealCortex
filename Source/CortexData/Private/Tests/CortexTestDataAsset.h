@@ -16,6 +16,17 @@ public:
 
 	UPROPERTY(EditAnywhere)
 	int32 TestNumber = 0;
+
+	UPROPERTY(EditAnywhere, Transient)
+	FString ExportTransientProperty;
+
+#if WITH_EDITORONLY_DATA
+	UPROPERTY(EditAnywhere)
+	FString ExportEditorOnlyProperty;
+#endif
+
+	UPROPERTY()
+	FString ExportInternalProperty;
 };
 
 /** Derived concrete DataAsset subclass for hierarchy filtering tests. */
