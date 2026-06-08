@@ -17,6 +17,8 @@
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
+#include "HAL/PlatformProcess.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "UObject/UObjectHash.h"
@@ -51,6 +53,19 @@ namespace
 	FString PackagePathForAsset(const FString& RunId, const FString& AssetName)
 	{
 		return FString::Printf(TEXT("%s/%s/%s"), ExportTestRoot, *RunId, *AssetName);
+	}
+
+	bool SupportedCommandNamesContain(const TArray<FCortexCommandInfo>& Commands, const FString& CommandName)
+	{
+		for (const FCortexCommandInfo& Command : Commands)
+		{
+			if (Command.Name == CommandName)
+			{
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	void DeletePackageFile(const FString& PackageName)
@@ -200,6 +215,11 @@ namespace
 			return FPaths::Combine(GetSavedRunDir(), FileName);
 		}
 
+		FString MakeSavedOutputDir(const FString& DirName) const
+		{
+			return FPaths::Combine(GetSavedRunDir(), DirName);
+		}
+
 		bool TryReadJsonFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutJson, FString& OutError) const
 		{
 			FString Contents;
@@ -264,12 +284,12 @@ namespace
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FCortexDataExportUnknownCommandTest,
-	"Cortex.Data.Export.Datatable.UnknownCommandBeforeRegistration",
+	FCortexDataExportFixtureSmokeTest,
+	"Cortex.Data.Export.FixtureSmoke",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
-bool FCortexDataExportUnknownCommandTest::RunTest(const FString& Parameters)
+bool FCortexDataExportFixtureSmokeTest::RunTest(const FString& Parameters)
 {
 	FCortexDataExportTestFixture Fixture;
 
@@ -333,14 +353,213 @@ bool FCortexDataExportUnknownCommandTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("parsed probe JSON contains expected bool"), ParsedProbe->GetBoolField(TEXT("ok")));
 	}
 
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataExportCommandsRegisteredTest,
+	"Cortex.Data.Export.CommandsRegistered",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataExportCommandsRegisteredTest::RunTest(const FString& Parameters)
+{
+	FCortexDataCommandHandler Handler;
+	const TArray<FCortexCommandInfo> Commands = Handler.GetSupportedCommands();
+
+	TestTrue(TEXT("export_datatable_json is advertised"),
+		SupportedCommandNamesContain(Commands, TEXT("export_datatable_json")));
+	TestTrue(TEXT("export_string_table_json is advertised"),
+		SupportedCommandNamesContain(Commands, TEXT("export_string_table_json")));
+	TestTrue(TEXT("export_data_assets_json is advertised"),
+		SupportedCommandNamesContain(Commands, TEXT("export_data_assets_json")));
+	TestTrue(TEXT("export_bulk_json is advertised"),
+		SupportedCommandNamesContain(Commands, TEXT("export_bulk_json")));
+
 	FCortexCommandRouter Router = CreateDataExportTestRouter();
 	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
-	Params->SetStringField(TEXT("table_path"), RegularTable != nullptr ? RegularTable->GetPathName() : TEXT("/Game/CortexExportTests/Missing.DT_CortexExportRows"));
-	Params->SetStringField(TEXT("out_path"), Fixture.MakeSavedOutputPath(TEXT("datatable.json")));
+	Params->SetStringField(TEXT("table_path"), TEXT("/Game/CortexExportTests/Missing.Missing"));
+	Params->SetStringField(TEXT("out_path"), FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexExportTests"), TEXT("registered.json")));
 
 	const FCortexCommandResult Result = Router.Execute(TEXT("data.export_datatable_json"), Params);
-	TestFalse(TEXT("export_datatable_json is not registered yet"), Result.bSuccess);
-	TestEqual(TEXT("unknown command before registration"), Result.ErrorCode, CortexErrorCodes::UnknownCommand);
+	TestFalse(TEXT("export_datatable_json is registered and validates the missing table"), Result.bSuccess);
+	TestEqual(TEXT("registered command returns domain error, not UnknownCommand"), Result.ErrorCode, CortexErrorCodes::TableNotFound);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataExportPathSafetyTest,
+	"Cortex.Data.Export.PathSafety",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataExportPathSafetyTest::RunTest(const FString& Parameters)
+{
+	FCortexDataExportTestFixture Fixture;
+	FCortexCommandRouter Router = CreateDataExportTestRouter();
+
+	auto ExecuteDatatableExport = [&Router](const FString& OutPath)
+	{
+		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("table_path"), TEXT("/Game/CortexExportTests/Missing.Missing"));
+		Params->SetStringField(TEXT("out_path"), OutPath);
+		return Router.Execute(TEXT("data.export_datatable_json"), Params);
+	};
+
+	const FString TraversalBase = Fixture.MakeSavedOutputDir(TEXT("TraversalBase"));
+	const FString TraversalPath = FPaths::Combine(TraversalBase, TEXT(".."), TEXT("TraversalEscape"), TEXT("out.json"));
+	const FString UnexpectedTraversalDirectory = FPaths::Combine(FPaths::GetPath(TraversalBase), TEXT("TraversalEscape"));
+	const FCortexCommandResult TraversalResult = ExecuteDatatableExport(TraversalPath);
+	TestFalse(TEXT("Traversal output paths are rejected"), TraversalResult.bSuccess);
+	TestEqual(TEXT("Traversal rejection uses InvalidField"), TraversalResult.ErrorCode, CortexErrorCodes::InvalidField);
+	TestFalse(TEXT("Traversal rejection creates no directory"), IFileManager::Get().DirectoryExists(*UnexpectedTraversalDirectory));
+
+	FString ProjectRootForSibling = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+	FPaths::NormalizeDirectoryName(ProjectRootForSibling);
+	const FString SiblingEscapePath = ProjectRootForSibling + TEXT("_Evil/out.json");
+	const FCortexCommandResult SiblingResult = ExecuteDatatableExport(SiblingEscapePath);
+	TestFalse(TEXT("Sibling-prefix output paths are rejected"), SiblingResult.bSuccess);
+	TestEqual(TEXT("Sibling-prefix rejection uses InvalidField"), SiblingResult.ErrorCode, CortexErrorCodes::InvalidField);
+
+	const FCortexCommandResult DevicePathResult = ExecuteDatatableExport(TEXT("\\\\?\\C:\\CortexExportTests\\out.json"));
+	TestFalse(TEXT("Win32 device output paths are rejected"), DevicePathResult.bSuccess);
+	TestEqual(TEXT("Win32 device rejection uses InvalidField"), DevicePathResult.ErrorCode, CortexErrorCodes::InvalidField);
+
+	const FCortexCommandResult DotDevicePathResult = ExecuteDatatableExport(TEXT("\\\\.\\C:\\CortexExportTests\\out.json"));
+	TestFalse(TEXT("Win32 dot-device output paths are rejected"), DotDevicePathResult.bSuccess);
+	TestEqual(TEXT("Win32 dot-device rejection uses InvalidField"), DotDevicePathResult.ErrorCode, CortexErrorCodes::InvalidField);
+
+	const FCortexCommandResult UncPathResult = ExecuteDatatableExport(TEXT("\\\\server\\share\\out.json"));
+	TestFalse(TEXT("UNC output paths are rejected"), UncPathResult.bSuccess);
+	TestEqual(TEXT("UNC path rejection uses InvalidField"), UncPathResult.ErrorCode, CortexErrorCodes::InvalidField);
+
+	const FCortexCommandResult DriveRelativePathResult = ExecuteDatatableExport(TEXT("C:relative\\out.json"));
+	TestFalse(TEXT("Drive-relative output paths are rejected"), DriveRelativePathResult.bSuccess);
+	TestEqual(TEXT("Drive-relative path rejection uses InvalidField"), DriveRelativePathResult.ErrorCode, CortexErrorCodes::InvalidField);
+
+	const FString ExistingDirectoryTarget = Fixture.MakeSavedOutputDir(TEXT("ExistingDirectoryTarget"));
+	IFileManager::Get().MakeDirectory(*ExistingDirectoryTarget, true);
+	const FCortexCommandResult ExistingDirectoryResult = ExecuteDatatableExport(ExistingDirectoryTarget);
+	TestFalse(TEXT("Existing directory output targets are rejected"), ExistingDirectoryResult.bSuccess);
+	TestEqual(TEXT("Existing directory rejection uses InvalidField"), ExistingDirectoryResult.ErrorCode, CortexErrorCodes::InvalidField);
+
+	const FString ExternalTargetDir = FPaths::Combine(FPaths::ProjectIntermediateDir(), TEXT("CortexExportSymlinkTarget"), FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	const FString LinkDir = Fixture.MakeSavedOutputDir(TEXT("SymlinkParent"));
+	IFileManager::Get().MakeDirectory(*ExternalTargetDir, true);
+	ON_SCOPE_EXIT
+	{
+		IFileManager::Get().DeleteDirectory(*ExternalTargetDir, false, true);
+	};
+
+#if PLATFORM_WINDOWS
+	FString StdOut;
+	FString StdErr;
+	int32 MklinkExitCode = INDEX_NONE;
+	const FString MklinkArgs = FString::Printf(TEXT("/C mklink /J \"%s\" \"%s\""), *LinkDir, *ExternalTargetDir);
+	const bool bMklinkStarted = FPlatformProcess::ExecProcess(TEXT("cmd.exe"), *MklinkArgs, &MklinkExitCode, &StdOut, &StdErr);
+	if (!bMklinkStarted || MklinkExitCode != 0 || !IFileManager::Get().DirectoryExists(*LinkDir))
+	{
+		AddInfo(FString::Printf(TEXT("Skipping symlink/junction escape test; mklink /J failed with code %d: %s %s"), MklinkExitCode, *StdOut, *StdErr));
+		return true;
+	}
+#else
+	AddInfo(TEXT("Skipping symlink/junction escape test on this platform"));
+	return true;
+#endif
+
+	const FCortexCommandResult SymlinkResult = ExecuteDatatableExport(FPaths::Combine(LinkDir, TEXT("NewDir"), TEXT("out.json")));
+	TestFalse(TEXT("Symlink/junction parent escapes are rejected"), SymlinkResult.bSuccess);
+	TestEqual(TEXT("Symlink/junction rejection uses InvalidField"), SymlinkResult.ErrorCode, CortexErrorCodes::InvalidField);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataExportCanonicalWriterTest,
+	"Cortex.Data.Export.CanonicalWriter",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataExportCanonicalWriterTest::RunTest(const FString& Parameters)
+{
+	FCortexDataExportTestFixture Fixture;
+	UDataTable* RegularTable = Fixture.CreateRegularDataTable();
+	TestNotNull(TEXT("regular DataTable fixture is created"), RegularTable);
+	if (RegularTable == nullptr)
+	{
+		return true;
+	}
+
+	FCortexCommandRouter Router = CreateDataExportTestRouter();
+	const FString FirstOutPath = Fixture.MakeSavedOutputPath(TEXT("canonical-a.json"));
+	const FString SecondOutPath = Fixture.MakeSavedOutputPath(TEXT("canonical-b.json"));
+
+	auto ExecuteDatatableExport = [&Router, RegularTable](const FString& OutPath)
+	{
+		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("table_path"), RegularTable->GetPathName());
+		Params->SetStringField(TEXT("out_path"), OutPath);
+		return Router.Execute(TEXT("data.export_datatable_json"), Params);
+	};
+
+	const FCortexCommandResult FirstResult = ExecuteDatatableExport(FirstOutPath);
+	TestTrue(TEXT("DataTable skeleton export succeeds"), FirstResult.bSuccess);
+	const FCortexCommandResult SecondResult = ExecuteDatatableExport(SecondOutPath);
+	TestTrue(TEXT("Repeated DataTable skeleton export succeeds"), SecondResult.bSuccess);
+
+	FString FirstContents;
+	FString SecondContents;
+	TestTrue(TEXT("first skeleton export writes JSON"), FFileHelper::LoadFileToString(FirstContents, *FirstOutPath));
+	TestTrue(TEXT("second skeleton export writes JSON"), FFileHelper::LoadFileToString(SecondContents, *SecondOutPath));
+
+	if (!FirstContents.IsEmpty() && !SecondContents.IsEmpty())
+	{
+		TestEqual(TEXT("canonical skeleton exports are byte-for-byte stable"), FirstContents, SecondContents);
+
+		const int32 ArrayOrderIndex = FirstContents.Find(TEXT("\"array_order\""));
+		const int32 SummaryIndex = FirstContents.Find(TEXT("\"summary\""));
+		const int32 ZMarkerIndex = FirstContents.Find(TEXT("\"z_marker\""));
+		TestTrue(TEXT("canonical writer sorts root keys"), ArrayOrderIndex != INDEX_NONE && ArrayOrderIndex < SummaryIndex && SummaryIndex < ZMarkerIndex);
+
+		const int32 AlphaIndex = FirstContents.Find(TEXT("\"alpha\""));
+		const int32 BetaIndex = FirstContents.Find(TEXT("\"beta\""));
+		TestTrue(TEXT("canonical writer sorts nested object keys"), AlphaIndex != INDEX_NONE && AlphaIndex < BetaIndex);
+
+		const int32 FirstIndex = FirstContents.Find(TEXT("\"first\""));
+		const int32 SecondIndex = FirstContents.Find(TEXT("\"second\""));
+		TestTrue(TEXT("canonical writer preserves array order"), FirstIndex != INDEX_NONE && FirstIndex < SecondIndex);
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataExportBulkPathSafetyTest,
+	"Cortex.Data.Export.BulkPathSafety",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataExportBulkPathSafetyTest::RunTest(const FString& Parameters)
+{
+	FCortexDataExportTestFixture Fixture;
+	FCortexCommandRouter Router = CreateDataExportTestRouter();
+
+	TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+	Item->SetStringField(TEXT("type"), TEXT("datatable"));
+	Item->SetStringField(TEXT("table_path"), TEXT("/Game/CortexExportTests/Missing.Missing"));
+	Item->SetStringField(TEXT("out_path"), Fixture.MakeSavedOutputPath(TEXT("absolute-item.json")));
+
+	TArray<TSharedPtr<FJsonValue>> Items;
+	Items.Add(MakeShared<FJsonValueObject>(Item));
+
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("out_dir"), Fixture.MakeSavedOutputDir(TEXT("BulkOut")));
+	Params->SetArrayField(TEXT("items"), Items);
+
+	const FCortexCommandResult Result = Router.Execute(TEXT("data.export_bulk_json"), Params);
+	TestFalse(TEXT("Bulk item absolute output paths are rejected"), Result.bSuccess);
+	TestEqual(TEXT("Bulk item absolute path rejection uses InvalidField"), Result.ErrorCode, CortexErrorCodes::InvalidField);
 
 	return true;
 }
