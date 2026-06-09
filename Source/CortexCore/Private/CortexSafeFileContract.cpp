@@ -415,10 +415,18 @@ bool FCortexSafeFileContract::PrepareWritePath(
 		return false;
 	}
 
-	if (!IFileManager::Get().MakeDirectory(*FPaths::GetPath(VerifiedPath.AbsolutePath), true))
+	const FString ParentDirectory = FPaths::GetPath(VerifiedPath.AbsolutePath);
+	if (IFileManager::Get().FileExists(*ParentDirectory))
 	{
 		OutErrorCode = CortexErrorCodes::SaveFailed;
-		OutErrorMessage = FString::Printf(TEXT("Failed to create parent directory: %s"), *FPaths::GetPath(VerifiedPath.AbsolutePath));
+		OutErrorMessage = FString::Printf(TEXT("Parent path is a file, not a directory: %s"), *ParentDirectory);
+		return false;
+	}
+
+	if (!IFileManager::Get().MakeDirectory(*ParentDirectory, true))
+	{
+		OutErrorCode = CortexErrorCodes::SaveFailed;
+		OutErrorMessage = FString::Printf(TEXT("Failed to create parent directory: %s"), *ParentDirectory);
 		return false;
 	}
 

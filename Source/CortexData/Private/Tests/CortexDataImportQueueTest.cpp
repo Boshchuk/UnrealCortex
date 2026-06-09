@@ -4,6 +4,7 @@
 #include "CortexSafeFileContract.h"
 #include "CortexSerializer.h"
 #include "CortexTypes.h"
+#include "Operations/CortexDataImportQueueOps.h"
 #include "Operations/CortexDataMutationHelpers.h"
 #include "Tests/CortexDataLocalizationTestTypes.h"
 #include "Tests/CortexTestDataAsset.h"
@@ -202,6 +203,26 @@ namespace
 			Operation->SetStringField(TEXT("id"), Id);
 			Operation->SetStringField(TEXT("phase"), TEXT("apply"));
 			Operation->SetStringField(TEXT("command"), TEXT("update_datatable_row"));
+			Operation->SetObjectField(TEXT("params"), Params);
+			Operation->SetStringField(TEXT("source_page"), TEXT("DesignWiki/Test.md"));
+			return Operation;
+		}
+
+		TSharedRef<FJsonObject> MakeSetTranslationOperation(
+			const FString& Id,
+			const FString& StringTablePath,
+			const FString& Key,
+			const FString& Text) const
+		{
+			TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+			Params->SetStringField(TEXT("string_table_path"), StringTablePath);
+			Params->SetStringField(TEXT("key"), Key);
+			Params->SetStringField(TEXT("text"), Text);
+
+			TSharedRef<FJsonObject> Operation = MakeShared<FJsonObject>();
+			Operation->SetStringField(TEXT("id"), Id);
+			Operation->SetStringField(TEXT("phase"), TEXT("apply"));
+			Operation->SetStringField(TEXT("command"), TEXT("set_translation"));
 			Operation->SetObjectField(TEXT("params"), Params);
 			Operation->SetStringField(TEXT("source_page"), TEXT("DesignWiki/Test.md"));
 			return Operation;
@@ -664,6 +685,466 @@ bool FCortexDataImportQueueAppliesDataAssetAndQueryBacksTest::RunTest(const FStr
 				TestTrue(TEXT("operation has query_back"), OperationObject->HasTypedField<EJson::Object>(TEXT("query_back")));
 			}
 		}
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataImportQueueRejectsInvalidQueueShapesTest,
+	"Cortex.Data.ImportQueue.RejectsInvalidQueueShapes",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataImportQueueRejectsInvalidQueueShapesTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	struct FInvalidQueueCase
+	{
+		FString Name;
+		TSharedRef<FJsonObject> Queue;
+		FString ExpectedErrorCode;
+	};
+
+	FCortexDataImportQueueTestFixture Fixture;
+	TArray<FInvalidQueueCase> Cases;
+
+	{
+		TSharedRef<FJsonObject> Queue = MakeShared<FJsonObject>();
+		Queue->SetNumberField(TEXT("schema_version"), 2);
+		Queue->SetStringField(TEXT("queue_id"), TEXT("bad-schema"));
+		Queue->SetBoolField(TEXT("valid"), true);
+		Queue->SetArrayField(TEXT("operations"), {});
+		Cases.Add({ TEXT("invalid schema"), Queue, CortexErrorCodes::InvalidQueueShape });
+	}
+
+	{
+		TSharedRef<FJsonObject> Queue = MakeShared<FJsonObject>();
+		Queue->SetNumberField(TEXT("schema_version"), 1);
+		Queue->SetBoolField(TEXT("valid"), true);
+		Queue->SetArrayField(TEXT("operations"), {});
+		Cases.Add({ TEXT("missing queue id"), Queue, CortexErrorCodes::InvalidQueueShape });
+	}
+
+	{
+		TSharedRef<FJsonObject> Queue = MakeShared<FJsonObject>();
+		Queue->SetNumberField(TEXT("schema_version"), 1);
+		Queue->SetStringField(TEXT("queue_id"), TEXT("not-valid"));
+		Queue->SetBoolField(TEXT("valid"), false);
+		Queue->SetArrayField(TEXT("operations"), {});
+		Cases.Add({ TEXT("valid false"), Queue, CortexErrorCodes::InvalidQueueShape });
+	}
+
+	{
+		TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("table_path"), TEXT("/Game/Missing"));
+		Params->SetStringField(TEXT("row_name"), TEXT("alpha"));
+		Params->SetObjectField(TEXT("row_data"), MakeShared<FJsonObject>());
+
+		TSharedRef<FJsonObject> OpA = MakeShared<FJsonObject>();
+		OpA->SetStringField(TEXT("id"), TEXT("dup"));
+		OpA->SetStringField(TEXT("phase"), TEXT("apply"));
+		OpA->SetStringField(TEXT("command"), TEXT("update_datatable_row"));
+		OpA->SetObjectField(TEXT("params"), Params);
+
+		TSharedRef<FJsonObject> OpB = MakeShared<FJsonObject>(*OpA);
+
+		TSharedRef<FJsonObject> Queue = MakeShared<FJsonObject>();
+		Queue->SetNumberField(TEXT("schema_version"), 1);
+		Queue->SetStringField(TEXT("queue_id"), TEXT("dup-ids"));
+		Queue->SetBoolField(TEXT("valid"), true);
+		Queue->SetArrayField(TEXT("operations"), {
+			MakeShared<FJsonValueObject>(OpA),
+			MakeShared<FJsonValueObject>(OpB)
+		});
+		Cases.Add({ TEXT("duplicate ids"), Queue, CortexErrorCodes::InvalidQueueShape });
+	}
+
+	{
+		TSharedRef<FJsonObject> Op = MakeShared<FJsonObject>();
+		Op->SetStringField(TEXT("id"), TEXT("bad-command"));
+		Op->SetStringField(TEXT("phase"), TEXT("apply"));
+		Op->SetStringField(TEXT("command"), TEXT("delete_everything"));
+		Op->SetObjectField(TEXT("params"), MakeShared<FJsonObject>());
+
+		TSharedRef<FJsonObject> Queue = MakeShared<FJsonObject>();
+		Queue->SetNumberField(TEXT("schema_version"), 1);
+		Queue->SetStringField(TEXT("queue_id"), TEXT("unsupported-command"));
+		Queue->SetBoolField(TEXT("valid"), true);
+		Queue->SetArrayField(TEXT("operations"), { MakeShared<FJsonValueObject>(Op) });
+		Cases.Add({ TEXT("unsupported command"), Queue, CortexErrorCodes::UnsupportedCommand });
+	}
+
+	for (int32 Index = 0; Index < Cases.Num(); ++Index)
+	{
+		const FString OpsPath = Fixture.MakeSavedOutputPath(FString::Printf(TEXT("invalid-queue-%d.json"), Index));
+		const FString ReportPath = Fixture.MakeSavedOutputPath(FString::Printf(TEXT("invalid-report-%d.json"), Index));
+		const FString Contents = FCortexSafeFileContract::SerializeCanonicalJson(Cases[Index].Queue);
+		IFileManager::Get().MakeDirectory(*FPaths::GetPath(OpsPath), true);
+		FFileHelper::SaveStringToFile(Contents, *OpsPath);
+
+		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("ops_path"), OpsPath);
+		Params->SetStringField(TEXT("report_path"), ReportPath);
+
+		const FCortexCommandResult Result = Fixture.CreateRouter().Execute(TEXT("data.apply_import_ops_json"), Params);
+		TestFalse(*FString::Printf(TEXT("%s fails"), *Cases[Index].Name), Result.bSuccess);
+		TestEqual(
+			*FString::Printf(TEXT("%s error code"), *Cases[Index].Name),
+			Result.ErrorCode,
+			Cases[Index].ExpectedErrorCode);
+	}
+
+	TSharedPtr<FJsonObject> TypoParams = MakeShared<FJsonObject>();
+	TypoParams->SetStringField(TEXT("ops_path"), Fixture.MakeSavedOutputPath(TEXT("typo-queue.json")));
+	TypoParams->SetStringField(TEXT("report_path"), Fixture.MakeSavedOutputPath(TEXT("typo-report.json")));
+	TypoParams->SetBoolField(TEXT("dryrun"), true);
+
+	const FCortexCommandResult TypoResult = Fixture.CreateRouter().Execute(TEXT("data.apply_import_ops_json"), TypoParams);
+	TestFalse(TEXT("unknown top-level param fails"), TypoResult.bSuccess);
+	TestEqual(TEXT("unknown top-level param uses InvalidField"), TypoResult.ErrorCode, CortexErrorCodes::InvalidField);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataImportQueueRejectsUnsafePathsTest,
+	"Cortex.Data.ImportQueue.RejectsUnsafePaths",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataImportQueueRejectsUnsafePathsTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataImportQueueTestFixture Fixture;
+	UDataTable* Table = Fixture.CreateRegularDataTable();
+	TestNotNull(TEXT("DataTable fixture is created"), Table);
+	if (Table == nullptr)
+	{
+		return false;
+	}
+
+	const FString OpsPath = Fixture.MakeSavedOutputPath(TEXT("safe-queue.json"));
+	TSharedRef<FJsonObject> RowData = MakeShared<FJsonObject>();
+	RowData->SetStringField(TEXT("row_name"), TEXT("Imported Alpha"));
+	Fixture.WriteQueueFile(
+		OpsPath,
+		TEXT("queue-safe"),
+		{ Fixture.MakeUpdateRowOperation(TEXT("op.update.row_name"), Table->GetPathName(), TEXT("alpha"), RowData) });
+
+	TSharedPtr<FJsonObject> UnsafeReportParams = MakeShared<FJsonObject>();
+	UnsafeReportParams->SetStringField(TEXT("ops_path"), OpsPath);
+	UnsafeReportParams->SetStringField(TEXT("report_path"), TEXT("C:/CortexUnsafe/report.json"));
+
+	const FCortexCommandResult UnsafeReportResult =
+		Fixture.CreateRouter().Execute(TEXT("data.apply_import_ops_json"), UnsafeReportParams);
+	TestFalse(TEXT("unsafe report path fails"), UnsafeReportResult.bSuccess);
+	TestEqual(TEXT("unsafe report path uses InvalidFilePath"), UnsafeReportResult.ErrorCode, CortexErrorCodes::InvalidFilePath);
+
+	TSharedPtr<FJsonObject> SameFileParams = MakeShared<FJsonObject>();
+	SameFileParams->SetStringField(TEXT("ops_path"), OpsPath);
+	SameFileParams->SetStringField(TEXT("report_path"), OpsPath);
+
+	const FCortexCommandResult SameFileResult =
+		Fixture.CreateRouter().Execute(TEXT("data.apply_import_ops_json"), SameFileParams);
+	TestFalse(TEXT("same ops/report file fails"), SameFileResult.bSuccess);
+	TestEqual(TEXT("same ops/report file uses InvalidFilePath"), SameFileResult.ErrorCode, CortexErrorCodes::InvalidFilePath);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataImportQueuePartialAndStopMatrixTest,
+	"Cortex.Data.ImportQueue.PartialAndStopMatrix",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataImportQueuePartialAndStopMatrixTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	auto RunCase = [this](
+		const bool bAllowPartial,
+		const bool bStopOnError,
+		const FString& ExpectedStatus,
+		const int32 ExpectedValidatedCount,
+		const int32 ExpectedAttemptedCount,
+		const int32 ExpectedAppliedCount,
+		const int32 ExpectedFailedCount,
+		const int32 ExpectedSkippedCount,
+		const bool bExpectRowChanged,
+		const bool bExpectStringChanged)
+	{
+		FCortexDataImportQueueTestFixture Fixture;
+		UDataTable* Table = Fixture.CreateRegularDataTable();
+		UStringTable* StringTable = Fixture.CreateStringTable();
+		TestNotNull(TEXT("matrix DataTable fixture is created"), Table);
+		TestNotNull(TEXT("matrix StringTable fixture is created"), StringTable);
+		if (Table == nullptr || StringTable == nullptr)
+		{
+			return false;
+		}
+
+		const FString OpsPath = Fixture.MakeSavedOutputPath(FString::Printf(TEXT("matrix-%d-%d-queue.json"), bAllowPartial ? 1 : 0, bStopOnError ? 1 : 0));
+		const FString ReportPath = Fixture.MakeSavedOutputPath(FString::Printf(TEXT("matrix-%d-%d-report.json"), bAllowPartial ? 1 : 0, bStopOnError ? 1 : 0));
+
+		TSharedRef<FJsonObject> ValidRowData = MakeShared<FJsonObject>();
+		ValidRowData->SetStringField(TEXT("row_name"), TEXT("Matrix Applied"));
+		TSharedRef<FJsonObject> InvalidRowData = MakeShared<FJsonObject>();
+		InvalidRowData->SetStringField(TEXT("row_name"), TEXT("Should Fail"));
+
+		Fixture.WriteQueueFile(
+			OpsPath,
+			TEXT("queue-matrix"),
+			{
+				Fixture.MakeUpdateRowOperation(TEXT("op.valid.row"), Table->GetPathName(), TEXT("alpha"), ValidRowData),
+				Fixture.MakeUpdateRowOperation(TEXT("op.invalid.row"), Table->GetPathName(), TEXT("missing_row"), InvalidRowData),
+				Fixture.MakeSetTranslationOperation(TEXT("op.valid.translation"), StringTable->GetPathName(), TEXT("matrix.key"), TEXT("Matrix text"))
+			});
+
+		TSharedPtr<FJsonObject> ParamsObject = MakeShared<FJsonObject>();
+		ParamsObject->SetStringField(TEXT("ops_path"), OpsPath);
+		ParamsObject->SetStringField(TEXT("report_path"), ReportPath);
+		ParamsObject->SetBoolField(TEXT("dry_run"), false);
+		ParamsObject->SetBoolField(TEXT("apply"), true);
+		ParamsObject->SetBoolField(TEXT("allow_partial"), bAllowPartial);
+		ParamsObject->SetBoolField(TEXT("stop_on_error"), bStopOnError);
+
+		const FCortexCommandResult Result = Fixture.CreateRouter().Execute(TEXT("data.apply_import_ops_json"), ParamsObject);
+		TestTrue(*FString::Printf(TEXT("matrix case %s returns payload"), *ExpectedStatus), Result.Data.IsValid() || Result.ErrorDetails.IsValid());
+
+		TSharedPtr<FJsonObject> Report;
+		FString ParseError;
+		TestTrue(TEXT("matrix report parses"), Fixture.TryReadJsonFile(ReportPath, Report, ParseError));
+		if (!Report.IsValid())
+		{
+			return false;
+		}
+
+		TestEqual(TEXT("matrix status matches"), Report->GetStringField(TEXT("status")), ExpectedStatus);
+		TestEqual(TEXT("matrix validated_count matches"), static_cast<int32>(Report->GetNumberField(TEXT("validated_count"))), ExpectedValidatedCount);
+		TestEqual(TEXT("matrix attempted_count matches"), static_cast<int32>(Report->GetNumberField(TEXT("attempted_count"))), ExpectedAttemptedCount);
+		TestEqual(TEXT("matrix applied_count matches"), static_cast<int32>(Report->GetNumberField(TEXT("applied_count"))), ExpectedAppliedCount);
+		TestEqual(TEXT("matrix failed_count matches"), static_cast<int32>(Report->GetNumberField(TEXT("failed_count"))), ExpectedFailedCount);
+		TestEqual(TEXT("matrix skipped_count matches"), static_cast<int32>(Report->GetNumberField(TEXT("skipped_count"))), ExpectedSkippedCount);
+
+		const FCortexDataLocalizationTestRow* Row =
+			reinterpret_cast<const FCortexDataLocalizationTestRow*>(Table->FindRowUnchecked(TEXT("alpha")));
+		TestNotNull(TEXT("matrix alpha row exists"), Row);
+		if (Row != nullptr)
+		{
+			if (bExpectRowChanged)
+			{
+				TestEqual(TEXT("matrix row changed"), Row->row_name, TEXT("Matrix Applied"));
+			}
+			else
+			{
+				TestNotEqual(TEXT("matrix row unchanged"), Row->row_name, TEXT("Matrix Applied"));
+			}
+		}
+
+		FString CurrentValue;
+		const bool bHasStringValue = StringTable->GetStringTable()->GetSourceString(TEXT("matrix.key"), CurrentValue);
+		if (bExpectStringChanged)
+		{
+			TestTrue(TEXT("matrix string changed"), bHasStringValue);
+			if (bHasStringValue)
+			{
+				TestEqual(TEXT("matrix string value"), CurrentValue, TEXT("Matrix text"));
+			}
+		}
+		else
+		{
+			TestFalse(TEXT("matrix string unchanged"), bHasStringValue);
+		}
+
+		return true;
+	};
+
+	TestTrue(TEXT("strict preflight blocks before mutation"), RunCase(false, true, TEXT("preflight_failed"), 0, 0, 0, 1, 2, false, false));
+	TestTrue(TEXT("partial stop_on_error applies first then skips rest"), RunCase(true, true, TEXT("partial_applied"), 2, 2, 1, 1, 1, true, false));
+	TestTrue(TEXT("partial continue applies independent later op"), RunCase(true, false, TEXT("partial_applied"), 2, 3, 2, 1, 0, true, true));
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataImportQueueQueryBackDisabledTest,
+	"Cortex.Data.ImportQueue.QueryBackDisabled",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataImportQueueQueryBackDisabledTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataImportQueueTestFixture Fixture;
+	UDataTable* Table = Fixture.CreateRegularDataTable();
+	TestNotNull(TEXT("DataTable fixture is created"), Table);
+	if (Table == nullptr)
+	{
+		return false;
+	}
+
+	const FString OpsPath = Fixture.MakeSavedOutputPath(TEXT("queryback-disabled-queue.json"));
+	const FString ReportPath = Fixture.MakeSavedOutputPath(TEXT("queryback-disabled-report.json"));
+	TSharedRef<FJsonObject> RowData = MakeShared<FJsonObject>();
+	RowData->SetStringField(TEXT("row_name"), TEXT("No QueryBack"));
+	Fixture.WriteQueueFile(
+		OpsPath,
+		TEXT("queue-queryback-disabled"),
+		{ Fixture.MakeUpdateRowOperation(TEXT("op.update.row_name"), Table->GetPathName(), TEXT("alpha"), RowData) });
+
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("ops_path"), OpsPath);
+	Params->SetStringField(TEXT("report_path"), ReportPath);
+	Params->SetBoolField(TEXT("dry_run"), false);
+	Params->SetBoolField(TEXT("apply"), true);
+	Params->SetBoolField(TEXT("query_back"), false);
+
+	const FCortexCommandResult Result = Fixture.CreateRouter().Execute(TEXT("data.apply_import_ops_json"), Params);
+	TestTrue(TEXT("query_back=false still applies"), Result.bSuccess);
+
+	TSharedPtr<FJsonObject> Report;
+	FString ParseError;
+	TestTrue(TEXT("query_back=false report parses"), Fixture.TryReadJsonFile(ReportPath, Report, ParseError));
+	if (!Report.IsValid())
+	{
+		return false;
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* Operations = nullptr;
+	TestTrue(TEXT("query_back=false report contains operations"), Report->TryGetArrayField(TEXT("operations"), Operations));
+	if (Operations == nullptr || Operations->Num() != 1)
+	{
+		return false;
+	}
+
+	const TSharedPtr<FJsonObject> OperationObject = (*Operations)[0]->AsObject();
+	TestTrue(TEXT("query_back=false operation exists"), OperationObject.IsValid());
+	if (!OperationObject.IsValid())
+	{
+		return false;
+	}
+
+	TestTrue(TEXT("query_back=false has query_back object"), OperationObject->HasTypedField<EJson::Object>(TEXT("query_back")));
+	if (OperationObject->HasTypedField<EJson::Object>(TEXT("query_back")))
+	{
+		const TSharedPtr<FJsonObject> QueryBack = OperationObject->GetObjectField(TEXT("query_back"));
+		TestEqual(TEXT("query_back disabled status"), QueryBack->GetStringField(TEXT("status")), TEXT("skipped"));
+		TestEqual(TEXT("query_back disabled reason"), QueryBack->GetStringField(TEXT("reason")), TEXT("query_back_disabled"));
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataImportQueueReportPathPrecheckFailureTest,
+	"Cortex.Data.ImportQueue.ReportPathPrecheckFailure",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataImportQueueReportPathPrecheckFailureTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataImportQueueTestFixture Fixture;
+	UDataTable* Table = Fixture.CreateRegularDataTable();
+	TestNotNull(TEXT("DataTable fixture is created"), Table);
+	if (Table == nullptr)
+	{
+		return false;
+	}
+
+	const FString OpsPath = Fixture.MakeSavedOutputPath(TEXT("report-precheck-queue.json"));
+	const FString BlockerPath = Fixture.MakeSavedOutputPath(TEXT("ReportParentBlocker"));
+	const FString ReportPath = FPaths::Combine(BlockerPath, TEXT("report.json"));
+	TSharedRef<FJsonObject> RowData = MakeShared<FJsonObject>();
+	RowData->SetStringField(TEXT("row_name"), TEXT("Should Not Apply"));
+	Fixture.WriteQueueFile(
+		OpsPath,
+		TEXT("queue-report-precheck"),
+		{ Fixture.MakeUpdateRowOperation(TEXT("op.update.row_name"), Table->GetPathName(), TEXT("alpha"), RowData) });
+	FFileHelper::SaveStringToFile(TEXT("blocker"), *BlockerPath);
+
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("ops_path"), OpsPath);
+	Params->SetStringField(TEXT("report_path"), ReportPath);
+	Params->SetBoolField(TEXT("dry_run"), false);
+	Params->SetBoolField(TEXT("apply"), true);
+
+	const FCortexCommandResult Result = Fixture.CreateRouter().Execute(TEXT("data.apply_import_ops_json"), Params);
+	TestFalse(TEXT("blocked report parent fails"), Result.bSuccess);
+
+	const FCortexDataLocalizationTestRow* Row =
+		reinterpret_cast<const FCortexDataLocalizationTestRow*>(Table->FindRowUnchecked(TEXT("alpha")));
+	TestNotNull(TEXT("row still exists after blocked report parent"), Row);
+	if (Row != nullptr)
+	{
+		TestNotEqual(TEXT("blocked report parent prevents mutation"), Row->row_name, TEXT("Should Not Apply"));
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataImportQueueForcedFinalReportWriteFailureTest,
+	"Cortex.Data.ImportQueue.ForcedFinalReportWriteFailure",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataImportQueueForcedFinalReportWriteFailureTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataImportQueueTestFixture Fixture;
+	UDataTable* Table = Fixture.CreateRegularDataTable();
+	TestNotNull(TEXT("DataTable fixture is created"), Table);
+	if (Table == nullptr)
+	{
+		return false;
+	}
+
+	const FString OpsPath = Fixture.MakeSavedOutputPath(TEXT("forced-report-failure-queue.json"));
+	const FString ReportPath = Fixture.MakeSavedOutputPath(TEXT("forced-report-failure-report.json"));
+	TSharedRef<FJsonObject> RowData = MakeShared<FJsonObject>();
+	RowData->SetStringField(TEXT("row_name"), TEXT("Applied Before Report Failure"));
+	Fixture.WriteQueueFile(
+		OpsPath,
+		TEXT("queue-forced-report-failure"),
+		{ Fixture.MakeUpdateRowOperation(TEXT("op.update.row_name"), Table->GetPathName(), TEXT("alpha"), RowData) });
+
+	FCortexDataImportQueueOps::SetForceFinalReportWriteFailureForTests(true);
+
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("ops_path"), OpsPath);
+	Params->SetStringField(TEXT("report_path"), ReportPath);
+	Params->SetBoolField(TEXT("dry_run"), false);
+	Params->SetBoolField(TEXT("apply"), true);
+
+	const FCortexCommandResult Result = Fixture.CreateRouter().Execute(TEXT("data.apply_import_ops_json"), Params);
+	FCortexDataImportQueueOps::SetForceFinalReportWriteFailureForTests(false);
+
+	TestFalse(TEXT("forced final report write failure returns error"), Result.bSuccess);
+	TestEqual(TEXT("forced final report write failure uses SaveFailed"), Result.ErrorCode, CortexErrorCodes::SaveFailed);
+	TestTrue(TEXT("forced final report write failure returns details"), Result.ErrorDetails.IsValid());
+	if (Result.ErrorDetails.IsValid())
+	{
+		TestEqual(TEXT("report failure status"), Result.ErrorDetails->GetStringField(TEXT("status")), TEXT("report_write_failed"));
+		TestEqual(TEXT("report failure attempted_count"), static_cast<int32>(Result.ErrorDetails->GetNumberField(TEXT("attempted_count"))), 1);
+		TestEqual(TEXT("report failure applied_count"), static_cast<int32>(Result.ErrorDetails->GetNumberField(TEXT("applied_count"))), 1);
+		TestEqual(TEXT("report failure failed_count"), static_cast<int32>(Result.ErrorDetails->GetNumberField(TEXT("failed_count"))), 0);
+		TestTrue(TEXT("report failure has first_error"), Result.ErrorDetails->HasTypedField<EJson::String>(TEXT("first_error")));
+	}
+
+	const FCortexDataLocalizationTestRow* Row =
+		reinterpret_cast<const FCortexDataLocalizationTestRow*>(Table->FindRowUnchecked(TEXT("alpha")));
+	TestNotNull(TEXT("row still exists after forced report failure"), Row);
+	if (Row != nullptr)
+	{
+		TestEqual(TEXT("mutation happened before forced report failure"), Row->row_name, TEXT("Applied Before Report Failure"));
 	}
 
 	return true;

@@ -13,7 +13,15 @@ namespace
 	constexpr int32 SupportedSchemaVersion = 1;
 
 	const TCHAR* StatusDryRunOk = TEXT("dry_run_ok");
+	const TCHAR* StatusAppliedOk = TEXT("applied_ok");
+	const TCHAR* StatusPartialApplied = TEXT("partial_applied");
 	const TCHAR* StatusPreflightFailed = TEXT("preflight_failed");
+	const TCHAR* StatusRuntimeFailed = TEXT("runtime_failed");
+	const TCHAR* StatusReportWriteFailed = TEXT("report_write_failed");
+
+#if WITH_AUTOMATION_TESTS
+	bool bCortexImportQueueForceFinalReportWriteFailure = false;
+#endif
 
 	const TSet<FString> SupportedCommands = {
 		TEXT("update_datatable_row"),
@@ -72,6 +80,8 @@ namespace
 	struct FValidatedQueueOperation
 	{
 		FImportQueueOperation Operation;
+		bool bPreflightPassed = false;
+		FCortexDataMutationResult PreflightResult;
 		TUniquePtr<FCortexUpdateDatatableRowMutationPlan> UpdateDatatableRowPlan;
 		TUniquePtr<FCortexImportDatatableJsonMutationPlan> ImportDatatableJsonPlan;
 		TUniquePtr<FCortexUpdateStringTableMutationPlan> UpdateStringTablePlan;
@@ -574,12 +584,16 @@ namespace
 		if (!RejectUnknownOrControlledParams(Operation, Flags, ValidationError))
 		{
 			OutError = FCortexDataMutationResult::FromCommandResult(ValidationError);
+			OutValidatedOperation = FValidatedQueueOperation{};
+			OutValidatedOperation.Operation = Operation;
+			OutValidatedOperation.PreflightResult = OutError;
 			return false;
 		}
 
 		const TSharedRef<FJsonObject> Params = CloneOperationParamsWithQueueFlags(Operation, Flags);
 		OutValidatedOperation = FValidatedQueueOperation{};
 		OutValidatedOperation.Operation = Operation;
+		OutValidatedOperation.bPreflightPassed = false;
 
 		if (Operation.Command == TEXT("update_datatable_row"))
 		{
@@ -587,6 +601,7 @@ namespace
 			OutError = FCortexDataMutationHelpers::ParseUpdateDatatableRowParams(Params, Request);
 			if (!OutError.bSuccess)
 			{
+				OutValidatedOperation.PreflightResult = OutError;
 				return false;
 			}
 
@@ -594,6 +609,8 @@ namespace
 			OutError = FCortexDataMutationHelpers::BuildUpdateDatatableRowPlan(
 				Request,
 				*OutValidatedOperation.UpdateDatatableRowPlan);
+			OutValidatedOperation.bPreflightPassed = OutError.bSuccess;
+			OutValidatedOperation.PreflightResult = OutError;
 			return OutError.bSuccess;
 		}
 
@@ -603,6 +620,7 @@ namespace
 			OutError = FCortexDataMutationHelpers::ParseImportDatatableJsonParams(Params, Request);
 			if (!OutError.bSuccess)
 			{
+				OutValidatedOperation.PreflightResult = OutError;
 				return false;
 			}
 
@@ -610,6 +628,8 @@ namespace
 			OutError = FCortexDataMutationHelpers::BuildImportDatatableJsonPlan(
 				Request,
 				*OutValidatedOperation.ImportDatatableJsonPlan);
+			OutValidatedOperation.bPreflightPassed = OutError.bSuccess;
+			OutValidatedOperation.PreflightResult = OutError;
 			return OutError.bSuccess;
 		}
 
@@ -619,6 +639,7 @@ namespace
 			OutError = FCortexDataMutationHelpers::ParseUpdateStringTableParams(Params, Request);
 			if (!OutError.bSuccess)
 			{
+				OutValidatedOperation.PreflightResult = OutError;
 				return false;
 			}
 
@@ -626,6 +647,8 @@ namespace
 			OutError = FCortexDataMutationHelpers::BuildUpdateStringTablePlan(
 				Request,
 				*OutValidatedOperation.UpdateStringTablePlan);
+			OutValidatedOperation.bPreflightPassed = OutError.bSuccess;
+			OutValidatedOperation.PreflightResult = OutError;
 			return OutError.bSuccess;
 		}
 
@@ -635,6 +658,7 @@ namespace
 			OutError = FCortexDataMutationHelpers::ParseSetTranslationParams(Params, Request);
 			if (!OutError.bSuccess)
 			{
+				OutValidatedOperation.PreflightResult = OutError;
 				return false;
 			}
 
@@ -642,6 +666,8 @@ namespace
 			OutError = FCortexDataMutationHelpers::BuildSetTranslationPlan(
 				Request,
 				*OutValidatedOperation.SetTranslationPlan);
+			OutValidatedOperation.bPreflightPassed = OutError.bSuccess;
+			OutValidatedOperation.PreflightResult = OutError;
 			return OutError.bSuccess;
 		}
 
@@ -651,6 +677,7 @@ namespace
 			OutError = FCortexDataMutationHelpers::ParseUpdateDataAssetParams(Params, Request);
 			if (!OutError.bSuccess)
 			{
+				OutValidatedOperation.PreflightResult = OutError;
 				return false;
 			}
 
@@ -658,6 +685,8 @@ namespace
 			OutError = FCortexDataMutationHelpers::BuildUpdateDataAssetPlan(
 				Request,
 				*OutValidatedOperation.UpdateDataAssetPlan);
+			OutValidatedOperation.bPreflightPassed = OutError.bSuccess;
+			OutValidatedOperation.PreflightResult = OutError;
 			return OutError.bSuccess;
 		}
 
@@ -665,6 +694,7 @@ namespace
 			FCortexCommandRouter::Error(
 				CortexErrorCodes::UnsupportedCommand,
 				FString::Printf(TEXT("Unsupported import operation command: %s"), *Operation.Command)));
+		OutValidatedOperation.PreflightResult = OutError;
 		return false;
 	}
 
@@ -685,6 +715,14 @@ namespace
 		}
 	}
 
+	TSharedPtr<FJsonObject> MakeQueryBackSkippedObject()
+	{
+		TSharedPtr<FJsonObject> QueryBack = MakeShared<FJsonObject>();
+		QueryBack->SetStringField(TEXT("status"), TEXT("skipped"));
+		QueryBack->SetStringField(TEXT("reason"), TEXT("query_back_disabled"));
+		return QueryBack;
+	}
+
 	FCortexDataMutationResult ExecuteQueueOperationApply(
 		const FValidatedQueueOperation& ValidatedOperation,
 		const bool bQueryBack)
@@ -701,6 +739,10 @@ namespace
 					FCortexDataMutationHelpers::QueryBackUpdateDatatableRow(*ValidatedOperation.UpdateDatatableRowPlan),
 					ApplyResult);
 			}
+			else if (ApplyResult.bSuccess)
+			{
+				ApplyResult.QueryBack = MakeQueryBackSkippedObject();
+			}
 			return ApplyResult;
 		}
 
@@ -713,6 +755,10 @@ namespace
 				MergeQueryBackIntoApplyResult(
 					FCortexDataMutationHelpers::QueryBackImportDatatableJson(*ValidatedOperation.ImportDatatableJsonPlan),
 					ApplyResult);
+			}
+			else if (ApplyResult.bSuccess)
+			{
+				ApplyResult.QueryBack = MakeQueryBackSkippedObject();
 			}
 			return ApplyResult;
 		}
@@ -727,6 +773,10 @@ namespace
 					FCortexDataMutationHelpers::QueryBackUpdateStringTable(*ValidatedOperation.UpdateStringTablePlan),
 					ApplyResult);
 			}
+			else if (ApplyResult.bSuccess)
+			{
+				ApplyResult.QueryBack = MakeQueryBackSkippedObject();
+			}
 			return ApplyResult;
 		}
 
@@ -740,6 +790,10 @@ namespace
 					FCortexDataMutationHelpers::QueryBackUpdateStringTable(ValidatedOperation.SetTranslationPlan->UpdatePlan),
 					ApplyResult);
 			}
+			else if (ApplyResult.bSuccess)
+			{
+				ApplyResult.QueryBack = MakeQueryBackSkippedObject();
+			}
 			return ApplyResult;
 		}
 
@@ -752,6 +806,10 @@ namespace
 				MergeQueryBackIntoApplyResult(
 					FCortexDataMutationHelpers::QueryBackUpdateDataAsset(*ValidatedOperation.UpdateDataAssetPlan),
 					ApplyResult);
+			}
+			else if (ApplyResult.bSuccess)
+			{
+				ApplyResult.QueryBack = MakeQueryBackSkippedObject();
 			}
 			return ApplyResult;
 		}
@@ -894,6 +952,24 @@ namespace
 		SetCountFields(Summary, Counts);
 		return Summary;
 	}
+
+	FCortexCommandResult MakeReportWriteFailureResult(
+		const FImportQueueCounts& Counts,
+		const int32 LastOperationIndex,
+		const FString& FirstError)
+	{
+		TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+		Details->SetStringField(TEXT("status"), StatusReportWriteFailed);
+		Details->SetNumberField(TEXT("attempted_count"), Counts.AttemptedCount);
+		Details->SetNumberField(TEXT("applied_count"), Counts.AppliedCount);
+		Details->SetNumberField(TEXT("failed_count"), Counts.FailedCount);
+		Details->SetNumberField(TEXT("last_operation_index"), LastOperationIndex);
+		Details->SetStringField(TEXT("first_error"), FirstError);
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::SaveFailed,
+			TEXT("Failed to write import queue report after execution"),
+			Details);
+	}
 }
 
 FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TSharedPtr<FJsonObject>& Params)
@@ -1001,6 +1077,12 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 			false,
 			OperationValues);
 
+#if WITH_AUTOMATION_TESTS
+		if (bCortexImportQueueForceFinalReportWriteFailure)
+		{
+			return MakeReportWriteFailureResult(Counts, Queue.Operations.Num() - 1, TEXT("forced_report_write_failure"));
+		}
+#endif
 		FCortexJsonFileWriteResult WriteResult = FCortexSafeFileContract::WriteJsonReportAtomic(ResolvedReportPath, Report);
 		if (!WriteResult.bWritten)
 		{
@@ -1029,21 +1111,112 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 
 	TArray<FValidatedQueueOperation> ValidatedOperations;
 	ValidatedOperations.Reserve(Queue.Operations.Num());
+	bool bFailedDuringPreflight = false;
 	for (const FImportQueueOperation& Operation : Queue.Operations)
 	{
 		FValidatedQueueOperation ValidatedOperation;
 		FCortexDataMutationResult ValidationResult;
 		if (!BuildValidatedQueueOperation(Operation, Flags, ValidatedOperation, ValidationResult))
 		{
-			return ValidationResult.ToCommandResult();
+			ValidatedOperation.Operation = Operation;
+			ValidatedOperation.PreflightResult = ValidationResult;
+			bFailedDuringPreflight = true;
+			++Counts.FailedCount;
+			Counts.ErrorCount += ValidationResult.Errors.Num() > 0 ? ValidationResult.Errors.Num() : 1;
+			OperationValues.Add(MakeShared<FJsonValueObject>(MakeOperationReportObject(
+				Operation,
+				ValidationResult,
+				TEXT("failed"))));
+
+			if (!Flags.bAllowPartial)
+			{
+				Counts.ValidatedCount = 0;
+				Counts.SkippedCount = Queue.Operations.Num() - 1;
+				OperationValues.Empty();
+				for (int32 OperationIndex = 0; OperationIndex < Queue.Operations.Num(); ++OperationIndex)
+				{
+					if (OperationIndex == Operation.Index)
+					{
+						OperationValues.Add(MakeShared<FJsonValueObject>(MakeOperationReportObject(
+							Operation,
+							ValidationResult,
+							TEXT("failed"))));
+						continue;
+					}
+
+					FCortexDataMutationResult SkippedResult;
+					SkippedResult.bSuccess = true;
+					SkippedResult.PublicData = MakeShared<FJsonObject>();
+					OperationValues.Add(MakeShared<FJsonValueObject>(MakeOperationReportObject(
+						Queue.Operations[OperationIndex],
+						SkippedResult,
+						TEXT("skipped"))));
+				}
+
+				TSharedRef<FJsonObject> Report = BuildReport(
+					Queue,
+					Flags,
+					Counts,
+					ReportPath,
+					ResolvedReportPath.AbsolutePath,
+					OpsHash,
+					StatusPreflightFailed,
+					false,
+					false,
+					false,
+					OperationValues);
+
+				FCortexJsonFileWriteResult WriteResult = FCortexSafeFileContract::WriteJsonReportAtomic(ResolvedReportPath, Report);
+				if (!WriteResult.bWritten)
+				{
+					return FCortexCommandRouter::Error(WriteResult.ErrorCode, WriteResult.ErrorMessage);
+				}
+
+				return FCortexCommandRouter::Error(
+					ValidationResult.Errors.Num() > 0 ? ValidationResult.Errors[0].ErrorCode : CortexErrorCodes::InvalidOperation,
+					ValidationResult.Errors.Num() > 0 ? ValidationResult.Errors[0].Message : TEXT("Import queue preflight failed"),
+					Report);
+			}
+
+			ValidatedOperations.Add(MoveTemp(ValidatedOperation));
+			continue;
 		}
 
 		++Counts.ValidatedCount;
+		ValidatedOperation.PreflightResult = ValidationResult;
 		ValidatedOperations.Add(MoveTemp(ValidatedOperation));
 	}
 
+	bool bStopRemaining = false;
 	for (const FValidatedQueueOperation& ValidatedOperation : ValidatedOperations)
 	{
+		if (!ValidatedOperation.bPreflightPassed)
+		{
+			++Counts.AttemptedCount;
+			OperationValues.Add(MakeShared<FJsonValueObject>(MakeOperationReportObject(
+				ValidatedOperation.Operation,
+				ValidatedOperation.PreflightResult,
+				TEXT("failed"))));
+			if (Flags.bStopOnError)
+			{
+				bStopRemaining = true;
+			}
+			continue;
+		}
+
+		if (bStopRemaining)
+		{
+			++Counts.SkippedCount;
+			FCortexDataMutationResult SkippedResult;
+			SkippedResult.bSuccess = true;
+			SkippedResult.PublicData = MakeShared<FJsonObject>();
+			OperationValues.Add(MakeShared<FJsonValueObject>(MakeOperationReportObject(
+				ValidatedOperation.Operation,
+				SkippedResult,
+				TEXT("skipped"))));
+			continue;
+		}
+
 		FCortexDataMutationResult ApplyResult = ExecuteQueueOperationApply(ValidatedOperation, Flags.bQueryBack);
 		++Counts.AttemptedCount;
 		if (ApplyResult.bSuccess)
@@ -1062,6 +1235,10 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 		{
 			++Counts.FailedCount;
 			Counts.ErrorCount += ApplyResult.Errors.Num() > 0 ? ApplyResult.Errors.Num() : 1;
+			if (Flags.bStopOnError)
+			{
+				bStopRemaining = true;
+			}
 		}
 
 		Counts.WarningCount += ApplyResult.Warnings.Num();
@@ -1086,12 +1263,22 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 		ReportPath,
 		ResolvedReportPath.AbsolutePath,
 		OpsHash,
-		Counts.FailedCount == 0 ? TEXT("applied_ok") : TEXT("runtime_failed"),
-		Counts.FailedCount == 0,
-		false,
+		Counts.FailedCount == 0 && Counts.SkippedCount == 0
+			? StatusAppliedOk
+			: (Flags.bAllowPartial && (Counts.AppliedCount > 0 || Counts.PreviewedCount > 0))
+				? StatusPartialApplied
+				: (bFailedDuringPreflight ? StatusPreflightFailed : StatusRuntimeFailed),
+		Counts.FailedCount == 0 && Counts.SkippedCount == 0,
+		Flags.bAllowPartial && (Counts.AppliedCount > 0 || Counts.PreviewedCount > 0) && (Counts.FailedCount > 0 || Counts.SkippedCount > 0),
 		true,
 		OperationValues);
 
+#if WITH_AUTOMATION_TESTS
+	if (bCortexImportQueueForceFinalReportWriteFailure)
+	{
+		return MakeReportWriteFailureResult(Counts, Queue.Operations.Num() - 1, Counts.FailedCount > 0 ? TEXT("operation_failed") : TEXT(""));
+	}
+#endif
 	FCortexJsonFileWriteResult WriteResult = FCortexSafeFileContract::WriteJsonReportAtomic(ResolvedReportPath, Report);
 	if (!WriteResult.bWritten)
 	{
@@ -1100,16 +1287,33 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 
 	if (Counts.FailedCount > 0)
 	{
+		const bool bPartial = Flags.bAllowPartial && (Counts.AppliedCount > 0 || Counts.PreviewedCount > 0);
+		if (bPartial)
+		{
+			return FCortexCommandRouter::Success(
+				BuildCompactSummary(
+					Counts,
+					StatusPartialApplied,
+					false,
+					true,
+					false,
+					true,
+					ReportPath,
+					ResolvedReportPath.AbsolutePath));
+		}
+
 		return FCortexCommandRouter::Error(
-			CortexErrorCodes::InvalidOperation,
-			TEXT("One or more import queue operations failed during apply"),
+			bFailedDuringPreflight ? CortexErrorCodes::InvalidOperation : CortexErrorCodes::InvalidOperation,
+			bFailedDuringPreflight
+				? TEXT("Import queue preflight failed before mutation")
+				: TEXT("One or more import queue operations failed during apply"),
 			Report);
 	}
 
 	return FCortexCommandRouter::Success(
 		BuildCompactSummary(
 			Counts,
-			TEXT("applied_ok"),
+			StatusAppliedOk,
 			true,
 			false,
 			false,
@@ -1117,3 +1321,10 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 			ReportPath,
 			ResolvedReportPath.AbsolutePath));
 }
+
+#if WITH_AUTOMATION_TESTS
+void FCortexDataImportQueueOps::SetForceFinalReportWriteFailureForTests(const bool bEnabled)
+{
+	bCortexImportQueueForceFinalReportWriteFailure = bEnabled;
+}
+#endif
