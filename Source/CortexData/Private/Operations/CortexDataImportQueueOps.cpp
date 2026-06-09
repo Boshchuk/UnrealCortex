@@ -77,6 +77,15 @@ namespace
 		int32 SaveFailedCount = 0;
 	};
 
+	struct FImportQueueAggregates
+	{
+		TArray<FString> DirtyPackages;
+		TArray<FString> TargetsTouched;
+		TArray<FString> Warnings;
+		TArray<FCortexDataMutationError> Errors;
+		bool bRequiresUserAction = false;
+	};
+
 	struct FValidatedQueueOperation
 	{
 		FImportQueueOperation Operation;
@@ -117,6 +126,98 @@ namespace
 		Object->SetNumberField(TEXT("save_requested_count"), Counts.SaveRequestedCount);
 		Object->SetNumberField(TEXT("saved_count"), Counts.SavedCount);
 		Object->SetNumberField(TEXT("save_failed_count"), Counts.SaveFailedCount);
+	}
+
+	TArray<TSharedPtr<FJsonValue>> StringsToJsonValues(const TArray<FString>& Strings)
+	{
+		TArray<TSharedPtr<FJsonValue>> Values;
+		Values.Reserve(Strings.Num());
+		for (const FString& String : Strings)
+		{
+			Values.Add(MakeShared<FJsonValueString>(String));
+		}
+		return Values;
+	}
+
+	TArray<TSharedPtr<FJsonValue>> ErrorsToJsonValues(const TArray<FCortexDataMutationError>& Errors)
+	{
+		TArray<TSharedPtr<FJsonValue>> Values;
+		Values.Reserve(Errors.Num());
+		for (const FCortexDataMutationError& Error : Errors)
+		{
+			TSharedPtr<FJsonObject> ErrorObject = MakeShared<FJsonObject>();
+			ErrorObject->SetStringField(TEXT("error_code"), Error.ErrorCode);
+			ErrorObject->SetStringField(TEXT("message"), Error.Message);
+			if (Error.Details.IsValid())
+			{
+				ErrorObject->SetObjectField(TEXT("details"), Error.Details);
+			}
+			Values.Add(MakeShared<FJsonValueObject>(ErrorObject));
+		}
+		return Values;
+	}
+
+	void AppendUniqueStrings(TArray<FString>& InOutValues, const TArray<FString>& NewValues)
+	{
+		for (const FString& Value : NewValues)
+		{
+			InOutValues.AddUnique(Value);
+		}
+	}
+
+	void MergeResultIntoAggregates(
+		const FCortexDataMutationResult& Result,
+		FImportQueueCounts& InOutCounts,
+		FImportQueueAggregates& InOutAggregates)
+	{
+		AppendUniqueStrings(InOutAggregates.DirtyPackages, Result.DirtyPackages);
+		AppendUniqueStrings(InOutAggregates.TargetsTouched, Result.TargetsTouched);
+		if (!Result.Target.IsEmpty())
+		{
+			InOutAggregates.TargetsTouched.AddUnique(Result.Target);
+		}
+
+		InOutAggregates.Warnings.Append(Result.Warnings);
+		InOutAggregates.Errors.Append(Result.Errors);
+		InOutAggregates.bRequiresUserAction = InOutAggregates.bRequiresUserAction || Result.bRequiresUserAction;
+
+		if (Result.bSaveRequested && !Result.bSaved)
+		{
+			++InOutCounts.SaveFailedCount;
+		}
+	}
+
+	FString GetFirstErrorMessage(const TArray<FCortexDataMutationError>& Errors)
+	{
+		for (const FCortexDataMutationError& Error : Errors)
+		{
+			if (!Error.Message.IsEmpty())
+			{
+				return Error.Message;
+			}
+		}
+
+		return TEXT("");
+	}
+
+	int64 FinalizeReportByteCount(const TSharedRef<FJsonObject>& Report)
+	{
+		int64 StableByteCount = 0;
+		for (int32 Iteration = 0; Iteration < 8; ++Iteration)
+		{
+			const FString Serialized = FCortexSafeFileContract::SerializeCanonicalJson(Report);
+			FTCHARToUTF8 Utf8Serialized(*Serialized);
+			const int64 ByteCount = Utf8Serialized.Length();
+			if (StableByteCount == ByteCount)
+			{
+				return ByteCount;
+			}
+
+			StableByteCount = ByteCount;
+			Report->SetNumberField(TEXT("report_bytes"), StableByteCount);
+		}
+
+		return StableByteCount;
 	}
 
 	bool RejectUnknownTopLevelParams(
@@ -831,6 +932,8 @@ namespace
 		OperationObject->SetStringField(TEXT("phase"), Operation.Phase);
 		OperationObject->SetStringField(TEXT("command"), Operation.Command);
 		OperationObject->SetStringField(TEXT("status"), Status);
+		OperationObject->SetBoolField(TEXT("success"), Result.bSuccess);
+		OperationObject->SetBoolField(TEXT("dry_run"), Status == TEXT("dry_run"));
 
 		if (!Operation.SourcePage.IsEmpty())
 		{
@@ -898,6 +1001,9 @@ namespace
 		const FImportQueueDocument& Queue,
 		const FImportQueueFlags& Flags,
 		const FImportQueueCounts& Counts,
+		const FImportQueueAggregates& Aggregates,
+		const FString& RequestedOpsPath,
+		const FString& CanonicalOpsPath,
 		const FString& RequestedReportPath,
 		const FString& CanonicalReportPath,
 		const FString& OpsHash,
@@ -908,6 +1014,8 @@ namespace
 		const TArray<TSharedPtr<FJsonValue>>& OperationValues)
 	{
 		TSharedRef<FJsonObject> Report = MakeShared<FJsonObject>();
+		Report->SetStringField(TEXT("ops_path"), RequestedOpsPath);
+		Report->SetStringField(TEXT("canonical_ops_path"), CanonicalOpsPath);
 		Report->SetNumberField(TEXT("schema_version"), Queue.SchemaVersion);
 		Report->SetStringField(TEXT("queue_id"), Queue.QueueId);
 		Report->SetStringField(TEXT("status"), Status);
@@ -927,21 +1035,35 @@ namespace
 			Report->SetStringField(TEXT("generator"), Queue.Generator);
 		}
 		SetCountFields(Report, Counts);
+		Report->SetArrayField(TEXT("warnings"), StringsToJsonValues(Aggregates.Warnings));
+		Report->SetArrayField(TEXT("errors"), ErrorsToJsonValues(Aggregates.Errors));
+		Report->SetArrayField(TEXT("targets_touched"), StringsToJsonValues(Aggregates.TargetsTouched));
+		Report->SetArrayField(TEXT("dirty_packages"), StringsToJsonValues(Aggregates.DirtyPackages));
+		Report->SetNumberField(TEXT("dirty_package_count"), Aggregates.DirtyPackages.Num());
+		Report->SetBoolField(TEXT("requires_user_action"), Aggregates.bRequiresUserAction);
 		Report->SetArrayField(TEXT("operations"), OperationValues);
+		FinalizeReportByteCount(Report);
 		return Report;
 	}
 
 	TSharedRef<FJsonObject> BuildCompactSummary(
+		const FImportQueueDocument& Queue,
 		const FImportQueueCounts& Counts,
+		const FImportQueueAggregates& Aggregates,
 		const FString& Status,
 		const bool bSuccess,
 		const bool bPartial,
 		const bool bDryRun,
 		const bool bApplied,
 		const FString& RequestedReportPath,
-		const FString& CanonicalReportPath)
+		const FString& CanonicalReportPath,
+		const FString& OpsHash,
+		const int64 ReportBytes)
 	{
 		TSharedRef<FJsonObject> Summary = MakeShared<FJsonObject>();
+		Summary->SetNumberField(TEXT("schema_version"), Queue.SchemaVersion);
+		Summary->SetStringField(TEXT("queue_id"), Queue.QueueId);
+		Summary->SetStringField(TEXT("ops_sha256"), OpsHash);
 		Summary->SetStringField(TEXT("status"), Status);
 		Summary->SetBoolField(TEXT("success"), bSuccess);
 		Summary->SetBoolField(TEXT("partial"), bPartial);
@@ -950,6 +1072,10 @@ namespace
 		Summary->SetStringField(TEXT("report_path"), RequestedReportPath);
 		Summary->SetStringField(TEXT("canonical_report_path"), CanonicalReportPath);
 		SetCountFields(Summary, Counts);
+		Summary->SetNumberField(TEXT("dirty_package_count"), Aggregates.DirtyPackages.Num());
+		Summary->SetBoolField(TEXT("requires_user_action"), Aggregates.bRequiresUserAction);
+		Summary->SetNumberField(TEXT("report_bytes"), ReportBytes);
+		Summary->SetStringField(TEXT("first_error"), GetFirstErrorMessage(Aggregates.Errors));
 		return Summary;
 	}
 
@@ -1033,6 +1159,7 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 	}
 
 	FImportQueueCounts Counts;
+	FImportQueueAggregates Aggregates;
 	Counts.OperationCount = Queue.Operations.Num();
 
 	TArray<TSharedPtr<FJsonValue>> OperationValues;
@@ -1061,6 +1188,7 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 			}
 
 			Counts.WarningCount += PreviewResult.Warnings.Num();
+			MergeResultIntoAggregates(PreviewResult, Counts, Aggregates);
 			OperationValues.Add(MakeShared<FJsonValueObject>(MakeOperationReportObject(Operation, PreviewResult, PreviewResult.bSuccess ? TEXT("dry_run") : TEXT("failed"))));
 		}
 
@@ -1068,6 +1196,9 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 			Queue,
 			Flags,
 			Counts,
+			Aggregates,
+			OpsPath,
+			ResolvedOpsPath.AbsolutePath,
 			ReportPath,
 			ResolvedReportPath.AbsolutePath,
 			OpsHash,
@@ -1086,7 +1217,7 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 		FCortexJsonFileWriteResult WriteResult = FCortexSafeFileContract::WriteJsonReportAtomic(ResolvedReportPath, Report);
 		if (!WriteResult.bWritten)
 		{
-			return FCortexCommandRouter::Error(WriteResult.ErrorCode, WriteResult.ErrorMessage);
+			return MakeReportWriteFailureResult(Counts, Queue.Operations.Num() - 1, GetFirstErrorMessage(Aggregates.Errors));
 		}
 
 		if (Counts.FailedCount > 0)
@@ -1099,14 +1230,18 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 
 		return FCortexCommandRouter::Success(
 			BuildCompactSummary(
+				Queue,
 				Counts,
+				Aggregates,
 				StatusDryRunOk,
 				true,
 				false,
 				true,
 				false,
 				ReportPath,
-				ResolvedReportPath.AbsolutePath));
+				ResolvedReportPath.AbsolutePath,
+				OpsHash,
+				WriteResult.BytesWritten));
 	}
 
 	TArray<FValidatedQueueOperation> ValidatedOperations;
@@ -1123,6 +1258,7 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 			bFailedDuringPreflight = true;
 			++Counts.FailedCount;
 			Counts.ErrorCount += ValidationResult.Errors.Num() > 0 ? ValidationResult.Errors.Num() : 1;
+			MergeResultIntoAggregates(ValidationResult, Counts, Aggregates);
 			OperationValues.Add(MakeShared<FJsonValueObject>(MakeOperationReportObject(
 				Operation,
 				ValidationResult,
@@ -1157,6 +1293,9 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 					Queue,
 					Flags,
 					Counts,
+					Aggregates,
+					OpsPath,
+					ResolvedOpsPath.AbsolutePath,
 					ReportPath,
 					ResolvedReportPath.AbsolutePath,
 					OpsHash,
@@ -1169,7 +1308,7 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 				FCortexJsonFileWriteResult WriteResult = FCortexSafeFileContract::WriteJsonReportAtomic(ResolvedReportPath, Report);
 				if (!WriteResult.bWritten)
 				{
-					return FCortexCommandRouter::Error(WriteResult.ErrorCode, WriteResult.ErrorMessage);
+					return MakeReportWriteFailureResult(Counts, Operation.Index, GetFirstErrorMessage(Aggregates.Errors));
 				}
 
 				return FCortexCommandRouter::Error(
@@ -1192,15 +1331,11 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 	{
 		if (!ValidatedOperation.bPreflightPassed)
 		{
-			++Counts.AttemptedCount;
+			MergeResultIntoAggregates(ValidatedOperation.PreflightResult, Counts, Aggregates);
 			OperationValues.Add(MakeShared<FJsonValueObject>(MakeOperationReportObject(
 				ValidatedOperation.Operation,
 				ValidatedOperation.PreflightResult,
 				TEXT("failed"))));
-			if (Flags.bStopOnError)
-			{
-				bStopRemaining = true;
-			}
 			continue;
 		}
 
@@ -1242,6 +1377,7 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 		}
 
 		Counts.WarningCount += ApplyResult.Warnings.Num();
+		MergeResultIntoAggregates(ApplyResult, Counts, Aggregates);
 		if (ApplyResult.bSaveRequested)
 		{
 			++Counts.SaveRequestedCount;
@@ -1260,6 +1396,9 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 		Queue,
 		Flags,
 		Counts,
+		Aggregates,
+		OpsPath,
+		ResolvedOpsPath.AbsolutePath,
 		ReportPath,
 		ResolvedReportPath.AbsolutePath,
 		OpsHash,
@@ -1282,7 +1421,7 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 	FCortexJsonFileWriteResult WriteResult = FCortexSafeFileContract::WriteJsonReportAtomic(ResolvedReportPath, Report);
 	if (!WriteResult.bWritten)
 	{
-		return FCortexCommandRouter::Error(WriteResult.ErrorCode, WriteResult.ErrorMessage);
+		return MakeReportWriteFailureResult(Counts, Queue.Operations.Num() - 1, GetFirstErrorMessage(Aggregates.Errors));
 	}
 
 	if (Counts.FailedCount > 0)
@@ -1292,14 +1431,18 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 		{
 			return FCortexCommandRouter::Success(
 				BuildCompactSummary(
+					Queue,
 					Counts,
+					Aggregates,
 					StatusPartialApplied,
 					false,
 					true,
 					false,
 					true,
 					ReportPath,
-					ResolvedReportPath.AbsolutePath));
+					ResolvedReportPath.AbsolutePath,
+					OpsHash,
+					WriteResult.BytesWritten));
 		}
 
 		return FCortexCommandRouter::Error(
@@ -1312,14 +1455,18 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 
 	return FCortexCommandRouter::Success(
 		BuildCompactSummary(
+			Queue,
 			Counts,
+			Aggregates,
 			StatusAppliedOk,
 			true,
 			false,
 			false,
 			true,
 			ReportPath,
-			ResolvedReportPath.AbsolutePath));
+			ResolvedReportPath.AbsolutePath,
+			OpsHash,
+			WriteResult.BytesWritten));
 }
 
 #if WITH_AUTOMATION_TESTS

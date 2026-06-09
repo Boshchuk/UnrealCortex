@@ -360,6 +360,14 @@ bool FCortexDataImportQueueDryRunDefaultWritesReportTest::RunTest(const FString&
 	TestEqual(TEXT("status is dry_run_ok"), Result.Data->GetStringField(TEXT("status")), TEXT("dry_run_ok"));
 	TestTrue(TEXT("dry_run defaults true"), Result.Data->GetBoolField(TEXT("dry_run")));
 	TestFalse(TEXT("applied is false"), Result.Data->GetBoolField(TEXT("applied")));
+	TestEqual(TEXT("summary schema_version is 1"), static_cast<int32>(Result.Data->GetNumberField(TEXT("schema_version"))), 1);
+	TestEqual(TEXT("summary queue_id matches"), Result.Data->GetStringField(TEXT("queue_id")), TEXT("queue-dry-run"));
+	TestTrue(TEXT("summary contains ops hash"), Result.Data->HasTypedField<EJson::String>(TEXT("ops_sha256")));
+	TestTrue(TEXT("summary contains first_error"), Result.Data->HasField(TEXT("first_error")));
+	TestTrue(TEXT("summary contains report_bytes"), Result.Data->HasTypedField<EJson::Number>(TEXT("report_bytes")));
+	TestTrue(TEXT("summary contains dirty_package_count"), Result.Data->HasTypedField<EJson::Number>(TEXT("dirty_package_count")));
+	TestTrue(TEXT("summary contains save_failed_count"), Result.Data->HasTypedField<EJson::Number>(TEXT("save_failed_count")));
+	TestTrue(TEXT("summary contains requires_user_action"), Result.Data->HasTypedField<EJson::Boolean>(TEXT("requires_user_action")));
 	TestFalse(TEXT("MCP summary omits operations array"), Result.Data->HasField(TEXT("operations")));
 	TestTrue(TEXT("report file is written"), IFileManager::Get().FileExists(*ReportPath));
 
@@ -369,8 +377,12 @@ bool FCortexDataImportQueueDryRunDefaultWritesReportTest::RunTest(const FString&
 	if (Report.IsValid())
 	{
 		TestEqual(TEXT("report queue_id matches"), Report->GetStringField(TEXT("queue_id")), TEXT("queue-dry-run"));
+		TestEqual(TEXT("report ops_path matches request"), Report->GetStringField(TEXT("ops_path")), OpsPath);
+		TestEqual(TEXT("report canonical_ops_path matches resolved path"), Report->GetStringField(TEXT("canonical_ops_path")), OpsPath);
 		TestEqual(TEXT("report operation_count"), static_cast<int32>(Report->GetNumberField(TEXT("operation_count"))), 1);
 		TestEqual(TEXT("report previewed_count"), static_cast<int32>(Report->GetNumberField(TEXT("previewed_count"))), 1);
+		TestTrue(TEXT("report contains report_bytes"), Report->HasTypedField<EJson::Number>(TEXT("report_bytes")));
+		TestTrue(TEXT("report contains requires_user_action"), Report->HasTypedField<EJson::Boolean>(TEXT("requires_user_action")));
 		TestTrue(TEXT("report contains operations array"), Report->HasTypedField<EJson::Array>(TEXT("operations")));
 		TestTrue(TEXT("report contains ops hash"), Report->HasTypedField<EJson::String>(TEXT("ops_sha256")));
 	}
@@ -489,6 +501,9 @@ bool FCortexDataImportQueueAppliesDataTableRowAndQueryBacksTest::RunTest(const F
 	}
 
 	TestEqual(TEXT("status is applied_ok"), Result.Data->GetStringField(TEXT("status")), TEXT("applied_ok"));
+	TestEqual(TEXT("summary schema_version is 1"), static_cast<int32>(Result.Data->GetNumberField(TEXT("schema_version"))), 1);
+	TestEqual(TEXT("summary queue_id matches"), Result.Data->GetStringField(TEXT("queue_id")), TEXT("queue-apply"));
+	TestTrue(TEXT("summary contains ops hash"), Result.Data->HasTypedField<EJson::String>(TEXT("ops_sha256")));
 	TestEqual(TEXT("attempted_count is 1"), static_cast<int32>(Result.Data->GetNumberField(TEXT("attempted_count"))), 1);
 	TestEqual(TEXT("applied_count is 1"), static_cast<int32>(Result.Data->GetNumberField(TEXT("applied_count"))), 1);
 
@@ -964,7 +979,7 @@ bool FCortexDataImportQueuePartialAndStopMatrixTest::RunTest(const FString& Para
 	};
 
 	TestTrue(TEXT("strict preflight blocks before mutation"), RunCase(false, true, TEXT("preflight_failed"), 0, 0, 0, 1, 2, false, false));
-	TestTrue(TEXT("partial stop_on_error applies first then skips rest"), RunCase(true, true, TEXT("partial_applied"), 2, 2, 1, 1, 1, true, false));
+	TestTrue(TEXT("partial stop_on_error still runs later validated ops"), RunCase(true, true, TEXT("partial_applied"), 2, 2, 2, 1, 0, true, true));
 	TestTrue(TEXT("partial continue applies independent later op"), RunCase(true, false, TEXT("partial_applied"), 2, 3, 2, 1, 0, true, true));
 
 	return true;
