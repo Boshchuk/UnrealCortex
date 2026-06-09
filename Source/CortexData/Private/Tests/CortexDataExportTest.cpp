@@ -784,6 +784,48 @@ bool FCortexDataExportDatatableProjectionSchemaTest::RunTest(const FString& Para
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataExportRelativeSavedPathTest,
+	"Cortex.Data.Export.PathSafety.RelativeSavedPath",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataExportRelativeSavedPathTest::RunTest(const FString& Parameters)
+{
+	FCortexDataExportTestFixture Fixture;
+	UDataTable* RegularTable = Fixture.CreateRegularDataTable();
+	TestNotNull(TEXT("regular DataTable fixture is created"), RegularTable);
+	if (RegularTable == nullptr)
+	{
+		return true;
+	}
+
+	const FString RelativeOutPath = TEXT("Saved/CortexExportTests/relative-saved.json");
+	const FString ExpectedOutPath = FPaths::Combine(FPaths::ProjectDir(), RelativeOutPath);
+	const FString UnexpectedNestedPath = FPaths::Combine(FPaths::ProjectSavedDir(), RelativeOutPath);
+
+	IFileManager::Get().Delete(*ExpectedOutPath, false, true);
+	IFileManager::Get().Delete(*UnexpectedNestedPath, false, true);
+
+	FCortexCommandRouter Router = CreateDataExportTestRouter();
+	TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("table_path"), RegularTable->GetPathName());
+	Params->SetStringField(TEXT("out_path"), RelativeOutPath);
+
+	const FCortexCommandResult Result = Router.Execute(TEXT("data.export_datatable_json"), Params);
+	TestTrue(TEXT("DataTable export succeeds with project-relative Saved path"), Result.bSuccess);
+	TestTrue(TEXT("project-relative Saved path is written under project Saved"), IFileManager::Get().FileExists(*ExpectedOutPath));
+	TestFalse(TEXT("project-relative Saved path is not nested under Saved/Saved"), IFileManager::Get().FileExists(*UnexpectedNestedPath));
+
+	if (Result.Data.IsValid())
+	{
+		TestEqual(TEXT("summary reports normalized project Saved path"), Result.Data->GetStringField(TEXT("out_path")), FPaths::ConvertRelativePathToFull(ExpectedOutPath));
+	}
+
+	IFileManager::Get().Delete(*ExpectedOutPath, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexDataExportDatatableRowWrapperTest,
 	"Cortex.Data.Export.Datatable.RowWrapperAvoidsNameCollision",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter

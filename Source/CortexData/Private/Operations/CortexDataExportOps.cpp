@@ -538,7 +538,7 @@ bool FCortexDataExportOps::TryResolveOutputPath(const FString& InPath, FResolved
 	FString Candidate = SlashPath;
 	if (FPaths::IsRelative(Candidate))
 	{
-		Candidate = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir(), Candidate);
+		Candidate = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), Candidate);
 	}
 	else
 	{
