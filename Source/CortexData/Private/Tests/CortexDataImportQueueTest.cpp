@@ -366,6 +366,310 @@ bool FCortexDataImportQueueDryRunDefaultWritesReportTest::RunTest(const FString&
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataImportQueueApplyRequiresExplicitIntentTest,
+	"Cortex.Data.ImportQueue.ApplyRequiresExplicitIntent",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataImportQueueApplyRequiresExplicitIntentTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataImportQueueTestFixture Fixture;
+	UDataTable* Table = Fixture.CreateRegularDataTable();
+	TestNotNull(TEXT("DataTable fixture is created"), Table);
+	if (Table == nullptr)
+	{
+		return false;
+	}
+
+	const FString OpsPath = Fixture.MakeSavedOutputPath(TEXT("apply-intent-queue.json"));
+	const FString ReportPath = Fixture.MakeSavedOutputPath(TEXT("apply-intent-report.json"));
+	TSharedRef<FJsonObject> RowData = MakeShared<FJsonObject>();
+	RowData->SetStringField(TEXT("row_name"), TEXT("Imported Alpha"));
+	Fixture.WriteQueueFile(
+		OpsPath,
+		TEXT("queue-apply-intent"),
+		{ Fixture.MakeUpdateRowOperation(TEXT("op.update.row_name"), Table->GetPathName(), TEXT("alpha"), RowData) });
+
+	TSharedPtr<FJsonObject> MissingApplyParams = MakeShared<FJsonObject>();
+	MissingApplyParams->SetStringField(TEXT("ops_path"), OpsPath);
+	MissingApplyParams->SetStringField(TEXT("report_path"), ReportPath);
+	MissingApplyParams->SetBoolField(TEXT("dry_run"), false);
+
+	const FCortexCommandResult MissingApplyResult =
+		Fixture.CreateRouter().Execute(TEXT("data.apply_import_ops_json"), MissingApplyParams);
+	TestFalse(TEXT("real apply without apply flag fails"), MissingApplyResult.bSuccess);
+	TestEqual(
+		TEXT("missing apply uses InvalidOperation"),
+		MissingApplyResult.ErrorCode,
+		CortexErrorCodes::InvalidOperation);
+
+	TSharedPtr<FJsonObject> ContradictoryParams = MakeShared<FJsonObject>();
+	ContradictoryParams->SetStringField(TEXT("ops_path"), OpsPath);
+	ContradictoryParams->SetStringField(TEXT("report_path"), ReportPath);
+	ContradictoryParams->SetBoolField(TEXT("dry_run"), true);
+	ContradictoryParams->SetBoolField(TEXT("apply"), true);
+
+	const FCortexCommandResult ContradictoryResult =
+		Fixture.CreateRouter().Execute(TEXT("data.apply_import_ops_json"), ContradictoryParams);
+	TestFalse(TEXT("contradictory dry_run/apply fails"), ContradictoryResult.bSuccess);
+	TestEqual(
+		TEXT("contradictory dry_run/apply uses InvalidOperation"),
+		ContradictoryResult.ErrorCode,
+		CortexErrorCodes::InvalidOperation);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataImportQueueAppliesDataTableRowAndQueryBacksTest,
+	"Cortex.Data.ImportQueue.AppliesDataTableRowAndQueryBacks",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataImportQueueAppliesDataTableRowAndQueryBacksTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataImportQueueTestFixture Fixture;
+	UDataTable* Table = Fixture.CreateRegularDataTable();
+	TestNotNull(TEXT("DataTable fixture is created"), Table);
+	if (Table == nullptr)
+	{
+		return false;
+	}
+
+	const FString OpsPath = Fixture.MakeSavedOutputPath(TEXT("apply-queue.json"));
+	const FString ReportPath = Fixture.MakeSavedOutputPath(TEXT("apply-report.json"));
+	TSharedRef<FJsonObject> RowData = MakeShared<FJsonObject>();
+	RowData->SetStringField(TEXT("row_name"), TEXT("Imported Alpha"));
+	Fixture.WriteQueueFile(
+		OpsPath,
+		TEXT("queue-apply"),
+		{ Fixture.MakeUpdateRowOperation(TEXT("op.update.row_name"), Table->GetPathName(), TEXT("alpha"), RowData) });
+
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("ops_path"), OpsPath);
+	Params->SetStringField(TEXT("report_path"), ReportPath);
+	Params->SetBoolField(TEXT("dry_run"), false);
+	Params->SetBoolField(TEXT("apply"), true);
+
+	const FCortexCommandResult Result = Fixture.CreateRouter().Execute(TEXT("data.apply_import_ops_json"), Params);
+	TestTrue(TEXT("real apply succeeds"), Result.bSuccess);
+	TestTrue(TEXT("real apply returns data"), Result.Data.IsValid());
+	if (!Result.bSuccess || !Result.Data.IsValid())
+	{
+		if (!Result.ErrorMessage.IsEmpty())
+		{
+			AddError(Result.ErrorMessage);
+		}
+		return false;
+	}
+
+	TestEqual(TEXT("status is applied_ok"), Result.Data->GetStringField(TEXT("status")), TEXT("applied_ok"));
+	TestEqual(TEXT("attempted_count is 1"), static_cast<int32>(Result.Data->GetNumberField(TEXT("attempted_count"))), 1);
+	TestEqual(TEXT("applied_count is 1"), static_cast<int32>(Result.Data->GetNumberField(TEXT("applied_count"))), 1);
+
+	const FCortexDataLocalizationTestRow* Row =
+		reinterpret_cast<const FCortexDataLocalizationTestRow*>(Table->FindRowUnchecked(TEXT("alpha")));
+	TestNotNull(TEXT("row still exists after apply"), Row);
+	if (Row != nullptr)
+	{
+		TestEqual(TEXT("real apply mutates row field"), Row->row_name, TEXT("Imported Alpha"));
+	}
+
+	TSharedPtr<FJsonObject> Report;
+	FString ParseError;
+	TestTrue(TEXT("report parses"), Fixture.TryReadJsonFile(ReportPath, Report, ParseError));
+	if (Report.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Operations = nullptr;
+		TestTrue(TEXT("report contains operations array"), Report->TryGetArrayField(TEXT("operations"), Operations));
+		if (Operations != nullptr && Operations->Num() == 1)
+		{
+			const TSharedPtr<FJsonObject> OperationObject = (*Operations)[0]->AsObject();
+			TestTrue(TEXT("operation report exists"), OperationObject.IsValid());
+			if (OperationObject.IsValid())
+			{
+				TestEqual(TEXT("operation status is applied"), OperationObject->GetStringField(TEXT("status")), TEXT("applied"));
+				TestTrue(TEXT("operation has query_back"), OperationObject->HasTypedField<EJson::Object>(TEXT("query_back")));
+			}
+		}
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataImportQueueAppliesSetTranslationAndQueryBacksTest,
+	"Cortex.Data.ImportQueue.AppliesSetTranslationAndQueryBacks",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataImportQueueAppliesSetTranslationAndQueryBacksTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataImportQueueTestFixture Fixture;
+	UStringTable* StringTable = Fixture.CreateStringTable();
+	TestNotNull(TEXT("StringTable fixture is created"), StringTable);
+	if (StringTable == nullptr)
+	{
+		return false;
+	}
+
+	const FString OpsPath = Fixture.MakeSavedOutputPath(TEXT("set-translation-queue.json"));
+	const FString ReportPath = Fixture.MakeSavedOutputPath(TEXT("set-translation-report.json"));
+
+	TSharedRef<FJsonObject> ParamsObject = MakeShared<FJsonObject>();
+	ParamsObject->SetStringField(TEXT("string_table_path"), StringTable->GetPathName());
+	ParamsObject->SetStringField(TEXT("key"), TEXT("fireball.body"));
+	ParamsObject->SetStringField(TEXT("text"), TEXT("Deals fire damage."));
+
+	TSharedRef<FJsonObject> Operation = MakeShared<FJsonObject>();
+	Operation->SetStringField(TEXT("id"), TEXT("st.set_translation.fireball"));
+	Operation->SetStringField(TEXT("phase"), TEXT("apply"));
+	Operation->SetStringField(TEXT("command"), TEXT("set_translation"));
+	Operation->SetObjectField(TEXT("params"), ParamsObject);
+	Operation->SetStringField(TEXT("source_page"), TEXT("DesignWiki/Test.md"));
+
+	Fixture.WriteQueueFile(OpsPath, TEXT("queue-set-translation"), { Operation });
+
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("ops_path"), OpsPath);
+	Params->SetStringField(TEXT("report_path"), ReportPath);
+	Params->SetBoolField(TEXT("dry_run"), false);
+	Params->SetBoolField(TEXT("apply"), true);
+
+	const FCortexCommandResult Result = Fixture.CreateRouter().Execute(TEXT("data.apply_import_ops_json"), Params);
+	TestTrue(TEXT("set_translation apply succeeds"), Result.bSuccess);
+	TestTrue(TEXT("set_translation apply returns data"), Result.Data.IsValid());
+	if (!Result.bSuccess || !Result.Data.IsValid())
+	{
+		if (!Result.ErrorMessage.IsEmpty())
+		{
+			AddError(Result.ErrorMessage);
+		}
+		return false;
+	}
+
+	FString CurrentValue;
+	TestTrue(
+		TEXT("string table contains applied key"),
+		StringTable->GetStringTable()->GetSourceString(TEXT("fireball.body"), CurrentValue));
+	TestEqual(TEXT("string table value changed"), CurrentValue, TEXT("Deals fire damage."));
+
+	TSharedPtr<FJsonObject> Report;
+	FString ParseError;
+	TestTrue(TEXT("report parses"), Fixture.TryReadJsonFile(ReportPath, Report, ParseError));
+	if (Report.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Operations = nullptr;
+		TestTrue(TEXT("report contains operations array"), Report->TryGetArrayField(TEXT("operations"), Operations));
+		if (Operations != nullptr && Operations->Num() == 1)
+		{
+			const TSharedPtr<FJsonObject> OperationObject = (*Operations)[0]->AsObject();
+			TestTrue(TEXT("operation report exists"), OperationObject.IsValid());
+			if (OperationObject.IsValid())
+			{
+				TestEqual(TEXT("operation status is applied"), OperationObject->GetStringField(TEXT("status")), TEXT("applied"));
+				TestTrue(TEXT("operation has target"), OperationObject->HasTypedField<EJson::String>(TEXT("target")));
+				if (OperationObject->HasTypedField<EJson::String>(TEXT("target")))
+				{
+					const FString Target = OperationObject->GetStringField(TEXT("target"));
+					TestTrue(TEXT("target contains string table path"), Target.Contains(StringTable->GetPathName()));
+					TestTrue(TEXT("target contains key"), Target.Contains(TEXT("fireball.body")));
+				}
+			}
+		}
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataImportQueueAppliesDataAssetAndQueryBacksTest,
+	"Cortex.Data.ImportQueue.AppliesDataAssetAndQueryBacks",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataImportQueueAppliesDataAssetAndQueryBacksTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataImportQueueTestFixture Fixture;
+	UCortexTestDataAsset* DataAsset = Fixture.CreateDataAsset();
+	TestNotNull(TEXT("DataAsset fixture is created"), DataAsset);
+	if (DataAsset == nullptr)
+	{
+		return false;
+	}
+
+	DataAsset->TestProperty = TEXT("Original Value");
+
+	const FString OpsPath = Fixture.MakeSavedOutputPath(TEXT("asset-queue.json"));
+	const FString ReportPath = Fixture.MakeSavedOutputPath(TEXT("asset-report.json"));
+
+	TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+	Properties->SetStringField(TEXT("TestProperty"), TEXT("Imported value"));
+
+	TSharedRef<FJsonObject> ParamsObject = MakeShared<FJsonObject>();
+	ParamsObject->SetStringField(TEXT("asset_path"), DataAsset->GetPathName());
+	ParamsObject->SetObjectField(TEXT("properties"), Properties);
+
+	TSharedRef<FJsonObject> Operation = MakeShared<FJsonObject>();
+	Operation->SetStringField(TEXT("id"), TEXT("asset.update.name"));
+	Operation->SetStringField(TEXT("phase"), TEXT("apply"));
+	Operation->SetStringField(TEXT("command"), TEXT("update_data_asset"));
+	Operation->SetObjectField(TEXT("params"), ParamsObject);
+	Operation->SetStringField(TEXT("source_page"), TEXT("DesignWiki/Test.md"));
+
+	Fixture.WriteQueueFile(OpsPath, TEXT("queue-data-asset"), { Operation });
+
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("ops_path"), OpsPath);
+	Params->SetStringField(TEXT("report_path"), ReportPath);
+	Params->SetBoolField(TEXT("dry_run"), false);
+	Params->SetBoolField(TEXT("apply"), true);
+
+	const FCortexCommandResult Result = Fixture.CreateRouter().Execute(TEXT("data.apply_import_ops_json"), Params);
+	TestTrue(TEXT("data asset apply succeeds"), Result.bSuccess);
+	TestTrue(TEXT("data asset apply returns data"), Result.Data.IsValid());
+	if (!Result.bSuccess || !Result.Data.IsValid())
+	{
+		if (!Result.ErrorMessage.IsEmpty())
+		{
+			AddError(Result.ErrorMessage);
+		}
+		return false;
+	}
+
+	TestEqual(TEXT("data asset property changed"), DataAsset->TestProperty, TEXT("Imported value"));
+
+	TSharedPtr<FJsonObject> Report;
+	FString ParseError;
+	TestTrue(TEXT("report parses"), Fixture.TryReadJsonFile(ReportPath, Report, ParseError));
+	if (Report.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Operations = nullptr;
+		TestTrue(TEXT("report contains operations array"), Report->TryGetArrayField(TEXT("operations"), Operations));
+		if (Operations != nullptr && Operations->Num() == 1)
+		{
+			const TSharedPtr<FJsonObject> OperationObject = (*Operations)[0]->AsObject();
+			TestTrue(TEXT("operation report exists"), OperationObject.IsValid());
+			if (OperationObject.IsValid())
+			{
+				TestEqual(TEXT("operation status is applied"), OperationObject->GetStringField(TEXT("status")), TEXT("applied"));
+				TestTrue(TEXT("operation has query_back"), OperationObject->HasTypedField<EJson::Object>(TEXT("query_back")));
+			}
+		}
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexDataImportQueueHelperParityUpdateDatatableRowTest,
 	"Cortex.Data.ImportQueue.HelperParity.UpdateDatatableRow",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter

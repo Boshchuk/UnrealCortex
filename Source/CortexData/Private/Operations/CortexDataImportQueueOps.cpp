@@ -69,6 +69,16 @@ namespace
 		int32 SaveFailedCount = 0;
 	};
 
+	struct FValidatedQueueOperation
+	{
+		FImportQueueOperation Operation;
+		TUniquePtr<FCortexUpdateDatatableRowMutationPlan> UpdateDatatableRowPlan;
+		TUniquePtr<FCortexImportDatatableJsonMutationPlan> ImportDatatableJsonPlan;
+		TUniquePtr<FCortexUpdateStringTableMutationPlan> UpdateStringTablePlan;
+		TUniquePtr<FCortexSetTranslationMutationPlan> SetTranslationPlan;
+		TUniquePtr<FCortexUpdateDataAssetMutationPlan> UpdateDataAssetPlan;
+	};
+
 	TSharedPtr<FJsonObject> MakeFieldDetails(const FString& FieldName)
 	{
 		TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
@@ -554,30 +564,246 @@ namespace
 				FString::Printf(TEXT("Unsupported import operation command: %s"), *Operation.Command)));
 	}
 
+	bool BuildValidatedQueueOperation(
+		const FImportQueueOperation& Operation,
+		const FImportQueueFlags& Flags,
+		FValidatedQueueOperation& OutValidatedOperation,
+		FCortexDataMutationResult& OutError)
+	{
+		FCortexCommandResult ValidationError;
+		if (!RejectUnknownOrControlledParams(Operation, Flags, ValidationError))
+		{
+			OutError = FCortexDataMutationResult::FromCommandResult(ValidationError);
+			return false;
+		}
+
+		const TSharedRef<FJsonObject> Params = CloneOperationParamsWithQueueFlags(Operation, Flags);
+		OutValidatedOperation = FValidatedQueueOperation{};
+		OutValidatedOperation.Operation = Operation;
+
+		if (Operation.Command == TEXT("update_datatable_row"))
+		{
+			FCortexUpdateDatatableRowMutationRequest Request;
+			OutError = FCortexDataMutationHelpers::ParseUpdateDatatableRowParams(Params, Request);
+			if (!OutError.bSuccess)
+			{
+				return false;
+			}
+
+			OutValidatedOperation.UpdateDatatableRowPlan = MakeUnique<FCortexUpdateDatatableRowMutationPlan>();
+			OutError = FCortexDataMutationHelpers::BuildUpdateDatatableRowPlan(
+				Request,
+				*OutValidatedOperation.UpdateDatatableRowPlan);
+			return OutError.bSuccess;
+		}
+
+		if (Operation.Command == TEXT("import_datatable_json"))
+		{
+			FCortexImportDatatableJsonMutationRequest Request;
+			OutError = FCortexDataMutationHelpers::ParseImportDatatableJsonParams(Params, Request);
+			if (!OutError.bSuccess)
+			{
+				return false;
+			}
+
+			OutValidatedOperation.ImportDatatableJsonPlan = MakeUnique<FCortexImportDatatableJsonMutationPlan>();
+			OutError = FCortexDataMutationHelpers::BuildImportDatatableJsonPlan(
+				Request,
+				*OutValidatedOperation.ImportDatatableJsonPlan);
+			return OutError.bSuccess;
+		}
+
+		if (Operation.Command == TEXT("update_string_table"))
+		{
+			FCortexUpdateStringTableMutationRequest Request;
+			OutError = FCortexDataMutationHelpers::ParseUpdateStringTableParams(Params, Request);
+			if (!OutError.bSuccess)
+			{
+				return false;
+			}
+
+			OutValidatedOperation.UpdateStringTablePlan = MakeUnique<FCortexUpdateStringTableMutationPlan>();
+			OutError = FCortexDataMutationHelpers::BuildUpdateStringTablePlan(
+				Request,
+				*OutValidatedOperation.UpdateStringTablePlan);
+			return OutError.bSuccess;
+		}
+
+		if (Operation.Command == TEXT("set_translation"))
+		{
+			FCortexSetTranslationMutationRequest Request;
+			OutError = FCortexDataMutationHelpers::ParseSetTranslationParams(Params, Request);
+			if (!OutError.bSuccess)
+			{
+				return false;
+			}
+
+			OutValidatedOperation.SetTranslationPlan = MakeUnique<FCortexSetTranslationMutationPlan>();
+			OutError = FCortexDataMutationHelpers::BuildSetTranslationPlan(
+				Request,
+				*OutValidatedOperation.SetTranslationPlan);
+			return OutError.bSuccess;
+		}
+
+		if (Operation.Command == TEXT("update_data_asset"))
+		{
+			FCortexUpdateDataAssetMutationRequest Request;
+			OutError = FCortexDataMutationHelpers::ParseUpdateDataAssetParams(Params, Request);
+			if (!OutError.bSuccess)
+			{
+				return false;
+			}
+
+			OutValidatedOperation.UpdateDataAssetPlan = MakeUnique<FCortexUpdateDataAssetMutationPlan>();
+			OutError = FCortexDataMutationHelpers::BuildUpdateDataAssetPlan(
+				Request,
+				*OutValidatedOperation.UpdateDataAssetPlan);
+			return OutError.bSuccess;
+		}
+
+		OutError = FCortexDataMutationResult::FromCommandResult(
+			FCortexCommandRouter::Error(
+				CortexErrorCodes::UnsupportedCommand,
+				FString::Printf(TEXT("Unsupported import operation command: %s"), *Operation.Command)));
+		return false;
+	}
+
+	void MergeQueryBackIntoApplyResult(
+		const FCortexDataMutationResult& QueryBackResult,
+		FCortexDataMutationResult& InOutApplyResult)
+	{
+		if (QueryBackResult.QueryBack.IsValid())
+		{
+			InOutApplyResult.QueryBack = QueryBackResult.QueryBack;
+		}
+
+		InOutApplyResult.Warnings.Append(QueryBackResult.Warnings);
+		InOutApplyResult.Errors.Append(QueryBackResult.Errors);
+		if (!QueryBackResult.bSuccess)
+		{
+			InOutApplyResult.bSuccess = false;
+		}
+	}
+
+	FCortexDataMutationResult ExecuteQueueOperationApply(
+		const FValidatedQueueOperation& ValidatedOperation,
+		const bool bQueryBack)
+	{
+		const FImportQueueOperation& Operation = ValidatedOperation.Operation;
+
+		if (Operation.Command == TEXT("update_datatable_row") && ValidatedOperation.UpdateDatatableRowPlan)
+		{
+			FCortexDataMutationResult ApplyResult =
+				FCortexDataMutationHelpers::ApplyUpdateDatatableRow(*ValidatedOperation.UpdateDatatableRowPlan);
+			if (ApplyResult.bSuccess && bQueryBack)
+			{
+				MergeQueryBackIntoApplyResult(
+					FCortexDataMutationHelpers::QueryBackUpdateDatatableRow(*ValidatedOperation.UpdateDatatableRowPlan),
+					ApplyResult);
+			}
+			return ApplyResult;
+		}
+
+		if (Operation.Command == TEXT("import_datatable_json") && ValidatedOperation.ImportDatatableJsonPlan)
+		{
+			FCortexDataMutationResult ApplyResult =
+				FCortexDataMutationHelpers::ApplyImportDatatableJson(*ValidatedOperation.ImportDatatableJsonPlan);
+			if (ApplyResult.bSuccess && bQueryBack)
+			{
+				MergeQueryBackIntoApplyResult(
+					FCortexDataMutationHelpers::QueryBackImportDatatableJson(*ValidatedOperation.ImportDatatableJsonPlan),
+					ApplyResult);
+			}
+			return ApplyResult;
+		}
+
+		if (Operation.Command == TEXT("update_string_table") && ValidatedOperation.UpdateStringTablePlan)
+		{
+			FCortexDataMutationResult ApplyResult =
+				FCortexDataMutationHelpers::ApplyUpdateStringTable(*ValidatedOperation.UpdateStringTablePlan);
+			if (ApplyResult.bSuccess && bQueryBack)
+			{
+				MergeQueryBackIntoApplyResult(
+					FCortexDataMutationHelpers::QueryBackUpdateStringTable(*ValidatedOperation.UpdateStringTablePlan),
+					ApplyResult);
+			}
+			return ApplyResult;
+		}
+
+		if (Operation.Command == TEXT("set_translation") && ValidatedOperation.SetTranslationPlan)
+		{
+			FCortexDataMutationResult ApplyResult =
+				FCortexDataMutationHelpers::ApplyUpdateStringTable(ValidatedOperation.SetTranslationPlan->UpdatePlan);
+			if (ApplyResult.bSuccess && bQueryBack)
+			{
+				MergeQueryBackIntoApplyResult(
+					FCortexDataMutationHelpers::QueryBackUpdateStringTable(ValidatedOperation.SetTranslationPlan->UpdatePlan),
+					ApplyResult);
+			}
+			return ApplyResult;
+		}
+
+		if (Operation.Command == TEXT("update_data_asset") && ValidatedOperation.UpdateDataAssetPlan)
+		{
+			FCortexDataMutationResult ApplyResult =
+				FCortexDataMutationHelpers::ApplyUpdateDataAsset(*ValidatedOperation.UpdateDataAssetPlan);
+			if (ApplyResult.bSuccess && bQueryBack)
+			{
+				MergeQueryBackIntoApplyResult(
+					FCortexDataMutationHelpers::QueryBackUpdateDataAsset(*ValidatedOperation.UpdateDataAssetPlan),
+					ApplyResult);
+			}
+			return ApplyResult;
+		}
+
+		return FCortexDataMutationResult::FromCommandResult(
+			FCortexCommandRouter::Error(
+				CortexErrorCodes::UnsupportedCommand,
+				FString::Printf(TEXT("Unsupported import operation command: %s"), *Operation.Command)));
+	}
+
 	TSharedPtr<FJsonObject> MakeOperationReportObject(
 		const FImportQueueOperation& Operation,
-		const FCortexDataMutationResult& Result)
+		const FCortexDataMutationResult& Result,
+		const FString& Status)
 	{
 		TSharedPtr<FJsonObject> OperationObject = MakeShared<FJsonObject>();
 		OperationObject->SetNumberField(TEXT("index"), Operation.Index);
 		OperationObject->SetStringField(TEXT("id"), Operation.Id);
 		OperationObject->SetStringField(TEXT("phase"), Operation.Phase);
 		OperationObject->SetStringField(TEXT("command"), Operation.Command);
-		OperationObject->SetStringField(TEXT("status"), Result.bSuccess ? TEXT("dry_run") : TEXT("failed"));
+		OperationObject->SetStringField(TEXT("status"), Status);
 
 		if (!Operation.SourcePage.IsEmpty())
 		{
 			OperationObject->SetStringField(TEXT("source_page"), Operation.SourcePage);
 		}
 
-		if (!Result.Target.IsEmpty())
+		FString Target = Result.Target;
+		if (Operation.Command == TEXT("set_translation") && Operation.Params.IsValid())
 		{
-			OperationObject->SetStringField(TEXT("target"), Result.Target);
+			FString StringTablePath;
+			FString Key;
+			if (Operation.Params->TryGetStringField(TEXT("string_table_path"), StringTablePath)
+				&& Operation.Params->TryGetStringField(TEXT("key"), Key))
+			{
+				Target = FString::Printf(TEXT("%s:%s"), *StringTablePath, *Key);
+			}
+		}
+
+		if (!Target.IsEmpty())
+		{
+			OperationObject->SetStringField(TEXT("target"), Target);
 		}
 
 		if (Result.PublicData.IsValid())
 		{
 			OperationObject->SetObjectField(TEXT("result"), Result.PublicData);
+		}
+
+		if (Result.QueryBack.IsValid())
+		{
+			OperationObject->SetObjectField(TEXT("query_back"), Result.QueryBack);
 		}
 
 		if (Result.Warnings.Num() > 0)
@@ -617,16 +843,20 @@ namespace
 		const FString& RequestedReportPath,
 		const FString& CanonicalReportPath,
 		const FString& OpsHash,
+		const FString& Status,
+		const bool bSuccess,
+		const bool bPartial,
+		const bool bApplied,
 		const TArray<TSharedPtr<FJsonValue>>& OperationValues)
 	{
 		TSharedRef<FJsonObject> Report = MakeShared<FJsonObject>();
 		Report->SetNumberField(TEXT("schema_version"), Queue.SchemaVersion);
 		Report->SetStringField(TEXT("queue_id"), Queue.QueueId);
-		Report->SetStringField(TEXT("status"), Counts.FailedCount == 0 ? StatusDryRunOk : StatusPreflightFailed);
-		Report->SetBoolField(TEXT("success"), Counts.FailedCount == 0);
-		Report->SetBoolField(TEXT("partial"), false);
+		Report->SetStringField(TEXT("status"), Status);
+		Report->SetBoolField(TEXT("success"), bSuccess);
+		Report->SetBoolField(TEXT("partial"), bPartial);
 		Report->SetBoolField(TEXT("dry_run"), Flags.bDryRun);
-		Report->SetBoolField(TEXT("applied"), false);
+		Report->SetBoolField(TEXT("applied"), bApplied);
 		Report->SetStringField(TEXT("report_path"), RequestedReportPath);
 		Report->SetStringField(TEXT("canonical_report_path"), CanonicalReportPath);
 		Report->SetStringField(TEXT("ops_sha256"), OpsHash);
@@ -645,15 +875,20 @@ namespace
 
 	TSharedRef<FJsonObject> BuildCompactSummary(
 		const FImportQueueCounts& Counts,
+		const FString& Status,
+		const bool bSuccess,
+		const bool bPartial,
+		const bool bDryRun,
+		const bool bApplied,
 		const FString& RequestedReportPath,
 		const FString& CanonicalReportPath)
 	{
 		TSharedRef<FJsonObject> Summary = MakeShared<FJsonObject>();
-		Summary->SetStringField(TEXT("status"), StatusDryRunOk);
-		Summary->SetBoolField(TEXT("success"), true);
-		Summary->SetBoolField(TEXT("partial"), false);
-		Summary->SetBoolField(TEXT("dry_run"), true);
-		Summary->SetBoolField(TEXT("applied"), false);
+		Summary->SetStringField(TEXT("status"), Status);
+		Summary->SetBoolField(TEXT("success"), bSuccess);
+		Summary->SetBoolField(TEXT("partial"), bPartial);
+		Summary->SetBoolField(TEXT("dry_run"), bDryRun);
+		Summary->SetBoolField(TEXT("applied"), bApplied);
 		Summary->SetStringField(TEXT("report_path"), RequestedReportPath);
 		Summary->SetStringField(TEXT("canonical_report_path"), CanonicalReportPath);
 		SetCountFields(Summary, Counts);
@@ -725,18 +960,100 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 	Counts.OperationCount = Queue.Operations.Num();
 
 	TArray<TSharedPtr<FJsonValue>> OperationValues;
+	if (Flags.bDryRun)
+	{
+		for (const FImportQueueOperation& Operation : Queue.Operations)
+		{
+			FCortexDataMutationResult PreviewResult = ExecuteQueueOperationPreview(Operation, Flags);
+			if (PreviewResult.bSuccess)
+			{
+				++Counts.ValidatedCount;
+				++Counts.PreviewedCount;
+				if (PreviewResult.bChanged)
+				{
+					++Counts.ChangedCount;
+				}
+				if (PreviewResult.bNoOp)
+				{
+					++Counts.NoOpCount;
+				}
+			}
+			else
+			{
+				++Counts.FailedCount;
+				Counts.ErrorCount += PreviewResult.Errors.Num() > 0 ? PreviewResult.Errors.Num() : 1;
+			}
+
+			Counts.WarningCount += PreviewResult.Warnings.Num();
+			OperationValues.Add(MakeShared<FJsonValueObject>(MakeOperationReportObject(Operation, PreviewResult, PreviewResult.bSuccess ? TEXT("dry_run") : TEXT("failed"))));
+		}
+
+		TSharedRef<FJsonObject> Report = BuildReport(
+			Queue,
+			Flags,
+			Counts,
+			ReportPath,
+			ResolvedReportPath.AbsolutePath,
+			OpsHash,
+			Counts.FailedCount == 0 ? StatusDryRunOk : StatusPreflightFailed,
+			Counts.FailedCount == 0,
+			false,
+			false,
+			OperationValues);
+
+		FCortexJsonFileWriteResult WriteResult = FCortexSafeFileContract::WriteJsonReportAtomic(ResolvedReportPath, Report);
+		if (!WriteResult.bWritten)
+		{
+			return FCortexCommandRouter::Error(WriteResult.ErrorCode, WriteResult.ErrorMessage);
+		}
+
+		if (Counts.FailedCount > 0)
+		{
+			return FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidOperation,
+				TEXT("One or more import queue operations failed dry-run validation"),
+				Report);
+		}
+
+		return FCortexCommandRouter::Success(
+			BuildCompactSummary(
+				Counts,
+				StatusDryRunOk,
+				true,
+				false,
+				true,
+				false,
+				ReportPath,
+				ResolvedReportPath.AbsolutePath));
+	}
+
+	TArray<FValidatedQueueOperation> ValidatedOperations;
+	ValidatedOperations.Reserve(Queue.Operations.Num());
 	for (const FImportQueueOperation& Operation : Queue.Operations)
 	{
-		FCortexDataMutationResult PreviewResult = ExecuteQueueOperationPreview(Operation, Flags);
-		if (PreviewResult.bSuccess)
+		FValidatedQueueOperation ValidatedOperation;
+		FCortexDataMutationResult ValidationResult;
+		if (!BuildValidatedQueueOperation(Operation, Flags, ValidatedOperation, ValidationResult))
 		{
-			++Counts.ValidatedCount;
-			++Counts.PreviewedCount;
-			if (PreviewResult.bChanged)
+			return ValidationResult.ToCommandResult();
+		}
+
+		++Counts.ValidatedCount;
+		ValidatedOperations.Add(MoveTemp(ValidatedOperation));
+	}
+
+	for (const FValidatedQueueOperation& ValidatedOperation : ValidatedOperations)
+	{
+		FCortexDataMutationResult ApplyResult = ExecuteQueueOperationApply(ValidatedOperation, Flags.bQueryBack);
+		++Counts.AttemptedCount;
+		if (ApplyResult.bSuccess)
+		{
+			++Counts.AppliedCount;
+			if (ApplyResult.bChanged)
 			{
 				++Counts.ChangedCount;
 			}
-			if (PreviewResult.bNoOp)
+			if (ApplyResult.bNoOp)
 			{
 				++Counts.NoOpCount;
 			}
@@ -744,11 +1061,22 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 		else
 		{
 			++Counts.FailedCount;
-			Counts.ErrorCount += PreviewResult.Errors.Num() > 0 ? PreviewResult.Errors.Num() : 1;
+			Counts.ErrorCount += ApplyResult.Errors.Num() > 0 ? ApplyResult.Errors.Num() : 1;
 		}
 
-		Counts.WarningCount += PreviewResult.Warnings.Num();
-		OperationValues.Add(MakeShared<FJsonValueObject>(MakeOperationReportObject(Operation, PreviewResult)));
+		Counts.WarningCount += ApplyResult.Warnings.Num();
+		if (ApplyResult.bSaveRequested)
+		{
+			++Counts.SaveRequestedCount;
+		}
+		if (ApplyResult.bSaved)
+		{
+			++Counts.SavedCount;
+		}
+		OperationValues.Add(MakeShared<FJsonValueObject>(MakeOperationReportObject(
+			ValidatedOperation.Operation,
+			ApplyResult,
+			ApplyResult.bSuccess ? TEXT("applied") : TEXT("failed"))));
 	}
 
 	TSharedRef<FJsonObject> Report = BuildReport(
@@ -758,6 +1086,10 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 		ReportPath,
 		ResolvedReportPath.AbsolutePath,
 		OpsHash,
+		Counts.FailedCount == 0 ? TEXT("applied_ok") : TEXT("runtime_failed"),
+		Counts.FailedCount == 0,
+		false,
+		true,
 		OperationValues);
 
 	FCortexJsonFileWriteResult WriteResult = FCortexSafeFileContract::WriteJsonReportAtomic(ResolvedReportPath, Report);
@@ -770,9 +1102,18 @@ FCortexCommandResult FCortexDataImportQueueOps::ApplyImportOpsJson(const TShared
 	{
 		return FCortexCommandRouter::Error(
 			CortexErrorCodes::InvalidOperation,
-			TEXT("One or more import queue operations failed dry-run validation"),
+			TEXT("One or more import queue operations failed during apply"),
 			Report);
 	}
 
-	return FCortexCommandRouter::Success(BuildCompactSummary(Counts, ReportPath, ResolvedReportPath.AbsolutePath));
+	return FCortexCommandRouter::Success(
+		BuildCompactSummary(
+			Counts,
+			TEXT("applied_ok"),
+			true,
+			false,
+			false,
+			true,
+			ReportPath,
+			ResolvedReportPath.AbsolutePath));
 }
