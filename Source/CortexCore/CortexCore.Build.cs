@@ -9,6 +9,7 @@ public class CortexCore : ModuleRules
         PublicDependencyModuleNames.AddRange(new string[]
         {
             "Core",
+            "Json",
         });
 
         PrivateDependencyModuleNames.AddRange(new string[]
@@ -19,7 +20,6 @@ public class CortexCore : ModuleRules
             "Projects",
             "Sockets",
             "Networking",
-            "Json",
             "JsonUtilities",
             "GameplayTags",
             "UnrealEd",
@@ -36,5 +36,7 @@ public class CortexCore : ModuleRules
         {
             PrivateDependencyModuleNames.Add("StructUtils");
         }
+
+        AddEngineThirdPartyPrivateStaticDependencies(Target, "OpenSSL");
     }
 }
