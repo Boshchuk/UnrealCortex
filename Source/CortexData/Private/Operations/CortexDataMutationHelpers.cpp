@@ -1252,8 +1252,15 @@ FCortexDataMutationResult FCortexDataMutationHelpers::BuildImportDatatableJsonPl
 {
 	check(IsInGameThread());
 
-	OutPlan = FCortexImportDatatableJsonMutationPlan();
+	OutPlan.ReleaseValidatedRows();
 	OutPlan.Request = Request;
+	OutPlan.DataTable = nullptr;
+	OutPlan.RowStruct = nullptr;
+	OutPlan.CreatedCount = 0;
+	OutPlan.UpdatedCount = 0;
+	OutPlan.SkippedCount = 0;
+	OutPlan.Warnings.Reset();
+	OutPlan.bWouldMutate = false;
 
 	FCortexCommandResult LoadError;
 	UDataTable* DataTable = FCortexDataTableOps::LoadDataTable(Request.TablePath, LoadError);
@@ -1281,9 +1288,16 @@ FCortexDataMutationResult FCortexDataMutationHelpers::BuildImportDatatableJsonPl
 			FString::Printf(TEXT("DataTable has no row struct: %s"), *Request.TablePath));
 	}
 
+	OutPlan.RowStruct = RowStruct;
+
 	TArray<FString> Errors;
 	TMap<FName, int32> ValidatedRowIndexByName;
 	TSet<FName> PendingRowNames;
+	TSet<FName> FinalRowNames;
+	for (const TPair<FName, uint8*>& ExistingRow : DataTable->GetRowMap())
+	{
+		FinalRowNames.Add(ExistingRow.Key);
+	}
 
 	for (int32 Index = 0; Index < Request.Rows.Num(); ++Index)
 	{
@@ -1361,6 +1375,29 @@ FCortexDataMutationResult FCortexDataMutationHelpers::BuildImportDatatableJsonPl
 			++OutPlan.CreatedCount;
 		}
 
+		bool bRowWouldMutate = !bRowExists;
+		if (bRowExists)
+		{
+			const uint8* ComparableExistingRow = nullptr;
+			if (bHasPendingMemory)
+			{
+				ComparableExistingRow = OutPlan.ValidatedRows[*PendingRowIndex].RowMemory;
+			}
+			else if (ExistingRow != nullptr)
+			{
+				ComparableExistingRow = ExistingRow;
+			}
+
+			if (ComparableExistingRow != nullptr)
+			{
+				bRowWouldMutate = !CortexDataMutationHelpersPrivate::JsonValuesEqual(
+					MakeShared<FJsonValueObject>(FCortexSerializer::StructToJson(RowStruct, ComparableExistingRow).ToSharedRef()),
+					MakeShared<FJsonValueObject>(FCortexSerializer::StructToJson(RowStruct, TempMemory).ToSharedRef()));
+			}
+		}
+		OutPlan.bWouldMutate = OutPlan.bWouldMutate || bRowWouldMutate;
+		FinalRowNames.Add(EntryRowFName);
+
 		if (!Request.bDryRun)
 		{
 			if (bHasPendingMemory && Request.Mode == TEXT("upsert"))
@@ -1400,7 +1437,25 @@ FCortexDataMutationResult FCortexDataMutationHelpers::BuildImportDatatableJsonPl
 
 	OutPlan.DataTable = DataTable;
 	OutPlan.RowStruct = RowStruct;
-	OutPlan.bWouldMutate = OutPlan.CreatedCount > 0 || OutPlan.UpdatedCount > 0 || Request.Mode == TEXT("replace");
+	if (Request.Mode == TEXT("replace"))
+	{
+		const TMap<FName, uint8*>& ExistingRows = DataTable->GetRowMap();
+		if (ExistingRows.Num() != FinalRowNames.Num())
+		{
+			OutPlan.bWouldMutate = true;
+		}
+		else
+		{
+			for (const TPair<FName, uint8*>& ExistingRow : ExistingRows)
+			{
+				if (!FinalRowNames.Contains(ExistingRow.Key))
+				{
+					OutPlan.bWouldMutate = true;
+					break;
+				}
+			}
+		}
+	}
 	return MakeSuccess();
 }
 

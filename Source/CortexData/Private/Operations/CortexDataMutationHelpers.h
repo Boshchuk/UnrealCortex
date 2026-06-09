@@ -113,6 +113,11 @@ struct FCortexImportDatatableJsonMutationPlan
 	TArray<FValidatedRow> ValidatedRows;
 	bool bWouldMutate = false;
 
+	FCortexImportDatatableJsonMutationPlan() = default;
+	FCortexImportDatatableJsonMutationPlan(const FCortexImportDatatableJsonMutationPlan&) = delete;
+	FCortexImportDatatableJsonMutationPlan& operator=(const FCortexImportDatatableJsonMutationPlan&) = delete;
+	FCortexImportDatatableJsonMutationPlan(FCortexImportDatatableJsonMutationPlan&&) = delete;
+	FCortexImportDatatableJsonMutationPlan& operator=(FCortexImportDatatableJsonMutationPlan&&) = delete;
 	~FCortexImportDatatableJsonMutationPlan();
 	void ReleaseValidatedRows();
 };

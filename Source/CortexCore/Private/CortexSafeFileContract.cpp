@@ -10,11 +10,7 @@
 
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
-#endif
-THIRD_PARTY_INCLUDES_START
-#include <openssl/evp.h>
-THIRD_PARTY_INCLUDES_END
-#if PLATFORM_WINDOWS
+#include <bcrypt.h>
 #include "Windows/HideWindowsPlatformTypes.h"
 #endif
 
@@ -526,28 +522,66 @@ bool FCortexSafeFileContract::HashFileBytesSha256(
 		return false;
 	}
 
-	uint8 Digest[EVP_MAX_MD_SIZE];
-	unsigned int DigestLength = 0;
-	if (EVP_Digest(
+#if PLATFORM_WINDOWS
+	uint8 Digest[32];
+	BCRYPT_ALG_HANDLE AlgorithmHandle = nullptr;
+	BCRYPT_HASH_HANDLE HashHandle = nullptr;
+	const NTSTATUS OpenStatus = BCryptOpenAlgorithmProvider(
+		&AlgorithmHandle,
+		BCRYPT_SHA256_ALGORITHM,
+		nullptr,
+		0);
+	if (OpenStatus < 0 || AlgorithmHandle == nullptr)
+	{
+		OutErrorCode = CortexErrorCodes::InvalidOperation;
+		OutErrorMessage = FString::Printf(TEXT("Failed to initialize SHA-256 provider for file: %s"), *VerifiedPath.AbsolutePath);
+		return false;
+	}
+
+	const NTSTATUS CreateStatus = BCryptCreateHash(
+		AlgorithmHandle,
+		&HashHandle,
+		nullptr,
+		0,
+		nullptr,
+		0,
+		0);
+	if (CreateStatus < 0 || HashHandle == nullptr)
+	{
+		BCryptCloseAlgorithmProvider(AlgorithmHandle, 0);
+		OutErrorCode = CortexErrorCodes::InvalidOperation;
+		OutErrorMessage = FString::Printf(TEXT("Failed to create SHA-256 hash for file: %s"), *VerifiedPath.AbsolutePath);
+		return false;
+	}
+
+	const NTSTATUS HashDataStatus = BCryptHashData(
+		HashHandle,
 		Bytes.GetData(),
-		static_cast<size_t>(Bytes.Num()),
-		Digest,
-		&DigestLength,
-		EVP_sha256(),
-		nullptr) != 1
-		|| DigestLength != 32)
+		static_cast<ULONG>(Bytes.Num()),
+		0);
+	const NTSTATUS FinishStatus = HashDataStatus < 0
+		? HashDataStatus
+		: BCryptFinishHash(HashHandle, Digest, static_cast<ULONG>(sizeof(Digest)), 0);
+	BCryptDestroyHash(HashHandle);
+	BCryptCloseAlgorithmProvider(AlgorithmHandle, 0);
+	if (FinishStatus < 0)
 	{
 		OutErrorCode = CortexErrorCodes::InvalidOperation;
 		OutErrorMessage = FString::Printf(TEXT("Failed to hash file: %s"), *VerifiedPath.AbsolutePath);
 		return false;
 	}
 
-	OutHash.Reset(static_cast<int32>(DigestLength) * 2);
-	for (uint32 Index = 0; Index < DigestLength; ++Index)
+	OutHash.Reset(static_cast<int32>(sizeof(Digest)) * 2);
+	for (const uint8 Byte : Digest)
 	{
-		OutHash += FString::Printf(TEXT("%02x"), static_cast<int32>(Digest[Index]));
+		OutHash += FString::Printf(TEXT("%02x"), static_cast<int32>(Byte));
 	}
 	return true;
+#else
+	OutErrorCode = CortexErrorCodes::InvalidOperation;
+	OutErrorMessage = FString::Printf(TEXT("SHA-256 hashing is not implemented on this platform: %s"), *VerifiedPath.AbsolutePath);
+	return false;
+#endif
 }
 
 FString FCortexSafeFileContract::SerializeCanonicalJson(const TSharedRef<FJsonObject>& Payload)

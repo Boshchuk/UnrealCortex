@@ -37,6 +37,9 @@ public class CortexCore : ModuleRules
             PrivateDependencyModuleNames.Add("StructUtils");
         }
 
-        AddEngineThirdPartyPrivateStaticDependencies(Target, "OpenSSL");
+        if (Target.Platform == UnrealTargetPlatform.Win64)
+        {
+            PublicSystemLibraries.Add("bcrypt.lib");
+        }
     }
 }

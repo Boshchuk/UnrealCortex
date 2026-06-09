@@ -1,6 +1,7 @@
 #include "CoreMinimal.h"
 #include "CortexCommandRouter.h"
 #include "CortexDataCommandHandler.h"
+#include "CortexSerializer.h"
 #include "CortexTypes.h"
 #include "Operations/CortexDataMutationHelpers.h"
 #include "Tests/CortexDataLocalizationTestTypes.h"
@@ -424,6 +425,69 @@ bool FCortexDataImportQueueHelperParityUpdateDataAssetNoOpMetadataTest::RunTest(
 	TestFalse(TEXT("no-op DataAsset apply does not report changed"), ApplyResult.bChanged);
 	TestTrue(TEXT("no-op DataAsset apply reports no-op"), ApplyResult.bNoOp);
 	TestEqual(TEXT("no-op DataAsset apply keeps property unchanged"), DataAsset->TestProperty, TEXT("Same Value"));
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataImportQueueHelperParityImportDatatableJsonNoOpMetadataTest,
+	"Cortex.Data.ImportQueue.HelperParity.ImportDatatableJsonNoOpMetadata",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataImportQueueHelperParityImportDatatableJsonNoOpMetadataTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataImportQueueTestFixture Fixture;
+	UDataTable* DataTable = Fixture.CreateRegularDataTable();
+	TestNotNull(TEXT("regular DataTable fixture is created"), DataTable);
+	if (DataTable == nullptr)
+	{
+		return false;
+	}
+
+	const UScriptStruct* RowStruct = DataTable->GetRowStruct();
+	const uint8* ExistingRow = DataTable->FindRowUnchecked(TEXT("alpha"));
+	TestNotNull(TEXT("alpha row exists before import"), ExistingRow);
+	if (RowStruct == nullptr || ExistingRow == nullptr)
+	{
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> RowData = FCortexSerializer::StructToJson(RowStruct, ExistingRow);
+	TestTrue(TEXT("existing row serializes for import no-op test"), RowData.IsValid());
+	if (!RowData.IsValid())
+	{
+		return false;
+	}
+
+	TSharedRef<FJsonObject> Row = MakeShared<FJsonObject>();
+	Row->SetStringField(TEXT("row_name"), TEXT("alpha"));
+	Row->SetObjectField(TEXT("row_data"), RowData);
+
+	FCortexImportDatatableJsonMutationRequest Request;
+	Request.TablePath = DataTable->GetPathName();
+	Request.Rows.Add(MakeShared<FJsonValueObject>(Row));
+	Request.Mode = TEXT("upsert");
+	Request.bDryRun = false;
+
+	FCortexImportDatatableJsonMutationPlan Plan;
+	FCortexDataMutationResult BuildResult = FCortexDataMutationHelpers::BuildImportDatatableJsonPlan(Request, Plan);
+	TestTrue(TEXT("identical upsert DataTable import plan builds"), BuildResult.bSuccess);
+	if (!BuildResult.bSuccess)
+	{
+		if (BuildResult.Errors.Num() > 0)
+		{
+			AddError(BuildResult.Errors[0].Message);
+		}
+		return false;
+	}
+
+	FCortexDataMutationResult ApplyResult = FCortexDataMutationHelpers::ApplyImportDatatableJson(Plan);
+	TestTrue(TEXT("identical upsert DataTable import applies successfully"), ApplyResult.bSuccess);
+	TestFalse(TEXT("identical upsert DataTable import does not report changed"), ApplyResult.bChanged);
+	TestTrue(TEXT("identical upsert DataTable import reports no-op"), ApplyResult.bNoOp);
 
 	return true;
 }
