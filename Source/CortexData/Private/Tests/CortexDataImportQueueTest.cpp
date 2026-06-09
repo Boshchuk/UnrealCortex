@@ -1,6 +1,7 @@
 #include "CoreMinimal.h"
 #include "CortexCommandRouter.h"
 #include "CortexDataCommandHandler.h"
+#include "CortexSafeFileContract.h"
 #include "CortexSerializer.h"
 #include "CortexTypes.h"
 #include "Operations/CortexDataMutationHelpers.h"
@@ -15,8 +16,12 @@
 #include "Internationalization/StringTable.h"
 #include "Internationalization/StringTableCore.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
+#include "Misc/Paths.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "UObject/UObjectHash.h"
 
 namespace
@@ -151,6 +156,76 @@ namespace
 			return Table;
 		}
 
+		FCortexCommandRouter CreateRouter() const
+		{
+			return CreateDataImportQueueTestRouter();
+		}
+
+		FString MakeSavedOutputPath(const FString& FileName) const
+		{
+			return FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexImportQueueTests"), RunId, FileName);
+		}
+
+		void WriteQueueFile(const FString& FilePath, const FString& QueueId, const TArray<TSharedRef<FJsonObject>>& Operations) const
+		{
+			TSharedRef<FJsonObject> Queue = MakeShared<FJsonObject>();
+			Queue->SetNumberField(TEXT("schema_version"), 1);
+			Queue->SetStringField(TEXT("queue_id"), QueueId);
+			Queue->SetStringField(TEXT("domain"), TEXT("test"));
+			Queue->SetBoolField(TEXT("valid"), true);
+			Queue->SetStringField(TEXT("generator"), TEXT("CortexDataImportQueueTest"));
+
+			TArray<TSharedPtr<FJsonValue>> OperationValues;
+			for (const TSharedRef<FJsonObject>& Operation : Operations)
+			{
+				OperationValues.Add(MakeShared<FJsonValueObject>(Operation));
+			}
+			Queue->SetArrayField(TEXT("operations"), OperationValues);
+
+			const FString Contents = FCortexSafeFileContract::SerializeCanonicalJson(Queue);
+			IFileManager::Get().MakeDirectory(*FPaths::GetPath(FilePath), true);
+			FFileHelper::SaveStringToFile(Contents, *FilePath);
+		}
+
+		TSharedRef<FJsonObject> MakeUpdateRowOperation(
+			const FString& Id,
+			const FString& TablePath,
+			const FString& RowName,
+			const TSharedRef<FJsonObject>& RowData) const
+		{
+			TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+			Params->SetStringField(TEXT("table_path"), TablePath);
+			Params->SetStringField(TEXT("row_name"), RowName);
+			Params->SetObjectField(TEXT("row_data"), RowData);
+
+			TSharedRef<FJsonObject> Operation = MakeShared<FJsonObject>();
+			Operation->SetStringField(TEXT("id"), Id);
+			Operation->SetStringField(TEXT("phase"), TEXT("apply"));
+			Operation->SetStringField(TEXT("command"), TEXT("update_datatable_row"));
+			Operation->SetObjectField(TEXT("params"), Params);
+			Operation->SetStringField(TEXT("source_page"), TEXT("DesignWiki/Test.md"));
+			return Operation;
+		}
+
+		bool TryReadJsonFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutJson, FString& OutError) const
+		{
+			FString Contents;
+			if (!FFileHelper::LoadFileToString(Contents, *FilePath))
+			{
+				OutError = FString::Printf(TEXT("Failed to read JSON file: %s"), *FilePath);
+				return false;
+			}
+
+			TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Contents);
+			if (!FJsonSerializer::Deserialize(Reader, OutJson) || !OutJson.IsValid())
+			{
+				OutError = FString::Printf(TEXT("Failed to parse JSON file: %s"), *FilePath);
+				return false;
+			}
+
+			return true;
+		}
+
 		void Cleanup()
 		{
 			for (int32 Index = CreatedPackageNames.Num() - 1; Index >= 0; --Index)
@@ -158,6 +233,7 @@ namespace
 				CleanupImportQueuePackageByName(CreatedPackageNames[Index]);
 			}
 			CreatedPackageNames.Empty();
+			IFileManager::Get().DeleteDirectory(*FPaths::GetPath(MakeSavedOutputPath(TEXT("cleanup.json"))), false, true);
 		}
 
 	private:
@@ -213,6 +289,78 @@ bool FCortexDataImportQueueCommandsRegisteredTest::RunTest(const FString& Parame
 	TestFalse(TEXT("missing ops file fails"), Result.bSuccess);
 	TestEqual(TEXT("missing ops file returns FileNotFound"), Result.ErrorCode, CortexErrorCodes::FileNotFound);
 	TestNotEqual(TEXT("missing ops file is not UnknownCommand"), Result.ErrorCode, CortexErrorCodes::UnknownCommand);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataImportQueueDryRunDefaultWritesReportTest,
+	"Cortex.Data.ImportQueue.DryRunDefaultWritesReport",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexDataImportQueueDryRunDefaultWritesReportTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataImportQueueTestFixture Fixture;
+	UDataTable* Table = Fixture.CreateRegularDataTable();
+	TestNotNull(TEXT("DataTable fixture is created"), Table);
+	if (Table == nullptr)
+	{
+		return false;
+	}
+
+	const FString OpsPath = Fixture.MakeSavedOutputPath(TEXT("queue.json"));
+	const FString ReportPath = Fixture.MakeSavedOutputPath(TEXT("report.json"));
+	TSharedRef<FJsonObject> RowData = MakeShared<FJsonObject>();
+	RowData->SetStringField(TEXT("row_name"), TEXT("Imported Alpha"));
+	Fixture.WriteQueueFile(
+		OpsPath,
+		TEXT("queue-dry-run"),
+		{ Fixture.MakeUpdateRowOperation(TEXT("op.update.row_name"), Table->GetPathName(), TEXT("alpha"), RowData) });
+
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("ops_path"), OpsPath);
+	Params->SetStringField(TEXT("report_path"), ReportPath);
+
+	const FCortexCommandResult Result = Fixture.CreateRouter().Execute(TEXT("data.apply_import_ops_json"), Params);
+	TestTrue(TEXT("dry-run queue succeeds"), Result.bSuccess);
+	TestTrue(TEXT("dry-run queue returns data"), Result.Data.IsValid());
+	if (!Result.bSuccess || !Result.Data.IsValid())
+	{
+		if (!Result.ErrorMessage.IsEmpty())
+		{
+			AddError(Result.ErrorMessage);
+		}
+		return false;
+	}
+
+	TestEqual(TEXT("status is dry_run_ok"), Result.Data->GetStringField(TEXT("status")), TEXT("dry_run_ok"));
+	TestTrue(TEXT("dry_run defaults true"), Result.Data->GetBoolField(TEXT("dry_run")));
+	TestFalse(TEXT("applied is false"), Result.Data->GetBoolField(TEXT("applied")));
+	TestFalse(TEXT("MCP summary omits operations array"), Result.Data->HasField(TEXT("operations")));
+	TestTrue(TEXT("report file is written"), IFileManager::Get().FileExists(*ReportPath));
+
+	TSharedPtr<FJsonObject> Report;
+	FString ParseError;
+	TestTrue(TEXT("report parses"), Fixture.TryReadJsonFile(ReportPath, Report, ParseError));
+	if (Report.IsValid())
+	{
+		TestEqual(TEXT("report queue_id matches"), Report->GetStringField(TEXT("queue_id")), TEXT("queue-dry-run"));
+		TestEqual(TEXT("report operation_count"), static_cast<int32>(Report->GetNumberField(TEXT("operation_count"))), 1);
+		TestEqual(TEXT("report previewed_count"), static_cast<int32>(Report->GetNumberField(TEXT("previewed_count"))), 1);
+		TestTrue(TEXT("report contains operations array"), Report->HasTypedField<EJson::Array>(TEXT("operations")));
+		TestTrue(TEXT("report contains ops hash"), Report->HasTypedField<EJson::String>(TEXT("ops_sha256")));
+	}
+
+	const FCortexDataLocalizationTestRow* Row =
+		reinterpret_cast<const FCortexDataLocalizationTestRow*>(Table->FindRowUnchecked(TEXT("alpha")));
+	TestNotNull(TEXT("row still exists after dry run"), Row);
+	if (Row != nullptr)
+	{
+		TestNotEqual(TEXT("dry-run does not mutate row field"), Row->row_name, TEXT("Imported Alpha"));
+	}
 
 	return true;
 }
