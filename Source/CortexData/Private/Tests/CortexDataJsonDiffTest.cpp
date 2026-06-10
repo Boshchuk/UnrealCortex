@@ -192,12 +192,34 @@ namespace
 			return FFileHelper::SaveStringToFile(Contents, *OutputPath) ? OutputPath : TEXT("");
 		}
 
+		TSharedPtr<FJsonObject> ReadJsonFile(const FString& FilePath) const
+		{
+			FString Contents;
+			if (!FFileHelper::LoadFileToString(Contents, *FilePath))
+			{
+				return nullptr;
+			}
+
+			TSharedPtr<FJsonObject> JsonObject;
+			TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Contents);
+			return FJsonSerializer::Deserialize(Reader, JsonObject) ? JsonObject : nullptr;
+		}
+
+		TArray<uint8> ReadFileBytes(const FString& FilePath) const
+		{
+			TArray<uint8> Bytes;
+			FFileHelper::LoadFileToArray(Bytes, *FilePath);
+			return Bytes;
+		}
+
 		FCortexCommandResult CompareJson(
 			const FString& LeftPath,
 			const FString& RightPath,
 			const FString& ReportPath,
 			const FString& Mode,
-			const FString& KeyField = TEXT("")) const
+			const FString& KeyField = TEXT(""),
+			const TArray<FString>& IgnoreFields = TArray<FString>(),
+			const bool bIncludeEqual = false) const
 		{
 			TSharedPtr<FJsonObject> ParamsObject = MakeShared<FJsonObject>();
 			ParamsObject->SetStringField(TEXT("left_path"), LeftPath);
@@ -210,6 +232,19 @@ namespace
 			if (!KeyField.IsEmpty())
 			{
 				ParamsObject->SetStringField(TEXT("key_field"), KeyField);
+			}
+			if (IgnoreFields.Num() > 0)
+			{
+				TArray<TSharedPtr<FJsonValue>> IgnoreFieldValues;
+				for (const FString& IgnoreField : IgnoreFields)
+				{
+					IgnoreFieldValues.Add(MakeShared<FJsonValueString>(IgnoreField));
+				}
+				ParamsObject->SetArrayField(TEXT("ignore_fields"), IgnoreFieldValues);
+			}
+			if (bIncludeEqual)
+			{
+				ParamsObject->SetBoolField(TEXT("include_equal"), true);
 			}
 			return CreateDataJsonDiffTestRouter().Execute(TEXT("data.compare_data_json"), ParamsObject);
 		}
@@ -319,6 +354,24 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexDataJsonDiffDuplicateKeysFailTest,
 	"Cortex.Data.JsonDiff.External.DuplicateKeys",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataJsonDiffIgnoreFieldsTest,
+	"Cortex.Data.JsonDiff.Semantics.IgnoreFields",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataJsonDiffIncludeEqualTest,
+	"Cortex.Data.JsonDiff.Semantics.IncludeEqual",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataJsonDiffNullPresenceFlagsTest,
+	"Cortex.Data.JsonDiff.Semantics.NullPresenceFlags",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
@@ -521,5 +574,123 @@ bool FCortexDataJsonDiffDuplicateKeysFailTest::RunTest(const FString& Parameters
 	const FCortexCommandResult Result = Fixture.CompareJson(LeftPath, RightPath, ReportPath, TEXT("datatable_rows"), TEXT("id"));
 	TestFalse(TEXT("duplicate keys fail"), Result.bSuccess);
 	TestEqual(TEXT("duplicate keys use InvalidField"), Result.ErrorCode, CortexErrorCodes::InvalidField);
+	return true;
+}
+
+bool FCortexDataJsonDiffIgnoreFieldsTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataJsonDiffTestFixture Fixture;
+	const FString LeftPath = Fixture.WriteJsonFile(TEXT("left.json"), TEXT(R"([{"id":"QuestA","Priority":26,"Title":"Stable"}])"));
+	const FString RightPath = Fixture.WriteJsonFile(TEXT("right.json"), TEXT(R"([{"id":"QuestA","Priority":28,"Title":"Stable"}])"));
+	const FString ReportPath = Fixture.MakeSavedPath(TEXT("report.json"));
+
+	const FCortexCommandResult Result = Fixture.CompareJson(
+		LeftPath,
+		RightPath,
+		ReportPath,
+		TEXT("datatable_rows"),
+		TEXT("id"),
+		TArray<FString>{ TEXT("Priority") });
+
+	TestTrue(TEXT("ignore_fields compare succeeds"), Result.bSuccess);
+	TestTrue(TEXT("summary has shared fields"), Result.Data.IsValid()
+		&& Result.Data->HasTypedField<EJson::Boolean>(TEXT("success"))
+		&& Result.Data->HasTypedField<EJson::Array>(TEXT("files_written"))
+		&& Result.Data->HasTypedField<EJson::Array>(TEXT("targets_touched"))
+		&& Result.Data->HasTypedField<EJson::Object>(TEXT("counts")));
+	if (!Result.bSuccess || !Result.Data.IsValid())
+	{
+		return false;
+	}
+
+	TestEqual(
+		TEXT("ignore_fields suppresses change"),
+		static_cast<int32>(Result.Data->GetObjectField(TEXT("counts"))->GetNumberField(TEXT("changed"))),
+		0);
+	return true;
+}
+
+bool FCortexDataJsonDiffIncludeEqualTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataJsonDiffTestFixture Fixture;
+	const FString LeftPath = Fixture.WriteJsonFile(TEXT("left.json"), TEXT(R"([{"id":"QuestA","Meta":{"b":2,"a":1}}])"));
+	const FString RightPath = Fixture.WriteJsonFile(TEXT("right.json"), TEXT(R"([{"id":"QuestA","Meta":{"a":1,"b":3}}])"));
+	const FString ReportPath = Fixture.MakeSavedPath(TEXT("report.json"));
+
+	const FCortexCommandResult Result = Fixture.CompareJson(
+		LeftPath,
+		RightPath,
+		ReportPath,
+		TEXT("datatable_rows"),
+		TEXT("id"),
+		TArray<FString>(),
+		true);
+
+	TestTrue(TEXT("include_equal compare succeeds"), Result.bSuccess);
+	TestTrue(TEXT("include_equal returns data"), Result.Data.IsValid());
+	if (!Result.bSuccess || !Result.Data.IsValid())
+	{
+		return false;
+	}
+
+	TestTrue(TEXT("counts include equal"), Result.Data->GetObjectField(TEXT("counts"))->HasTypedField<EJson::Number>(TEXT("equal")));
+
+	const TArray<uint8> FirstReport = Fixture.ReadFileBytes(ReportPath);
+	const FCortexCommandResult SecondResult = Fixture.CompareJson(
+		LeftPath,
+		RightPath,
+		ReportPath,
+		TEXT("datatable_rows"),
+		TEXT("id"),
+		TArray<FString>(),
+		true);
+	TestTrue(TEXT("second compare succeeds"), SecondResult.bSuccess);
+	const TArray<uint8> SecondReport = Fixture.ReadFileBytes(ReportPath);
+	TestEqual(TEXT("canonical report bytes are stable"), FirstReport, SecondReport);
+	return true;
+}
+
+bool FCortexDataJsonDiffNullPresenceFlagsTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataJsonDiffTestFixture Fixture;
+	const FString LeftPath = Fixture.WriteJsonFile(TEXT("left.json"), TEXT(R"([{"id":"QuestA"}])"));
+	const FString RightPath = Fixture.WriteJsonFile(TEXT("right.json"), TEXT(R"([{"id":"QuestA","Meta":null}])"));
+	const FString ReportPath = Fixture.MakeSavedPath(TEXT("report.json"));
+
+	const FCortexCommandResult Result = Fixture.CompareJson(
+		LeftPath,
+		RightPath,
+		ReportPath,
+		TEXT("datatable_rows"),
+		TEXT("id"));
+
+	TestTrue(TEXT("null presence compare succeeds"), Result.bSuccess);
+	TSharedPtr<FJsonObject> Report = Fixture.ReadJsonFile(ReportPath);
+	TestTrue(TEXT("report parses"), Report.IsValid());
+	if (!Result.bSuccess || !Report.IsValid())
+	{
+		return false;
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>& Changed = Report->GetArrayField(TEXT("changed"));
+	TestEqual(TEXT("one changed record is written"), Changed.Num(), 1);
+	if (Changed.Num() != 1)
+	{
+		return false;
+	}
+
+	const TSharedPtr<FJsonObject> ChangedRecord = Changed[0]->AsObject();
+	const TSharedPtr<FJsonObject> Fields = ChangedRecord->GetObjectField(TEXT("fields"));
+	const TSharedPtr<FJsonObject> MetaDelta = Fields->GetObjectField(TEXT("Meta"));
+	TestFalse(TEXT("missing left value reports not present"), MetaDelta->GetBoolField(TEXT("left_present")));
+	TestTrue(TEXT("explicit null right value reports present"), MetaDelta->GetBoolField(TEXT("right_present")));
+	TestFalse(TEXT("missing left omits left value"), MetaDelta->HasField(TEXT("left")));
+	TestTrue(TEXT("explicit null right includes right value"), MetaDelta->HasField(TEXT("right")));
 	return true;
 }
