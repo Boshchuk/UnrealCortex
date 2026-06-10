@@ -252,16 +252,35 @@ namespace
 		FCortexCommandResult& OutError)
 	{
 		const TSharedPtr<FJsonObject> Object = Root.IsValid() ? Root->AsObject() : nullptr;
-		if (!Object.IsValid() || !Object->HasTypedField<EJson::Array>(TEXT("rows")))
+		bool bUseCanonicalRowData = false;
+		const TArray<TSharedPtr<FJsonValue>>* RecordsArray = nullptr;
+		if (Root.IsValid() && Root->Type == EJson::Array)
+		{
+			RecordsArray = &Root->AsArray();
+		}
+		else if (Object.IsValid())
+		{
+			static const TArray<FString> DatatableWrappers = { TEXT("rows"), TEXT("items"), TEXT("data"), TEXT("records") };
+			for (const FString& Wrapper : DatatableWrappers)
+			{
+				if (Object->HasTypedField<EJson::Array>(Wrapper))
+				{
+					RecordsArray = &Object->GetArrayField(Wrapper);
+					bUseCanonicalRowData = Wrapper == TEXT("rows") && Object->HasTypedField<EJson::String>(TEXT("table_path"));
+					break;
+				}
+			}
+		}
+
+		if (RecordsArray == nullptr)
 		{
 			OutError = FCortexCommandRouter::Error(
 				CortexErrorCodes::InvalidOperation,
-				TEXT("datatable_rows requires a canonical Cortex export object with a rows array"));
+				TEXT("datatable_rows requires a top-level array or an object wrapper with rows, items, data, or records"));
 			return false;
 		}
 
-		const TArray<TSharedPtr<FJsonValue>>& Rows = Object->GetArrayField(TEXT("rows"));
-		for (const TSharedPtr<FJsonValue>& RowValue : Rows)
+		for (const TSharedPtr<FJsonValue>& RowValue : *RecordsArray)
 		{
 			const TSharedPtr<FJsonObject> RowObject = RowValue.IsValid() ? RowValue->AsObject() : nullptr;
 			if (!RowObject.IsValid())
@@ -286,7 +305,7 @@ namespace
 			}
 
 			TSharedPtr<FJsonObject> Fields;
-			if (RowObject->HasTypedField<EJson::Object>(TEXT("row_data")))
+			if (bUseCanonicalRowData && RowObject->HasTypedField<EJson::Object>(TEXT("row_data")))
 			{
 				Fields = CopyObjectWithoutFields(RowObject->GetObjectField(TEXT("row_data")), {});
 			}
@@ -308,16 +327,33 @@ namespace
 		FCortexCommandResult& OutError)
 	{
 		const TSharedPtr<FJsonObject> Object = Root.IsValid() ? Root->AsObject() : nullptr;
-		if (!Object.IsValid() || !Object->HasTypedField<EJson::Array>(TEXT("entries")))
+		const TArray<TSharedPtr<FJsonValue>>* RecordsArray = nullptr;
+		if (Root.IsValid() && Root->Type == EJson::Array)
+		{
+			RecordsArray = &Root->AsArray();
+		}
+		else if (Object.IsValid())
+		{
+			static const TArray<FString> StringTableWrappers = { TEXT("entries"), TEXT("items"), TEXT("data"), TEXT("records") };
+			for (const FString& Wrapper : StringTableWrappers)
+			{
+				if (Object->HasTypedField<EJson::Array>(Wrapper))
+				{
+					RecordsArray = &Object->GetArrayField(Wrapper);
+					break;
+				}
+			}
+		}
+
+		if (RecordsArray == nullptr)
 		{
 			OutError = FCortexCommandRouter::Error(
 				CortexErrorCodes::InvalidOperation,
-				TEXT("string_table_entries requires a canonical Cortex export object with an entries array"));
+				TEXT("string_table_entries requires a top-level array or an object wrapper with entries, items, data, or records"));
 			return false;
 		}
 
-		const TArray<TSharedPtr<FJsonValue>>& Entries = Object->GetArrayField(TEXT("entries"));
-		for (const TSharedPtr<FJsonValue>& EntryValue : Entries)
+		for (const TSharedPtr<FJsonValue>& EntryValue : *RecordsArray)
 		{
 			const TSharedPtr<FJsonObject> EntryObject = EntryValue.IsValid() ? EntryValue->AsObject() : nullptr;
 			if (!EntryObject.IsValid())
@@ -354,16 +390,33 @@ namespace
 		FCortexCommandResult& OutError)
 	{
 		const TSharedPtr<FJsonObject> Object = Root.IsValid() ? Root->AsObject() : nullptr;
-		if (!Object.IsValid() || !Object->HasTypedField<EJson::Array>(TEXT("data_assets")))
+		const TArray<TSharedPtr<FJsonValue>>* RecordsArray = nullptr;
+		if (Root.IsValid() && Root->Type == EJson::Array)
+		{
+			RecordsArray = &Root->AsArray();
+		}
+		else if (Object.IsValid())
+		{
+			static const TArray<FString> DataAssetWrappers = { TEXT("data_assets"), TEXT("items"), TEXT("data"), TEXT("records") };
+			for (const FString& Wrapper : DataAssetWrappers)
+			{
+				if (Object->HasTypedField<EJson::Array>(Wrapper))
+				{
+					RecordsArray = &Object->GetArrayField(Wrapper);
+					break;
+				}
+			}
+		}
+
+		if (RecordsArray == nullptr)
 		{
 			OutError = FCortexCommandRouter::Error(
 				CortexErrorCodes::InvalidOperation,
-				TEXT("data_assets requires a canonical Cortex export object with a data_assets array"));
+				TEXT("data_assets requires a top-level array or an object wrapper with data_assets, items, data, or records"));
 			return false;
 		}
 
-		const TArray<TSharedPtr<FJsonValue>>& Assets = Object->GetArrayField(TEXT("data_assets"));
-		for (const TSharedPtr<FJsonValue>& AssetValue : Assets)
+		for (const TSharedPtr<FJsonValue>& AssetValue : *RecordsArray)
 		{
 			const TSharedPtr<FJsonObject> AssetObject = AssetValue.IsValid() ? AssetValue->AsObject() : nullptr;
 			if (!AssetObject.IsValid())
@@ -388,6 +441,13 @@ namespace
 			}
 
 			TSharedRef<FJsonObject> Fields = MakeShared<FJsonObject>();
+			if (!AssetObject->HasTypedField<EJson::String>(TEXT("asset_class")))
+			{
+				OutError = FCortexCommandRouter::Error(
+					CortexErrorCodes::InvalidField,
+					TEXT("data_assets records must include asset_class"));
+				return false;
+			}
 			Fields->SetStringField(TEXT("asset_class"), AssetObject->GetStringField(TEXT("asset_class")));
 			if (AssetObject->HasTypedField<EJson::String>(TEXT("name")))
 			{

@@ -304,6 +304,24 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataJsonDiffExplicitWrapperModesTest,
+	"Cortex.Data.JsonDiff.External.Wrappers",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataJsonDiffExplicitKeyFieldTest,
+	"Cortex.Data.JsonDiff.External.KeyField",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataJsonDiffDuplicateKeysFailTest,
+	"Cortex.Data.JsonDiff.External.DuplicateKeys",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
 bool FCortexDataJsonDiffCommandsRegisteredTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
@@ -450,5 +468,58 @@ bool FCortexDataJsonDiffDataAssetsCanonicalTest::RunTest(const FString& Paramete
 		TEXT("changed count is one"),
 		static_cast<int32>(Result.Data->GetObjectField(TEXT("counts"))->GetNumberField(TEXT("changed"))),
 		1);
+	return true;
+}
+
+bool FCortexDataJsonDiffExplicitWrapperModesTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataJsonDiffTestFixture Fixture;
+	const FString LeftPath = Fixture.WriteJsonFile(TEXT("left.json"), TEXT(R"({"items":[{"id":"QuestA","Priority":26}]})"));
+	const FString RightPath = Fixture.WriteJsonFile(TEXT("right.json"), TEXT(R"({"records":[{"id":"QuestA","Priority":28}]})"));
+	const FString ReportPath = Fixture.MakeSavedPath(TEXT("report.json"));
+
+	const FCortexCommandResult Result = Fixture.CompareJson(LeftPath, RightPath, ReportPath, TEXT("datatable_rows"), TEXT("id"));
+	TestTrue(TEXT("explicit wrapper compare succeeds"), Result.bSuccess);
+	return true;
+}
+
+bool FCortexDataJsonDiffExplicitKeyFieldTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataJsonDiffTestFixture Fixture;
+	const FString LeftPath = Fixture.WriteJsonFile(TEXT("left.json"), TEXT(R"([{"id":"QuestA","Priority":26}])"));
+	const FString RightPath = Fixture.WriteJsonFile(TEXT("right.json"), TEXT(R"([{"id":"QuestA","Priority":28}])"));
+	const FString ReportPath = Fixture.MakeSavedPath(TEXT("report.json"));
+
+	const FCortexCommandResult Result = Fixture.CompareJson(LeftPath, RightPath, ReportPath, TEXT("datatable_rows"), TEXT("id"));
+	TestTrue(TEXT("explicit key_field compare succeeds"), Result.bSuccess);
+	TestTrue(TEXT("explicit key_field compare returns data"), Result.Data.IsValid());
+	if (!Result.bSuccess || !Result.Data.IsValid())
+	{
+		return false;
+	}
+
+	TestEqual(
+		TEXT("changed count is one"),
+		static_cast<int32>(Result.Data->GetObjectField(TEXT("counts"))->GetNumberField(TEXT("changed"))),
+		1);
+	return true;
+}
+
+bool FCortexDataJsonDiffDuplicateKeysFailTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataJsonDiffTestFixture Fixture;
+	const FString LeftPath = Fixture.WriteJsonFile(TEXT("left.json"), TEXT(R"([{"id":"QuestA","Priority":26},{"id":"QuestA","Priority":27}])"));
+	const FString RightPath = Fixture.WriteJsonFile(TEXT("right.json"), TEXT(R"([{"id":"QuestA","Priority":28}])"));
+	const FString ReportPath = Fixture.MakeSavedPath(TEXT("report.json"));
+
+	const FCortexCommandResult Result = Fixture.CompareJson(LeftPath, RightPath, ReportPath, TEXT("datatable_rows"), TEXT("id"));
+	TestFalse(TEXT("duplicate keys fail"), Result.bSuccess);
+	TestEqual(TEXT("duplicate keys use InvalidField"), Result.ErrorCode, CortexErrorCodes::InvalidField);
 	return true;
 }
