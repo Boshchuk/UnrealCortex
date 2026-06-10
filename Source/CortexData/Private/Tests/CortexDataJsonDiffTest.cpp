@@ -292,6 +292,18 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataJsonDiffStringTableCanonicalTest,
+	"Cortex.Data.JsonDiff.StringTable.Canonical",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataJsonDiffDataAssetsCanonicalTest,
+	"Cortex.Data.JsonDiff.DataAssets.Canonical",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
 bool FCortexDataJsonDiffCommandsRegisteredTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
@@ -383,5 +395,60 @@ bool FCortexDataJsonDiffModeOmittedDefaultsToAutoTest::RunTest(const FString& Pa
 	}
 
 	TestEqual(TEXT("mode resolves to datatable_rows"), Result.Data->GetStringField(TEXT("mode")), TEXT("datatable_rows"));
+	return true;
+}
+
+bool FCortexDataJsonDiffStringTableCanonicalTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataJsonDiffTestFixture Fixture;
+	UStringTable* LeftTable = Fixture.CreateStringTable(TEXT("ST_Left"));
+	UStringTable* RightTable = Fixture.CreateStringTable(TEXT("ST_Right"));
+	Fixture.UpdateStringTableValue(RightTable, TEXT("alpha.key"), TEXT("Alpha changed"));
+
+	const FCortexCommandResult Result = Fixture.CompareJson(
+		Fixture.ExportStringTableJson(LeftTable, TEXT("left.json")),
+		Fixture.ExportStringTableJson(RightTable, TEXT("right.json")),
+		Fixture.MakeSavedPath(TEXT("report.json")),
+		TEXT("auto"));
+
+	TestTrue(TEXT("canonical string table compare succeeds"), Result.bSuccess);
+	TestTrue(TEXT("canonical string table compare returns data"), Result.Data.IsValid());
+	if (!Result.bSuccess || !Result.Data.IsValid())
+	{
+		return false;
+	}
+
+	TestEqual(TEXT("mode resolves to string_table_entries"), Result.Data->GetStringField(TEXT("mode")), TEXT("string_table_entries"));
+	return true;
+}
+
+bool FCortexDataJsonDiffDataAssetsCanonicalTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataJsonDiffTestFixture Fixture;
+	const FString LeftJson = TEXT(R"({"data_assets":[{"path":"/Game/Data/DA_Quest.DA_Quest","name":"DA_Quest","asset_class":"CortexTestDataAsset","properties":{"TestNumber":26}}]})");
+	const FString RightJson = TEXT(R"({"data_assets":[{"path":"/Game/Data/DA_Quest.DA_Quest","name":"DA_Quest","asset_class":"CortexTestDataAsset","properties":{"TestNumber":99}}]})");
+
+	const FCortexCommandResult Result = Fixture.CompareJson(
+		Fixture.WriteJsonFile(TEXT("left.json"), LeftJson),
+		Fixture.WriteJsonFile(TEXT("right.json"), RightJson),
+		Fixture.MakeSavedPath(TEXT("report.json")),
+		TEXT("data_assets"));
+
+	TestTrue(TEXT("canonical data asset compare succeeds"), Result.bSuccess);
+	TestTrue(TEXT("canonical data asset compare returns data"), Result.Data.IsValid());
+	if (!Result.bSuccess || !Result.Data.IsValid())
+	{
+		return false;
+	}
+
+	TestEqual(TEXT("mode stays data_assets"), Result.Data->GetStringField(TEXT("mode")), TEXT("data_assets"));
+	TestEqual(
+		TEXT("changed count is one"),
+		static_cast<int32>(Result.Data->GetObjectField(TEXT("counts"))->GetNumberField(TEXT("changed"))),
+		1);
 	return true;
 }

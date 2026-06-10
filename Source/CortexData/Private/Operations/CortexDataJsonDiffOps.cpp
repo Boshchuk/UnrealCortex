@@ -301,6 +301,109 @@ namespace
 		return true;
 	}
 
+	bool TryNormalizeStringTableEntries(
+		const TSharedPtr<FJsonValue>& Root,
+		const FString& KeyField,
+		TMap<FString, TSharedPtr<FJsonObject>>& OutRecords,
+		FCortexCommandResult& OutError)
+	{
+		const TSharedPtr<FJsonObject> Object = Root.IsValid() ? Root->AsObject() : nullptr;
+		if (!Object.IsValid() || !Object->HasTypedField<EJson::Array>(TEXT("entries")))
+		{
+			OutError = FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidOperation,
+				TEXT("string_table_entries requires a canonical Cortex export object with an entries array"));
+			return false;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>& Entries = Object->GetArrayField(TEXT("entries"));
+		for (const TSharedPtr<FJsonValue>& EntryValue : Entries)
+		{
+			const TSharedPtr<FJsonObject> EntryObject = EntryValue.IsValid() ? EntryValue->AsObject() : nullptr;
+			if (!EntryObject.IsValid())
+			{
+				OutError = FCortexCommandRouter::Error(
+					CortexErrorCodes::InvalidField,
+					TEXT("string_table_entries records must be JSON objects"));
+				return false;
+			}
+
+			FString RecordKey;
+			if (!TryResolveRecordKey(EntryObject, KeyField, TEXT("key"), RecordKey, OutError))
+			{
+				return false;
+			}
+			if (OutRecords.Contains(RecordKey))
+			{
+				OutError = FCortexCommandRouter::Error(
+					CortexErrorCodes::InvalidField,
+					FString::Printf(TEXT("Duplicate normalized key: %s"), *RecordKey));
+				return false;
+			}
+
+			OutRecords.Add(RecordKey, CopyObjectWithoutFields(EntryObject, { TEXT("key"), KeyField }));
+		}
+
+		return true;
+	}
+
+	bool TryNormalizeDataAssets(
+		const TSharedPtr<FJsonValue>& Root,
+		const FString& KeyField,
+		TMap<FString, TSharedPtr<FJsonObject>>& OutRecords,
+		FCortexCommandResult& OutError)
+	{
+		const TSharedPtr<FJsonObject> Object = Root.IsValid() ? Root->AsObject() : nullptr;
+		if (!Object.IsValid() || !Object->HasTypedField<EJson::Array>(TEXT("data_assets")))
+		{
+			OutError = FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidOperation,
+				TEXT("data_assets requires a canonical Cortex export object with a data_assets array"));
+			return false;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>& Assets = Object->GetArrayField(TEXT("data_assets"));
+		for (const TSharedPtr<FJsonValue>& AssetValue : Assets)
+		{
+			const TSharedPtr<FJsonObject> AssetObject = AssetValue.IsValid() ? AssetValue->AsObject() : nullptr;
+			if (!AssetObject.IsValid())
+			{
+				OutError = FCortexCommandRouter::Error(
+					CortexErrorCodes::InvalidField,
+					TEXT("data_assets records must be JSON objects"));
+				return false;
+			}
+
+			FString RecordKey;
+			if (!TryResolveRecordKey(AssetObject, KeyField, TEXT("path"), RecordKey, OutError))
+			{
+				return false;
+			}
+			if (OutRecords.Contains(RecordKey))
+			{
+				OutError = FCortexCommandRouter::Error(
+					CortexErrorCodes::InvalidField,
+					FString::Printf(TEXT("Duplicate normalized key: %s"), *RecordKey));
+				return false;
+			}
+
+			TSharedRef<FJsonObject> Fields = MakeShared<FJsonObject>();
+			Fields->SetStringField(TEXT("asset_class"), AssetObject->GetStringField(TEXT("asset_class")));
+			if (AssetObject->HasTypedField<EJson::String>(TEXT("name")))
+			{
+				Fields->SetStringField(TEXT("name"), AssetObject->GetStringField(TEXT("name")));
+			}
+			if (AssetObject->HasTypedField<EJson::Object>(TEXT("properties")))
+			{
+				Fields->SetObjectField(TEXT("properties"), AssetObject->GetObjectField(TEXT("properties")));
+			}
+
+			OutRecords.Add(RecordKey, Fields);
+		}
+
+		return true;
+	}
+
 	FString SerializeCanonicalValue(const TSharedPtr<FJsonValue>& Value)
 	{
 		TSharedRef<FJsonObject> Wrapper = MakeShared<FJsonObject>();
@@ -578,12 +681,24 @@ FCortexCommandResult FCortexDataJsonDiffOps::CompareDataJson(const TSharedPtr<FJ
 		break;
 
 	case ECortexDataJsonCompareMode::StringTableEntries:
+		if (!TryNormalizeStringTableEntries(LeftRoot, KeyField, LeftRecords, ParseError)
+			|| !TryNormalizeStringTableEntries(RightRoot, KeyField, RightRecords, ParseError))
+		{
+			return ParseError;
+		}
+		break;
+
 	case ECortexDataJsonCompareMode::DataAssets:
+		if (!TryNormalizeDataAssets(LeftRoot, KeyField, LeftRecords, ParseError)
+			|| !TryNormalizeDataAssets(RightRoot, KeyField, RightRecords, ParseError))
+		{
+			return ParseError;
+		}
+		break;
+
 	case ECortexDataJsonCompareMode::Auto:
 	default:
-		return FCortexCommandRouter::Error(
-			CortexErrorCodes::InvalidOperation,
-			TEXT("compare_data_json mode is not implemented yet"));
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation, TEXT("compare_data_json mode is not implemented yet"));
 	}
 
 	const TSet<FString> IgnoredFields = ParseIgnoredFields(Params);
