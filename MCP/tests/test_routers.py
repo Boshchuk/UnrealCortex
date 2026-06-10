@@ -421,3 +421,47 @@ def test_data_router_forwards_export_bulk_payload():
             ],
         },
     )
+
+
+def test_data_router_forwards_compare_data_json_payload():
+    connection = MagicMock()
+    connection.send_command.return_value = {
+        "success": True,
+        "data": {
+            "success": True,
+            "partial": False,
+            "warnings": [],
+            "errors": [],
+            "files_written": ["Saved/CortexReports/report.json"],
+            "targets_touched": [],
+            "counts": {"added": 0, "removed": 0, "changed": 1},
+            "mode": "datatable_rows",
+            "report_path": "Saved/CortexReports/report.json",
+            "canonical_report_path": "D:/Project/Saved/CortexReports/report.json",
+            "report_bytes": 512,
+        },
+    }
+
+    router = make_router("data", connection, "data docs")
+    payload = json.loads(
+        router(
+            "compare_data_json",
+            {
+                "left_path": "Saved/CortexExports/left.json",
+                "right_path": "Saved/CortexExports/right.json",
+                "report_path": "Saved/CortexReports/report.json",
+                "mode": "datatable_rows",
+            },
+        )
+    )
+
+    assert payload["counts"]["changed"] == 1
+    connection.send_command.assert_called_once_with(
+        "data.compare_data_json",
+        {
+            "left_path": "Saved/CortexExports/left.json",
+            "right_path": "Saved/CortexExports/right.json",
+            "report_path": "Saved/CortexReports/report.json",
+            "mode": "datatable_rows",
+        },
+    )

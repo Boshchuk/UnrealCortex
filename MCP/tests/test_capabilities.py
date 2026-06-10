@@ -59,7 +59,15 @@ def test_build_router_docstring_lists_all_commands():
     assert "table_path: string" in docstrings["data"]
     assert "For large raw DataTable, StringTable, or DataAsset reads" in docstrings["data"]
     assert "export_bulk_json" in docstrings["data"]
+    assert "compare_data_json" in docstrings["data"]
     assert "compact summaries" in docstrings["data"]
+
+
+def test_build_router_docstring_lists_compare_data_json():
+    """Data router docs should advertise compare_data_json in file-backed workflow hints."""
+    capabilities = json.loads((FIXTURES_DIR / "capabilities_cache_full.json").read_text(encoding="utf-8"))
+    docstrings = build_router_docstrings(capabilities)
+    assert "compare_data_json" in docstrings["data"]
 
 
 def test_missing_cache_uses_minimal_fallback_and_logs_warning(caplog, tmp_path):
@@ -211,6 +219,7 @@ class TestFallbackDrift:
             "export_string_table_json",
             "export_data_assets_json",
             "export_bulk_json",
+            "compare_data_json",
         }
         cache_data_cmds = {cmd["name"] for cmd in cache_domains["data"].get("commands", [])}
         fallback_data_cmds = {cmd["name"] for cmd in _FALLBACK_STRUCTURED["data"]}

@@ -8,6 +8,7 @@
 #include "Operations/CortexCurveTableOps.h"
 #include "Operations/CortexDataExportOps.h"
 #include "Operations/CortexDataImportQueueOps.h"
+#include "Operations/CortexDataJsonDiffOps.h"
 
 FCortexCommandResult FCortexDataCommandHandler::Execute(
     const FString& Command,
@@ -166,6 +167,10 @@ FCortexCommandResult FCortexDataCommandHandler::Execute(
     {
         return FCortexDataExportOps::ExportBulkJson(Params);
     }
+    if (Command == TEXT("compare_data_json"))
+    {
+        return FCortexDataJsonDiffOps::CompareDataJson(Params);
+    }
 
     // Import queue operations
     if (Command == TEXT("apply_import_ops_json"))
@@ -250,7 +255,7 @@ TArray<FCortexCommandInfo> FCortexDataCommandHandler::GetSupportedCommands() con
         FCortexCommandInfo{ TEXT("list_data_assets"), TEXT("List DataAssets") }
             .Optional(TEXT("class_name"), TEXT("string"), TEXT("Optional class filter"))
             .Optional(TEXT("path_filter"), TEXT("string"), TEXT("Optional asset path prefix")),
-        FCortexCommandInfo{ TEXT("get_data_asset"), TEXT("Get DataAsset properties") }
+        FCortexCommandInfo{ TEXT("get_data_asset"), TEXT("Get deep DataAsset properties with partial/issues diagnostics") }
             .Required(TEXT("asset_path"), TEXT("string"), TEXT("DataAsset path")),
         FCortexCommandInfo{ TEXT("update_data_asset"), TEXT("Update DataAsset properties") }
             .Required(TEXT("asset_path"), TEXT("string"), TEXT("DataAsset path"))
@@ -312,11 +317,19 @@ TArray<FCortexCommandInfo> FCortexDataCommandHandler::GetSupportedCommands() con
             .Optional(TEXT("path_filter"), TEXT("string"), TEXT("Asset path prefix filter"))
             .Optional(TEXT("asset_paths"), TEXT("array"), TEXT("Explicit asset paths"))
             .Optional(TEXT("include_properties"), TEXT("boolean"), TEXT("Load assets and serialize editable/exportable properties"))
-            .Optional(TEXT("allow_partial"), TEXT("boolean"), TEXT("Permit per-asset serialization warnings without failing")),
+            .Optional(TEXT("allow_partial"), TEXT("boolean"), TEXT("Permit omitted assets from blocking serialization issues; warning-only issues return success with partial=true")),
         FCortexCommandInfo{ TEXT("export_bulk_json"), TEXT("Export multiple typed data resources to JSON files under one output directory") }
             .Required(TEXT("out_dir"), TEXT("string"), TEXT("Base output directory"))
             .Required(TEXT("items"), TEXT("array"), TEXT("Typed export specs. Each item requires type=datatable|string_table|data_assets, optional name, and optional relative out_path. datatable items use table_path plus optional fields/row_names/row_name_pattern/include_schema. string_table items use string_table_path plus optional key_pattern. data_assets items use class_name/path_filter/asset_paths/include_properties. Item out_path values are always relative to out_dir."))
             .Optional(TEXT("allow_partial"), TEXT("boolean"), TEXT("Continue independent item exports after failures")),
+        FCortexCommandInfo{ TEXT("compare_data_json"), TEXT("Compare two structured JSON files and write a deterministic reconcile report") }
+            .Required(TEXT("left_path"), TEXT("string"), TEXT("First JSON input path"))
+            .Required(TEXT("right_path"), TEXT("string"), TEXT("Second JSON input path"))
+            .Required(TEXT("report_path"), TEXT("string"), TEXT("Output reconcile report path"))
+            .Optional(TEXT("mode"), TEXT("string"), TEXT("datatable_rows, string_table_entries, data_assets, or auto; defaults to auto"))
+            .Optional(TEXT("key_field"), TEXT("string"), TEXT("Explicit identity field for external record shapes"))
+            .Optional(TEXT("ignore_fields"), TEXT("array"), TEXT("Top-level normalized field names to ignore"))
+            .Optional(TEXT("include_equal"), TEXT("boolean"), TEXT("Include unchanged normalized records in the report")),
         FCortexCommandInfo{ TEXT("apply_import_ops_json"), TEXT("Apply a validated CortexData import operation queue from a JSON file and write a detailed report") }
             .Required(TEXT("ops_path"), TEXT("string"), TEXT("Input operation queue JSON file path"))
             .Required(TEXT("report_path"), TEXT("string"), TEXT("Output execution report JSON file path"))
