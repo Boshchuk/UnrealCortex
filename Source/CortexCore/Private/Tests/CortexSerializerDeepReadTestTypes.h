@@ -27,6 +27,19 @@ class UCortexDeepReadReferencedObject : public UObject
 	GENERATED_BODY()
 };
 
+UCLASS(EditInlineNew, DefaultToInstanced)
+class UCortexDeepReadInstancedSubObject : public UObject
+{
+	GENERATED_BODY()
+
+public:
+	UPROPERTY(EditAnywhere)
+	FString Label = TEXT("instanced label");
+
+	UPROPERTY()
+	FString Internal = TEXT("instanced internal");
+};
+
 USTRUCT()
 struct FCortexDeepReadRootStruct
 {
@@ -55,6 +68,9 @@ struct FCortexDeepReadRootStruct
 
 	UPROPERTY(EditAnywhere)
 	UObject* HardReference = nullptr;
+
+	UPROPERTY(EditAnywhere, Instanced)
+	UCortexDeepReadInstancedSubObject* InstancedObject = nullptr;
 
 	UPROPERTY()
 	FCortexDeepReadDynamicDelegate UnsupportedDelegate;

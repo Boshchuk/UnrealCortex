@@ -148,6 +148,7 @@ FCortexCommandResult FCortexDataAssetOps::GetDataAsset(const TSharedPtr<FJsonObj
 		Policy.Label = ECortexSerializationPolicyLabel::ReflectedRead;
 		Policy.bIncludeTextMetadata = true;
 		Policy.MaxDepth = 8;
+		Policy.bExpandInstancedSubobjects = true;
 		return Policy;
 	};
 
