@@ -329,6 +329,7 @@ namespace
 		Policy.Label = ECortexSerializationPolicyLabel::ExportableRead;
 		Policy.bIncludeTextMetadata = true;
 		Policy.MaxDepth = 8;
+		Policy.bExpandInstancedSubobjects = true;
 		Policy.PropertyAdmissionRule = [](const FProperty* Property)
 		{
 			if (Property == nullptr)
@@ -1170,6 +1171,7 @@ FCortexCommandResult FCortexDataExportOps::ExportDataAssetsJson(const TSharedPtr
 	const int32 FailedCount = Failures.Num();
 	const int32 TotalCount = Candidates.Num() + PreSerializationFailureCount;
 	Payload->SetBoolField(TEXT("partial"), FailedCount > 0 || OmittedCount > 0 || IssueCount > 0);
+	Payload->SetNumberField(TEXT("count"), ExportedCount);
 	Payload->SetNumberField(TEXT("exported_count"), ExportedCount);
 	Payload->SetNumberField(TEXT("omitted_count"), OmittedCount);
 	Payload->SetNumberField(TEXT("failed_count"), FailedCount);

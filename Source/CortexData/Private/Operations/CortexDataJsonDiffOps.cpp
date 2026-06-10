@@ -4,6 +4,7 @@
 #include "CortexTypes.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "HAL/FileManager.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -116,33 +117,43 @@ namespace
 
 	bool TryDetectCanonicalAutoMode(
 		const TSharedPtr<FJsonValue>& Root,
-		ECortexDataJsonCompareMode& OutMode)
+		ECortexDataJsonCompareMode& OutMode,
+		FCortexCommandResult& OutError)
 	{
-		const TSharedPtr<FJsonObject> Object = Root.IsValid() ? Root->AsObject() : nullptr;
+		const TSharedPtr<FJsonObject> Object = Root.IsValid() && Root->Type == EJson::Object ? Root->AsObject() : nullptr;
 		if (!Object.IsValid())
 		{
 			return false;
 		}
 
+		int32 MatchCount = 0;
 		if (Object->HasTypedField<EJson::String>(TEXT("table_path"))
 			&& Object->HasTypedField<EJson::Array>(TEXT("rows")))
 		{
 			OutMode = ECortexDataJsonCompareMode::DatatableRows;
-			return true;
+			++MatchCount;
 		}
 		if (Object->HasTypedField<EJson::String>(TEXT("string_table_path"))
 			&& Object->HasTypedField<EJson::Array>(TEXT("entries")))
 		{
 			OutMode = ECortexDataJsonCompareMode::StringTableEntries;
-			return true;
+			++MatchCount;
 		}
 		if (Object->HasTypedField<EJson::Array>(TEXT("data_assets")))
 		{
 			OutMode = ECortexDataJsonCompareMode::DataAssets;
-			return true;
+			++MatchCount;
 		}
 
-		return false;
+		if (MatchCount > 1)
+		{
+			OutError = FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidOperation,
+				TEXT("mode=auto is ambiguous because the JSON matches multiple canonical Cortex export shapes"));
+			return false;
+		}
+
+		return MatchCount == 1;
 	}
 
 	bool TryResolveEffectiveMode(
@@ -166,8 +177,18 @@ namespace
 
 		ECortexDataJsonCompareMode LeftMode = ECortexDataJsonCompareMode::Auto;
 		ECortexDataJsonCompareMode RightMode = ECortexDataJsonCompareMode::Auto;
-		const bool bLeftDetected = TryDetectCanonicalAutoMode(LeftRoot, LeftMode);
-		const bool bRightDetected = TryDetectCanonicalAutoMode(RightRoot, RightMode);
+		const bool bLeftDetected = TryDetectCanonicalAutoMode(LeftRoot, LeftMode, OutError);
+		if (!bLeftDetected && !OutError.ErrorCode.IsEmpty())
+		{
+			return false;
+		}
+
+		const bool bRightDetected = TryDetectCanonicalAutoMode(RightRoot, RightMode, OutError);
+		if (!bRightDetected && !OutError.ErrorCode.IsEmpty())
+		{
+			return false;
+		}
+
 		if (!bLeftDetected || !bRightDetected)
 		{
 			OutError = FCortexCommandRouter::Error(
@@ -251,7 +272,7 @@ namespace
 		TMap<FString, TSharedPtr<FJsonObject>>& OutRecords,
 		FCortexCommandResult& OutError)
 	{
-		const TSharedPtr<FJsonObject> Object = Root.IsValid() ? Root->AsObject() : nullptr;
+		const TSharedPtr<FJsonObject> Object = Root.IsValid() && Root->Type == EJson::Object ? Root->AsObject() : nullptr;
 		bool bUseCanonicalRowData = false;
 		const TArray<TSharedPtr<FJsonValue>>* RecordsArray = nullptr;
 		if (Root.IsValid() && Root->Type == EJson::Array)
@@ -311,7 +332,7 @@ namespace
 			}
 			else
 			{
-				Fields = CopyObjectWithoutFields(RowObject, { TEXT("row_name"), KeyField });
+				Fields = CopyObjectWithoutFields(RowObject, { !KeyField.IsEmpty() ? KeyField : TEXT("row_name") });
 			}
 
 			OutRecords.Add(RecordKey, Fields);
@@ -326,7 +347,7 @@ namespace
 		TMap<FString, TSharedPtr<FJsonObject>>& OutRecords,
 		FCortexCommandResult& OutError)
 	{
-		const TSharedPtr<FJsonObject> Object = Root.IsValid() ? Root->AsObject() : nullptr;
+		const TSharedPtr<FJsonObject> Object = Root.IsValid() && Root->Type == EJson::Object ? Root->AsObject() : nullptr;
 		const TArray<TSharedPtr<FJsonValue>>* RecordsArray = nullptr;
 		if (Root.IsValid() && Root->Type == EJson::Array)
 		{
@@ -377,7 +398,7 @@ namespace
 				return false;
 			}
 
-			OutRecords.Add(RecordKey, CopyObjectWithoutFields(EntryObject, { TEXT("key"), KeyField }));
+			OutRecords.Add(RecordKey, CopyObjectWithoutFields(EntryObject, { !KeyField.IsEmpty() ? KeyField : TEXT("key") }));
 		}
 
 		return true;
@@ -389,7 +410,7 @@ namespace
 		TMap<FString, TSharedPtr<FJsonObject>>& OutRecords,
 		FCortexCommandResult& OutError)
 	{
-		const TSharedPtr<FJsonObject> Object = Root.IsValid() ? Root->AsObject() : nullptr;
+		const TSharedPtr<FJsonObject> Object = Root.IsValid() && Root->Type == EJson::Object ? Root->AsObject() : nullptr;
 		const TArray<TSharedPtr<FJsonValue>>* RecordsArray = nullptr;
 		if (Root.IsValid() && Root->Type == EJson::Array)
 		{
@@ -438,6 +459,12 @@ namespace
 					CortexErrorCodes::InvalidField,
 					FString::Printf(TEXT("Duplicate normalized key: %s"), *RecordKey));
 				return false;
+			}
+
+			if (!KeyField.IsEmpty())
+			{
+				OutRecords.Add(RecordKey, CopyObjectWithoutFields(AssetObject, { KeyField }));
+				continue;
 			}
 
 			TSharedRef<FJsonObject> Fields = MakeShared<FJsonObject>();
@@ -697,6 +724,13 @@ FCortexCommandResult FCortexDataJsonDiffOps::CompareDataJson(const TSharedPtr<FJ
 	if (!FCortexSafeFileContract::PrepareWritePath(ResolvedReportPath, ErrorCode, ErrorMessage))
 	{
 		return FCortexCommandRouter::Error(ErrorCode, ErrorMessage);
+	}
+	if (IFileManager::Get().FileExists(*ResolvedReportPath.AbsolutePath)
+		&& !IFileManager::Get().Delete(*ResolvedReportPath.AbsolutePath, false, true))
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::SaveFailed,
+			FString::Printf(TEXT("Failed to remove existing report before comparison: %s"), *ResolvedReportPath.AbsolutePath));
 	}
 
 	FString LeftContents;

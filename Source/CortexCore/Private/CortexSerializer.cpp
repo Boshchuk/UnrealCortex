@@ -408,17 +408,13 @@ FCortexPropertySerializationResult FCortexSerializer::PropertyToJsonDeep(const F
 	if (const FTextProperty* TextProp = CastField<FTextProperty>(Property))
 	{
 		const FText& TextValue = TextProp->GetPropertyValue(ValuePtr);
-		TSharedRef<FJsonObject> TextObject = MakeShared<FJsonObject>();
-		TextObject->SetStringField(TEXT("text"), TextValue.ToString());
+		TSharedPtr<FJsonObject> TextObject = FCortexSerializer::TextToJson(TextValue);
 
 		FName TableId;
 		FString Key;
-		if (FTextInspector::GetTableIdAndKey(TextValue, TableId, Key))
-		{
-			TextObject->SetStringField(TEXT("string_table"), TableId.ToString());
-			TextObject->SetStringField(TEXT("key"), Key);
-		}
-		else if (Policy.bIncludeTextMetadata && !TextValue.IsEmpty())
+		if (Policy.bIncludeTextMetadata
+			&& !TextValue.IsEmpty()
+			&& !FTextInspector::GetTableIdAndKey(TextValue, TableId, Key))
 		{
 			AddIssue(
 				Result,
@@ -616,6 +612,33 @@ FCortexPropertySerializationResult FCortexSerializer::PropertyToJsonDeep(const F
 
 	if (IsObjectIdentityProperty(Property))
 	{
+		if (const FObjectProperty* ObjectProperty = CastField<FObjectProperty>(Property))
+		{
+			const UObject* Object = ObjectProperty->GetObjectPropertyValue(ValuePtr);
+			if (Object != nullptr
+				&& Policy.bExpandInstancedSubobjects
+				&& Property->HasAllPropertyFlags(CPF_InstancedReference))
+			{
+				TSharedRef<FJsonObject> SubObject = MakeShared<FJsonObject>();
+				SubObject->SetStringField(TEXT("_class"), Object->GetClass()->GetName());
+
+				FCortexSerializationPolicy NestedPolicy = Policy;
+				--NestedPolicy.MaxDepth;
+				const FCortexPropertySerializationResult Properties = StructToJsonDeepInternal(
+					Object->GetClass(),
+					Object,
+					NestedPolicy,
+					FieldPath);
+				if (Properties.JsonValue.IsValid() && Properties.JsonValue->AsObject()->Values.Num() > 0)
+				{
+					SubObject->SetObjectField(TEXT("properties"), Properties.JsonValue->AsObject());
+				}
+				Result.JsonValue = MakeShared<FJsonValueObject>(SubObject);
+				AppendSerializationIssues(Result, Properties);
+				return Result;
+			}
+		}
+
 		Result.JsonValue = ObjectIdentityToJson(Property, ValuePtr);
 		if (HasObjectIdentityValue(Property, ValuePtr)
 			&& CastField<FSoftObjectProperty>(Property) == nullptr

@@ -44,12 +44,12 @@ namespace
 		return Row;
 	}
 
-	FString PackagePathForAsset(const FString& RunId, const FString& AssetName)
+	FString JsonDiffPackagePathForAsset(const FString& RunId, const FString& AssetName)
 	{
 		return FString::Printf(TEXT("%s/%s/%s"), JsonDiffTestRoot, *RunId, *AssetName);
 	}
 
-	bool SupportedCommandNamesContain(const TArray<FCortexCommandInfo>& Commands, const FString& CommandName)
+	bool JsonDiffSupportedCommandNamesContain(const TArray<FCortexCommandInfo>& Commands, const FString& CommandName)
 	{
 		for (const FCortexCommandInfo& Command : Commands)
 		{
@@ -62,7 +62,7 @@ namespace
 		return false;
 	}
 
-	void DeletePackageFile(const FString& PackageName)
+	void JsonDiffDeletePackageFile(const FString& PackageName)
 	{
 		const FString Filename = FPackageName::LongPackageNameToFilename(
 			PackageName,
@@ -74,7 +74,7 @@ namespace
 		}
 	}
 
-	void CleanupLoadedPackage(const FString& PackageName)
+	void JsonDiffCleanupLoadedPackage(const FString& PackageName)
 	{
 		if (UPackage* Package = FindPackage(nullptr, *PackageName))
 		{
@@ -97,10 +97,10 @@ namespace
 		}
 	}
 
-	void CleanupPackageByName(const FString& PackageName)
+	void JsonDiffCleanupPackageByName(const FString& PackageName)
 	{
-		CleanupLoadedPackage(PackageName);
-		DeletePackageFile(PackageName);
+		JsonDiffCleanupLoadedPackage(PackageName);
+		JsonDiffDeletePackageFile(PackageName);
 	}
 
 	class FCortexDataJsonDiffTestFixture
@@ -273,7 +273,7 @@ namespace
 			IFileManager::Get().DeleteDirectory(*FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexJsonDiffTests"), RunId), false, true);
 			for (int32 Index = CreatedPackageNames.Num() - 1; Index >= 0; --Index)
 			{
-				CleanupPackageByName(CreatedPackageNames[Index]);
+				JsonDiffCleanupPackageByName(CreatedPackageNames[Index]);
 			}
 			CreatedPackageNames.Empty();
 		}
@@ -281,7 +281,7 @@ namespace
 		template <typename AssetType>
 		AssetType* CreateAsset(const FString& AssetName)
 		{
-			const FString PackageName = PackagePathForAsset(RunId, AssetName);
+			const FString PackageName = JsonDiffPackagePathForAsset(RunId, AssetName);
 			if (FindPackage(nullptr, *PackageName) != nullptr || FPackageName::DoesPackageExist(PackageName))
 			{
 				return nullptr;
@@ -322,6 +322,12 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 )
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataJsonDiffAutoRejectsAmbiguousCanonicalShapeTest,
+	"Cortex.Data.JsonDiff.AutoRejectsAmbiguousCanonicalShape",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexDataJsonDiffModeOmittedDefaultsToAutoTest,
 	"Cortex.Data.JsonDiff.Datatable.ModeOmittedDefaultsToAuto",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
@@ -348,6 +354,18 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexDataJsonDiffExplicitKeyFieldTest,
 	"Cortex.Data.JsonDiff.External.KeyField",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataJsonDiffStringTableExplicitKeyFieldTest,
+	"Cortex.Data.JsonDiff.External.StringTableKeyField",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataJsonDiffDataAssetsExplicitKeyFieldTest,
+	"Cortex.Data.JsonDiff.External.DataAssetsKeyField",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
@@ -393,6 +411,12 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexDataJsonDiffFailureClearsStaleReportTest,
+	"Cortex.Data.JsonDiff.Errors.FailureClearsStaleReport",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
 bool FCortexDataJsonDiffCommandsRegisteredTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
@@ -402,7 +426,7 @@ bool FCortexDataJsonDiffCommandsRegisteredTest::RunTest(const FString& Parameter
 
 	TestTrue(
 		TEXT("compare_data_json is advertised"),
-		SupportedCommandNamesContain(Commands, TEXT("compare_data_json")));
+		JsonDiffSupportedCommandNamesContain(Commands, TEXT("compare_data_json")));
 
 	FCortexCommandRouter Router = CreateDataJsonDiffTestRouter();
 
@@ -460,6 +484,24 @@ bool FCortexDataJsonDiffAutoRejectsGenericWrappersTest::RunTest(const FString& P
 	TestFalse(TEXT("generic wrapper auto detection fails"), Result.bSuccess);
 	TestEqual(TEXT("generic wrapper auto failure uses InvalidOperation"), Result.ErrorCode, CortexErrorCodes::InvalidOperation);
 	TestFalse(TEXT("no report is written on auto-detection failure"), Fixture.FileExists(ReportPath));
+	return true;
+}
+
+bool FCortexDataJsonDiffAutoRejectsAmbiguousCanonicalShapeTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataJsonDiffTestFixture Fixture;
+	const FString AmbiguousJson = TEXT(R"({"table_path":"/Game/Data/DT","rows":[],"string_table_path":"/Game/Data/ST","entries":[]})");
+	const FString LeftPath = Fixture.WriteJsonFile(TEXT("left.json"), AmbiguousJson);
+	const FString RightPath = Fixture.WriteJsonFile(TEXT("right.json"), AmbiguousJson);
+	const FString ReportPath = Fixture.MakeSavedPath(TEXT("report.json"));
+
+	const FCortexCommandResult Result = Fixture.CompareJson(LeftPath, RightPath, ReportPath, TEXT("auto"));
+
+	TestFalse(TEXT("ambiguous canonical auto detection fails"), Result.bSuccess);
+	TestEqual(TEXT("ambiguous auto uses InvalidOperation"), Result.ErrorCode, CortexErrorCodes::InvalidOperation);
+	TestFalse(TEXT("ambiguous auto writes no report"), Fixture.FileExists(ReportPath));
 	return true;
 }
 
@@ -575,6 +617,54 @@ bool FCortexDataJsonDiffExplicitKeyFieldTest::RunTest(const FString& Parameters)
 
 	TestEqual(
 		TEXT("changed count is one"),
+		static_cast<int32>(Result.Data->GetObjectField(TEXT("counts"))->GetNumberField(TEXT("changed"))),
+		1);
+	return true;
+}
+
+bool FCortexDataJsonDiffStringTableExplicitKeyFieldTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataJsonDiffTestFixture Fixture;
+	const FString LeftPath = Fixture.WriteJsonFile(TEXT("left.json"), TEXT(R"({"items":[{"id":"QuestA","source_string":"Old text","locale":"en"}]})"));
+	const FString RightPath = Fixture.WriteJsonFile(TEXT("right.json"), TEXT(R"({"records":[{"id":"QuestA","source_string":"New text","locale":"en"}]})"));
+	const FString ReportPath = Fixture.MakeSavedPath(TEXT("report.json"));
+
+	const FCortexCommandResult Result = Fixture.CompareJson(LeftPath, RightPath, ReportPath, TEXT("string_table_entries"), TEXT("id"));
+	TestTrue(TEXT("string table explicit key_field compare succeeds"), Result.bSuccess);
+	TestTrue(TEXT("string table explicit key_field compare returns data"), Result.Data.IsValid());
+	if (!Result.bSuccess || !Result.Data.IsValid())
+	{
+		return false;
+	}
+
+	TestEqual(
+		TEXT("string table changed count is one"),
+		static_cast<int32>(Result.Data->GetObjectField(TEXT("counts"))->GetNumberField(TEXT("changed"))),
+		1);
+	return true;
+}
+
+bool FCortexDataJsonDiffDataAssetsExplicitKeyFieldTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataJsonDiffTestFixture Fixture;
+	const FString LeftPath = Fixture.WriteJsonFile(TEXT("left.json"), TEXT(R"([{"id":"QuestA","Damage":5,"Category":"Quest"}])"));
+	const FString RightPath = Fixture.WriteJsonFile(TEXT("right.json"), TEXT(R"([{"id":"QuestA","Damage":7,"Category":"Quest"}])"));
+	const FString ReportPath = Fixture.MakeSavedPath(TEXT("report.json"));
+
+	const FCortexCommandResult Result = Fixture.CompareJson(LeftPath, RightPath, ReportPath, TEXT("data_assets"), TEXT("id"));
+	TestTrue(TEXT("data asset explicit key_field compare succeeds"), Result.bSuccess);
+	TestTrue(TEXT("data asset explicit key_field compare returns data"), Result.Data.IsValid());
+	if (!Result.bSuccess || !Result.Data.IsValid())
+	{
+		return false;
+	}
+
+	TestEqual(
+		TEXT("data asset changed count is one"),
 		static_cast<int32>(Result.Data->GetObjectField(TEXT("counts"))->GetNumberField(TEXT("changed"))),
 		1);
 	return true;
@@ -778,5 +868,37 @@ bool FCortexDataJsonDiffReportCollisionFailsTest::RunTest(const FString& Paramet
 
 	TestFalse(TEXT("report collision compare fails"), Result.bSuccess);
 	TestEqual(TEXT("report collision uses INVALID_FILE_PATH"), Result.ErrorCode, CortexErrorCodes::InvalidFilePath);
+	return true;
+}
+
+bool FCortexDataJsonDiffFailureClearsStaleReportTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexDataJsonDiffTestFixture Fixture;
+	const FString LeftPath = Fixture.WriteJsonFile(TEXT("left.json"), TEXT(R"([{"id":"QuestA","Priority":26}])"));
+	const FString RightPath = Fixture.WriteJsonFile(TEXT("right.json"), TEXT(R"([{"id":"QuestA","Priority":28}])"));
+	const FString ReportPath = Fixture.MakeSavedPath(TEXT("report.json"));
+
+	const FCortexCommandResult SuccessResult = Fixture.CompareJson(
+		LeftPath,
+		RightPath,
+		ReportPath,
+		TEXT("datatable_rows"),
+		TEXT("id"));
+	TestTrue(TEXT("initial compare writes report"), SuccessResult.bSuccess);
+	TestTrue(TEXT("initial report exists"), Fixture.FileExists(ReportPath));
+
+	const FString BadLeftPath = Fixture.WriteJsonFile(TEXT("bad_left.json"), TEXT("{"));
+	const FCortexCommandResult FailureResult = Fixture.CompareJson(
+		BadLeftPath,
+		RightPath,
+		ReportPath,
+		TEXT("datatable_rows"),
+		TEXT("id"));
+
+	TestFalse(TEXT("malformed rerun fails"), FailureResult.bSuccess);
+	TestEqual(TEXT("malformed rerun uses MALFORMED_JSON"), FailureResult.ErrorCode, CortexErrorCodes::MalformedJson);
+	TestFalse(TEXT("malformed rerun clears stale report"), Fixture.FileExists(ReportPath));
 	return true;
 }

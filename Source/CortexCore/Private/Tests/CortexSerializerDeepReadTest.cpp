@@ -151,8 +151,14 @@ bool FCortexSerializerDeepReadTextShapeTest::RunTest(const FString& Parameters)
 
 	const TSharedPtr<FJsonObject> Root = Result.JsonValue->AsObject()->GetObjectField(TEXT("Root"));
 	const TSharedPtr<FJsonObject> Title = Root->GetObjectField(TEXT("Title"));
-	TestEqual(TEXT("deep FText uses text field"), Title->GetStringField(TEXT("text")), TEXT("Displayed value"));
+	TestEqual(TEXT("deep FText keeps deserializable value field"), Title->GetStringField(TEXT("value")), TEXT("Displayed value"));
 	TestTrue(TEXT("literal FText metadata gap emits partial metadata issue"), Result.bPartial);
+
+	FText RoundTrippedText;
+	TArray<FString> Warnings;
+	TestTrue(TEXT("deep FText output can be consumed by TextFromJson"),
+		FCortexSerializer::TextFromJson(Root->TryGetField(TEXT("Title")), RoundTrippedText, Warnings));
+	TestEqual(TEXT("round-tripped deep FText preserves display value"), RoundTrippedText.ToString(), TEXT("Displayed value"));
 
 	bool bFoundTextIssue = false;
 	for (const FCortexSerializationIssue& Issue : Result.Issues)
@@ -160,6 +166,41 @@ bool FCortexSerializerDeepReadTextShapeTest::RunTest(const FString& Parameters)
 		bFoundTextIssue = bFoundTextIssue || Issue.Code == TEXT("PARTIAL_TEXT_METADATA");
 	}
 	TestTrue(TEXT("partial text metadata issue is reported"), bFoundTextIssue);
+
+	Object->MarkAsGarbage();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexSerializerDeepReadInstancedSubObjectTest,
+	"Cortex.Core.Serializer.DeepRead.InstancedSubObject",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexSerializerDeepReadInstancedSubObjectTest::RunTest(const FString& Parameters)
+{
+	UCortexSerializerDeepReadObject* Object = NewObject<UCortexSerializerDeepReadObject>();
+	Object->Root.InstancedObject = NewObject<UCortexDeepReadInstancedSubObject>(Object);
+	Object->Root.InstancedObject->Label = TEXT("expanded label");
+	Object->Root.InstancedObject->Internal = TEXT("expanded internal");
+
+	FCortexSerializationPolicy Policy;
+	Policy.Label = ECortexSerializationPolicyLabel::ReflectedRead;
+	Policy.MaxDepth = 8;
+	Policy.bExpandInstancedSubobjects = true;
+
+	const FCortexPropertySerializationResult Result = FCortexSerializer::ObjectToJsonDeep(Object, Policy);
+	const TSharedPtr<FJsonObject> Root = Result.JsonValue->AsObject()->GetObjectField(TEXT("Root"));
+	const TSharedPtr<FJsonObject> InstancedObject = Root->GetObjectField(TEXT("InstancedObject"));
+	TestEqual(TEXT("instanced subobject includes class discriminator"),
+		InstancedObject->GetStringField(TEXT("_class")), TEXT("CortexDeepReadInstancedSubObject"));
+	TestTrue(TEXT("instanced subobject includes properties object"),
+		InstancedObject->HasTypedField<EJson::Object>(TEXT("properties")));
+	const TSharedPtr<FJsonObject> Properties = InstancedObject->GetObjectField(TEXT("properties"));
+	TestEqual(TEXT("instanced subobject expands editable field"),
+		Properties->GetStringField(TEXT("Label")), TEXT("expanded label"));
+	TestEqual(TEXT("reflected read expands internal field"),
+		Properties->GetStringField(TEXT("Internal")), TEXT("expanded internal"));
 
 	Object->MarkAsGarbage();
 	return true;

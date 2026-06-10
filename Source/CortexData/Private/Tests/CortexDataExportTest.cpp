@@ -1234,6 +1234,7 @@ bool FCortexDataExportDataAssetsCatalogAndPropertiesTest::RunTest(const FString&
 	if (CatalogFileJson.IsValid())
 	{
 		TestTrue(TEXT("file contains data_assets array"), CatalogFileJson->HasTypedField<EJson::Array>(TEXT("data_assets")));
+		TestEqual(TEXT("file count remains a compatibility alias for exported_count"), static_cast<int32>(CatalogFileJson->GetNumberField(TEXT("count"))), 1);
 		TestEqual(TEXT("file exported count is one"), static_cast<int32>(CatalogFileJson->GetNumberField(TEXT("exported_count"))), 1);
 		TestEqual(TEXT("file includes class_name provenance"), CatalogFileJson->GetStringField(TEXT("class_name")), TEXT("CortexTestDataAsset"));
 		TestEqual(TEXT("file includes path_filter provenance"), CatalogFileJson->GetStringField(TEXT("path_filter")), FPaths::GetPath(DataAsset->GetPathName()));
@@ -1278,6 +1279,7 @@ bool FCortexDataExportDataAssetsCatalogAndPropertiesTest::RunTest(const FString&
 	if (PropertiesFileJson.IsValid())
 	{
 		TestTrue(TEXT("file contains data_assets array"), PropertiesFileJson->HasTypedField<EJson::Array>(TEXT("data_assets")));
+		TestEqual(TEXT("properties file count remains a compatibility alias for exported_count"), static_cast<int32>(PropertiesFileJson->GetNumberField(TEXT("count"))), 1);
 		TestEqual(TEXT("file exported count is one"), static_cast<int32>(PropertiesFileJson->GetNumberField(TEXT("exported_count"))), 1);
 		TestTrue(TEXT("properties file records include_properties provenance"), PropertiesFileJson->GetBoolField(TEXT("include_properties")));
 
