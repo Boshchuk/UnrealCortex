@@ -6,7 +6,11 @@
 #include "CortexEditorUtils.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
+#include "Factories/Factory.h"
+#include "Misc/EngineVersionComparison.h"
+#if !UE_VERSION_OLDER_THAN(5, 5, 0)
 #include "StateTreeFactory.h"
+#endif
 #include "IAssetTools.h"
 #include "Misc/PackageName.h"
 #include "Misc/TextBuffer.h"
@@ -279,8 +283,27 @@ FCortexCommandResult FCortexSTAssetOps::CreateAsset(const TSharedPtr<FJsonObject
 	FScopedTransaction Transaction(FText::FromString(
 		FString::Printf(TEXT("Cortex: Create StateTree %s"), *AssetName)));
 
+#if UE_VERSION_OLDER_THAN(5, 5, 0)
+	// StateTreeFactory.h is private in 5.4 (the class itself is module-exported):
+	// construct via reflection and set the protected StateTreeSchemaClass
+	// property directly. FactoryCreateNew honors it the same way SetSchemaClass
+	// does on 5.5+.
+	UClass* FactoryClass = FindObject<UClass>(nullptr, TEXT("/Script/StateTreeEditorModule.StateTreeFactory"));
+	if (FactoryClass == nullptr)
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidOperation,
+			TEXT("StateTreeFactory class not found in StateTreeEditorModule"));
+	}
+	UFactory* Factory = NewObject<UFactory>(GetTransientPackage(), FactoryClass);
+	if (FObjectPropertyBase* SchemaProperty = CastField<FObjectPropertyBase>(FactoryClass->FindPropertyByName(TEXT("StateTreeSchemaClass"))))
+	{
+		SchemaProperty->SetObjectPropertyValue_InContainer(Factory, SchemaClass);
+	}
+#else
 	UStateTreeFactory* Factory = NewObject<UStateTreeFactory>();
 	Factory->SetSchemaClass(SchemaClass);
+#endif
 
 	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools")).Get();
 	UObject* CreatedObject = AssetTools.CreateAsset(AssetName, AssetFolder, UStateTree::StaticClass(), Factory);

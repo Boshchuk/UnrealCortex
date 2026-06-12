@@ -7,8 +7,13 @@
 #include "Engine/DataTable.h"
 #include "Internationalization/StringTable.h"
 #include "Internationalization/StringTableCore.h"
+#include "Misc/EngineVersionComparison.h"
 #include "Misc/PackageName.h"
+#if UE_VERSION_OLDER_THAN(5, 5, 0)
+#include "InstancedStruct.h"
+#else
 #include "StructUtils/InstancedStruct.h"
+#endif
 #include "UObject/UObjectHash.h"
 
 namespace
