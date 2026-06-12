@@ -465,7 +465,7 @@ bool FCortexDataImportQueueDryRunDefaultWritesReportTest::RunTest(const FString&
 	TestNotNull(TEXT("row still exists after dry run"), Row);
 	if (Row != nullptr)
 	{
-		TestNotEqual(TEXT("dry-run does not mutate row field"), Row->row_name, TEXT("Imported Alpha"));
+		TestNotEqual(TEXT("dry-run does not mutate row field"), Row->row_name, FString(TEXT("Imported Alpha")));
 	}
 
 	return true;
@@ -1037,7 +1037,7 @@ bool FCortexDataImportQueuePartialAndStopMatrixTest::RunTest(const FString& Para
 			}
 			else
 			{
-				TestNotEqual(TEXT("matrix row unchanged"), Row->row_name, TEXT("Matrix Applied"));
+				TestNotEqual(TEXT("matrix row unchanged"), Row->row_name, FString(TEXT("Matrix Applied")));
 			}
 		}
 
@@ -1179,7 +1179,7 @@ bool FCortexDataImportQueueReportPathPrecheckFailureTest::RunTest(const FString&
 	TestNotNull(TEXT("row still exists after blocked report parent"), Row);
 	if (Row != nullptr)
 	{
-		TestNotEqual(TEXT("blocked report parent prevents mutation"), Row->row_name, TEXT("Should Not Apply"));
+		TestNotEqual(TEXT("blocked report parent prevents mutation"), Row->row_name, FString(TEXT("Should Not Apply")));
 	}
 
 	return true;

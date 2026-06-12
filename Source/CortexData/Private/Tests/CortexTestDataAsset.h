@@ -1,7 +1,12 @@
 #pragma once
 
 #include "Engine/DataAsset.h"
+#include "Misc/EngineVersionComparison.h"
+#if UE_VERSION_OLDER_THAN(5, 5, 0)
+#include "InstancedStruct.h"
+#else
 #include "StructUtils/InstancedStruct.h"
+#endif
 #include "UObject/Interface.h"
 #include "CortexTestDataAsset.generated.h"
 
