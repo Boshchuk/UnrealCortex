@@ -1,6 +1,7 @@
 #include "Operations/CortexBPComponentOps.h"
 #include "Operations/CortexBPAssetOps.h"
 #include "CortexBlueprintModule.h"
+#include "UObject/SavePackage.h"
 #include "Components/ActorComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/Blueprint.h"
