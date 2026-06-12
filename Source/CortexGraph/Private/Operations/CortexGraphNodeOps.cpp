@@ -1,6 +1,7 @@
 #include "Operations/CortexGraphNodeOps.h"
 #include "CortexGraphModule.h"
 #include "CortexSerializer.h"
+#include "CortexEditorUtils.h"
 #include "CortexGraphLayoutOps.h"
 #include "CortexBatchScope.h"
 #include "Engine/Blueprint.h"
@@ -25,6 +26,8 @@
 #include "K2Node_SpawnActorFromClass.h"
 #include "K2Node_DynamicCast.h"
 #include "K2Node_MacroInstance.h"
+#include "K2Node_Composite.h"
+#include "K2Node_Tunnel.h"
 #include "K2Node_SwitchEnum.h"
 #include "K2Node_SwitchString.h"
 #include "K2Node_SwitchInteger.h"
@@ -39,6 +42,150 @@
 #include "Editor.h"
 #include "Engine/World.h"
 #include "Engine/LevelScriptBlueprint.h"
+#include "UObject/UObjectIterator.h"
+
+namespace
+{
+FString NormalizeGraphBlueprintAssetPath(const FString& AssetPath)
+{
+	return FCortexEditorUtils::NormalizeMountedContentPath(AssetPath);
+}
+
+FString GetGraphNodeWritableValidationPath(const FString& AssetPath)
+{
+	static const FString LevelBPPrefix = TEXT("__level_bp__:");
+	const FString BlueprintPath = AssetPath.StartsWith(LevelBPPrefix)
+		? AssetPath.Mid(LevelBPPrefix.Len())
+		: AssetPath;
+	return FPackageName::ObjectPathToPackageName(NormalizeGraphBlueprintAssetPath(BlueprintPath));
+}
+
+bool DoesGraphBlueprintPackageExist(const FString& PackagePath)
+{
+	if (FindPackage(nullptr, *PackagePath) != nullptr)
+	{
+		return true;
+	}
+
+	FString PackageFilename;
+	return FPackageName::TryConvertLongPackageNameToFilename(
+			PackagePath,
+			PackageFilename,
+			FPackageName::GetAssetPackageExtension())
+		&& FPackageName::DoesPackageExist(PackagePath);
+}
+
+bool ValidateWritableGraphNodeBlueprintAssetPath(const FString& AssetPath, FCortexCommandResult& OutError)
+{
+	FString ValidationError;
+	if (!FCortexEditorUtils::IsWritableMountedContentPath(GetGraphNodeWritableValidationPath(AssetPath), ValidationError))
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
+		return false;
+	}
+
+	return true;
+}
+
+bool ResolveMutableNodeGraph(
+	UBlueprint* Blueprint,
+	const FString& GraphName,
+	UEdGraph*& OutGraph,
+	FCortexCommandResult& OutError)
+{
+	FCortexGraphEntry Entry;
+	if (!FCortexGraphNodeOps::FindGraphEntry(Blueprint, GraphName, Entry))
+	{
+		const FString TargetName = GraphName.IsEmpty() ? TEXT("EventGraph") : GraphName;
+		OutError = FCortexCommandRouter::Error(
+			CortexErrorCodes::GraphNotFound,
+			FString::Printf(TEXT("Graph not found: %s"), *TargetName)
+		);
+		return false;
+	}
+
+	if (!FCortexGraphNodeOps::IsMutableGraphKind(Entry.Kind))
+	{
+		OutError = FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidOperation,
+			FString::Printf(
+				TEXT("Graph kind is not mutable through graph_cmd: %s"),
+				*FCortexGraphNodeOps::GraphKindToString(Entry.Kind))
+		);
+		return false;
+	}
+
+	OutGraph = Entry.Graph;
+	return true;
+}
+
+UClass* ResolveGraphNodeClassIdentifier(const FString& ClassIdentifier)
+{
+	if (ClassIdentifier.IsEmpty())
+	{
+		return nullptr;
+	}
+
+	if (UClass* FoundClass = FindObject<UClass>(nullptr, *ClassIdentifier))
+	{
+		return FoundClass;
+	}
+
+	if (!ClassIdentifier.StartsWith(TEXT("/")))
+	{
+		if (UClass* FoundClass = FindFirstObject<UClass>(*ClassIdentifier, EFindFirstObjectOptions::NativeFirst))
+		{
+			return FoundClass;
+		}
+
+		const FString EnginePath = FString::Printf(TEXT("/Script/Engine.%s"), *ClassIdentifier);
+		if (UClass* EngineClass = FindObject<UClass>(nullptr, *EnginePath))
+		{
+			return EngineClass;
+		}
+	}
+
+	for (TObjectIterator<UClass> It; It; ++It)
+	{
+		UClass* Candidate = *It;
+		if (!IsValid(Candidate))
+		{
+			continue;
+		}
+
+		if (Candidate->GetName() == ClassIdentifier || Candidate->GetPathName() == ClassIdentifier)
+		{
+			return Candidate;
+		}
+	}
+
+	if (!ClassIdentifier.StartsWith(TEXT("/")))
+	{
+		return nullptr;
+	}
+
+	const FString PackageName = FPackageName::ObjectPathToPackageName(ClassIdentifier);
+	const bool bPackageExists =
+		PackageName.StartsWith(TEXT("/"))
+		&& (FindPackage(nullptr, *PackageName) || FPackageName::DoesPackageExist(PackageName));
+	if (!bPackageExists)
+	{
+		return nullptr;
+	}
+
+	if (UClass* LoadedClass = LoadObject<UClass>(nullptr, *ClassIdentifier))
+	{
+		return LoadedClass;
+	}
+
+	if (UBlueprint* BlueprintAsset = LoadObject<UBlueprint>(nullptr, *ClassIdentifier))
+	{
+		return BlueprintAsset->GeneratedClass;
+	}
+
+	return nullptr;
+}
+}
 
 UBlueprint* FCortexGraphNodeOps::LoadBlueprint(const FString& AssetPath, FCortexCommandResult& OutError)
 {
@@ -46,7 +193,8 @@ UBlueprint* FCortexGraphNodeOps::LoadBlueprint(const FString& AssetPath, FCortex
 	static const FString LevelBPPrefix = TEXT("__level_bp__:");
 	if (AssetPath.StartsWith(LevelBPPrefix))
 	{
-		const FString MapPath = AssetPath.Mid(LevelBPPrefix.Len());
+		const FString MapPath = FPackageName::ObjectPathToPackageName(
+			NormalizeGraphBlueprintAssetPath(AssetPath.Mid(LevelBPPrefix.Len())));
 
 		UWorld* World = nullptr;
 		if (GEditor)
@@ -94,47 +242,127 @@ UBlueprint* FCortexGraphNodeOps::LoadBlueprint(const FString& AssetPath, FCortex
 		return LSB;
 	}
 
+	const FString NormalizedPath = NormalizeGraphBlueprintAssetPath(AssetPath);
+
 	// Check if package exists before LoadObject to avoid SkipPackage warnings
-	FString PkgName = FPackageName::ObjectPathToPackageName(AssetPath);
-	if (!FindPackage(nullptr, *PkgName) && !FPackageName::DoesPackageExist(PkgName))
+	const FString PkgName = FPackageName::ObjectPathToPackageName(NormalizedPath);
+	if (!DoesGraphBlueprintPackageExist(PkgName))
 	{
 		OutError = FCortexCommandRouter::Error(
 			CortexErrorCodes::AssetNotFound,
-			FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath)
+			FString::Printf(TEXT("Blueprint not found: %s"), *NormalizedPath)
 		);
 		return nullptr;
 	}
 
-	UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *AssetPath);
+	UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *NormalizedPath);
 	if (Blueprint == nullptr)
 	{
 		OutError = FCortexCommandRouter::Error(
 			CortexErrorCodes::AssetNotFound,
-			FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath)
+			FString::Printf(TEXT("Blueprint not found: %s"), *NormalizedPath)
 		);
 	}
 	return Blueprint;
 }
 
+void FCortexGraphNodeOps::EnumerateUserGraphs(UBlueprint* Blueprint, TArray<FCortexGraphEntry>& OutEntries)
+{
+	OutEntries.Reset();
+	if (Blueprint == nullptr)
+	{
+		return;
+	}
+
+	auto AppendGraphs = [&OutEntries](const TArray<TObjectPtr<UEdGraph>>& Graphs, ECortexGraphKind Kind, FName OwningInterface)
+	{
+		for (const TObjectPtr<UEdGraph>& GraphPtr : Graphs)
+		{
+			if (UEdGraph* Graph = GraphPtr.Get())
+			{
+				FCortexGraphEntry Entry;
+				Entry.Graph = Graph;
+				Entry.Kind = Kind;
+				Entry.OwningInterface = OwningInterface;
+				OutEntries.Add(Entry);
+			}
+		}
+	};
+
+	AppendGraphs(Blueprint->UbergraphPages, ECortexGraphKind::Ubergraph, NAME_None);
+	AppendGraphs(Blueprint->FunctionGraphs, ECortexGraphKind::Function, NAME_None);
+	AppendGraphs(Blueprint->MacroGraphs, ECortexGraphKind::Macro, NAME_None);
+	AppendGraphs(Blueprint->DelegateSignatureGraphs, ECortexGraphKind::Delegate, NAME_None);
+
+	for (const FBPInterfaceDescription& InterfaceDesc : Blueprint->ImplementedInterfaces)
+	{
+		const FName OwningInterfaceName = InterfaceDesc.Interface ? InterfaceDesc.Interface->GetFName() : NAME_None;
+		AppendGraphs(InterfaceDesc.Graphs, ECortexGraphKind::InterfaceImpl, OwningInterfaceName);
+	}
+}
+
+FString FCortexGraphNodeOps::GraphKindToString(ECortexGraphKind Kind)
+{
+	switch (Kind)
+	{
+		case ECortexGraphKind::Ubergraph:
+			return TEXT("ubergraph");
+		case ECortexGraphKind::Function:
+			return TEXT("function");
+		case ECortexGraphKind::Macro:
+			return TEXT("macro");
+		case ECortexGraphKind::Delegate:
+			return TEXT("delegate");
+		case ECortexGraphKind::InterfaceImpl:
+			return TEXT("interface_impl");
+	}
+
+	return TEXT("function");
+}
+
+bool FCortexGraphNodeOps::FindGraphEntry(UBlueprint* Blueprint, const FString& GraphName, FCortexGraphEntry& OutEntry)
+{
+	const FString TargetName = GraphName.IsEmpty() ? TEXT("EventGraph") : GraphName;
+
+	TArray<FCortexGraphEntry> Entries;
+	EnumerateUserGraphs(Blueprint, Entries);
+	for (const FCortexGraphEntry& Entry : Entries)
+	{
+		if (Entry.Graph && Entry.Graph->GetName() == TargetName)
+		{
+			OutEntry = Entry;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool FCortexGraphNodeOps::IsMutableGraphKind(ECortexGraphKind Kind)
+{
+	switch (Kind)
+	{
+		case ECortexGraphKind::Ubergraph:
+		case ECortexGraphKind::Function:
+		case ECortexGraphKind::Macro:
+		case ECortexGraphKind::InterfaceImpl:
+			return true;
+		case ECortexGraphKind::Delegate:
+			return false;
+	}
+
+	return false;
+}
+
 UEdGraph* FCortexGraphNodeOps::FindGraph(UBlueprint* Blueprint, const FString& GraphName, FCortexCommandResult& OutError)
 {
-	FString TargetName = GraphName.IsEmpty() ? TEXT("EventGraph") : GraphName;
-
-	for (UEdGraph* Graph : Blueprint->UbergraphPages)
+	FCortexGraphEntry Entry;
+	if (FindGraphEntry(Blueprint, GraphName, Entry))
 	{
-		if (Graph && Graph->GetName() == TargetName)
-		{
-			return Graph;
-		}
-	}
-	for (UEdGraph* Graph : Blueprint->FunctionGraphs)
-	{
-		if (Graph && Graph->GetName() == TargetName)
-		{
-			return Graph;
-		}
+		return Entry.Graph;
 	}
 
+	const FString TargetName = GraphName.IsEmpty() ? TEXT("EventGraph") : GraphName;
 	OutError = FCortexCommandRouter::Error(
 		CortexErrorCodes::GraphNotFound,
 		FString::Printf(TEXT("Graph not found: %s"), *TargetName)
@@ -176,6 +404,104 @@ UEdGraphPin* FCortexGraphNodeOps::FindPin(UEdGraphNode* Node, const FString& Pin
 	return nullptr;
 }
 
+UEdGraph* FCortexGraphNodeOps::ResolveSubgraph(UEdGraph* RootGraph, const FString& SubgraphPath, FCortexCommandResult& OutError)
+{
+	if (SubgraphPath.IsEmpty())
+	{
+		return RootGraph;
+	}
+
+	TArray<FString> Segments;
+	SubgraphPath.ParseIntoArray(Segments, TEXT("."), true);
+
+	if (Segments.Num() > MaxSubgraphDepth)
+	{
+		OutError = FCortexCommandRouter::Error(
+			CortexErrorCodes::SubgraphDepthExceeded,
+			FString::Printf(TEXT("Subgraph path exceeds max depth of %d: %s"), MaxSubgraphDepth, *SubgraphPath)
+		);
+		return nullptr;
+	}
+
+	UEdGraph* CurrentGraph = RootGraph;
+
+	for (const FString& Segment : Segments)
+	{
+		bool bFound = false;
+		for (UEdGraphNode* Node : CurrentGraph->Nodes)
+		{
+			if (!IsValid(Node))
+			{
+				continue;
+			}
+			UK2Node_Composite* CompositeNode = Cast<UK2Node_Composite>(Node);
+			if (CompositeNode && CompositeNode->BoundGraph && CompositeNode->BoundGraph->GetName() == Segment)
+			{
+				CurrentGraph = CompositeNode->BoundGraph;
+				bFound = true;
+				break;
+			}
+		}
+
+		if (!bFound)
+		{
+			OutError = FCortexCommandRouter::Error(
+				CortexErrorCodes::SubgraphNotFound,
+				FString::Printf(TEXT("Subgraph not found: '%s' (in path '%s')"), *Segment, *SubgraphPath)
+			);
+			return nullptr;
+		}
+	}
+
+	return CurrentGraph;
+}
+
+void FCortexGraphNodeOps::CollectSubgraphsRecursive(
+	UEdGraph* Graph,
+	const FString& ParentGraphName,
+	const FString& CurrentSubgraphPath,
+	TArray<TSharedPtr<FJsonValue>>& OutArray,
+	int32 Depth)
+{
+	if (!Graph || Depth > MaxSubgraphDepth)
+	{
+		return;
+	}
+
+	for (UEdGraphNode* Node : Graph->Nodes)
+	{
+		if (!IsValid(Node))
+		{
+			continue;
+		}
+		UK2Node_Composite* CompositeNode = Cast<UK2Node_Composite>(Node);
+		if (!CompositeNode || !CompositeNode->BoundGraph)
+		{
+			continue;
+		}
+
+		UEdGraph* Sub = CompositeNode->BoundGraph;
+		if (!IsValid(Sub))
+		{
+			continue;
+		}
+		FString SubPath = CurrentSubgraphPath.IsEmpty()
+			? Sub->GetName()
+			: FString::Printf(TEXT("%s.%s"), *CurrentSubgraphPath, *Sub->GetName());
+
+		TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("name"), Sub->GetName());
+		Entry->SetStringField(TEXT("class"), Sub->GetClass()->GetName());
+		Entry->SetNumberField(TEXT("node_count"), Sub->Nodes.Num());
+		Entry->SetStringField(TEXT("parent_graph"), ParentGraphName);
+		Entry->SetStringField(TEXT("subgraph_path"), SubPath);
+		OutArray.Add(MakeShared<FJsonValueObject>(Entry));
+
+		// Recurse
+		CollectSubgraphsRecursive(Sub, Sub->GetName(), SubPath, OutArray, Depth + 1);
+	}
+}
+
 FCortexCommandResult FCortexGraphNodeOps::ListGraphs(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
@@ -196,8 +522,11 @@ FCortexCommandResult FCortexGraphNodeOps::ListGraphs(const TSharedPtr<FJsonObjec
 
 	TArray<TSharedPtr<FJsonValue>> GraphsArray;
 
-	for (UEdGraph* Graph : Blueprint->UbergraphPages)
+	TArray<FCortexGraphEntry> Entries;
+	EnumerateUserGraphs(Blueprint, Entries);
+	for (const FCortexGraphEntry& GraphEntry : Entries)
 	{
+		UEdGraph* Graph = GraphEntry.Graph;
 		if (Graph == nullptr)
 		{
 			continue;
@@ -206,20 +535,26 @@ FCortexCommandResult FCortexGraphNodeOps::ListGraphs(const TSharedPtr<FJsonObjec
 		Entry->SetStringField(TEXT("name"), Graph->GetName());
 		Entry->SetStringField(TEXT("class"), Graph->GetClass()->GetName());
 		Entry->SetNumberField(TEXT("node_count"), Graph->Nodes.Num());
+		Entry->SetStringField(TEXT("kind"), GraphKindToString(GraphEntry.Kind));
+		if (GraphEntry.Kind == ECortexGraphKind::InterfaceImpl && GraphEntry.OwningInterface != NAME_None)
+		{
+			Entry->SetStringField(TEXT("owning_interface"), GraphEntry.OwningInterface.ToString());
+		}
 		GraphsArray.Add(MakeShared<FJsonValueObject>(Entry));
 	}
 
-	for (UEdGraph* Graph : Blueprint->FunctionGraphs)
+	// Optionally include composite subgraphs
+	bool bIncludeSubgraphs = false;
+	Params->TryGetBoolField(TEXT("include_subgraphs"), bIncludeSubgraphs);
+	if (bIncludeSubgraphs)
 	{
-		if (Graph == nullptr)
+		for (const FCortexGraphEntry& GraphEntry : Entries)
 		{
-			continue;
+			if (GraphEntry.Graph)
+			{
+				CollectSubgraphsRecursive(GraphEntry.Graph, GraphEntry.Graph->GetName(), TEXT(""), GraphsArray, 0);
+			}
 		}
-		TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
-		Entry->SetStringField(TEXT("name"), Graph->GetName());
-		Entry->SetStringField(TEXT("class"), Graph->GetClass()->GetName());
-		Entry->SetNumberField(TEXT("node_count"), Graph->Nodes.Num());
-		GraphsArray.Add(MakeShared<FJsonValueObject>(Entry));
 	}
 
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
@@ -254,6 +589,22 @@ FCortexCommandResult FCortexGraphNodeOps::ListNodes(const TSharedPtr<FJsonObject
 		return LoadError;
 	}
 
+	// Resolve subgraph path if provided
+	FString SubgraphPath;
+	Params->TryGetStringField(TEXT("subgraph_path"), SubgraphPath);
+	if (!SubgraphPath.IsEmpty())
+	{
+		Graph = ResolveSubgraph(Graph, SubgraphPath, LoadError);
+		if (Graph == nullptr)
+		{
+			return LoadError;
+		}
+	}
+
+	// compact=true by default: omit position, node_class, pin_count
+	bool bCompact = true;
+	Params->TryGetBoolField(TEXT("compact"), bCompact);
+
 	TArray<TSharedPtr<FJsonValue>> NodesArray;
 	for (UEdGraphNode* Node : Graph->Nodes)
 	{
@@ -261,31 +612,12 @@ FCortexCommandResult FCortexGraphNodeOps::ListNodes(const TSharedPtr<FJsonObject
 		{
 			continue;
 		}
-		TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
-		Entry->SetStringField(TEXT("node_id"), Node->GetName());
-		Entry->SetStringField(TEXT("class"), Node->GetClass()->GetName());
-		Entry->SetStringField(TEXT("display_name"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
-		TSharedRef<FJsonObject> Pos = MakeShared<FJsonObject>();
-		Pos->SetNumberField(TEXT("x"), Node->NodePosX);
-		Pos->SetNumberField(TEXT("y"), Node->NodePosY);
-		Entry->SetObjectField(TEXT("position"), Pos);
-		Entry->SetNumberField(TEXT("pin_count"), Node->Pins.Num());
-
-		int32 ConnectedPinCount = 0;
-		for (const UEdGraphPin* Pin : Node->Pins)
-		{
-			if (Pin != nullptr && Pin->LinkedTo.Num() > 0)
-			{
-				++ConnectedPinCount;
-			}
-		}
-		Entry->SetNumberField(TEXT("connected_pin_count"), ConnectedPinCount);
-
-		NodesArray.Add(MakeShared<FJsonValueObject>(Entry));
+		NodesArray.Add(MakeShared<FJsonValueObject>(SerializeNode(Node, false, bCompact)));
 	}
 
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetArrayField(TEXT("nodes"), NodesArray);
+	Data->SetNumberField(TEXT("node_count"), NodesArray.Num());
 	return FCortexCommandRouter::Success(Data);
 }
 
@@ -325,34 +657,29 @@ FCortexCommandResult FCortexGraphNodeOps::GetNode(const TSharedPtr<FJsonObject>&
 		return LoadError;
 	}
 
+	// Resolve subgraph path if provided
+	FString SubgraphPath;
+	Params->TryGetStringField(TEXT("subgraph_path"), SubgraphPath);
+	if (!SubgraphPath.IsEmpty())
+	{
+		Graph = ResolveSubgraph(Graph, SubgraphPath, LoadError);
+		if (Graph == nullptr)
+		{
+			return LoadError;
+		}
+	}
+
 	UEdGraphNode* Node = FindNode(Graph, NodeId, LoadError);
 	if (Node == nullptr)
 	{
 		return LoadError;
 	}
 
-	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
-	Data->SetStringField(TEXT("node_id"), Node->GetName());
-	Data->SetStringField(TEXT("class"), Node->GetClass()->GetName());
-	Data->SetStringField(TEXT("display_name"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+	// compact=true by default: omit position, node_class; filter hidden unconnected pins
+	bool bCompact = true;
+	Params->TryGetBoolField(TEXT("compact"), bCompact);
 
-	TSharedRef<FJsonObject> Pos = MakeShared<FJsonObject>();
-	Pos->SetNumberField(TEXT("x"), Node->NodePosX);
-	Pos->SetNumberField(TEXT("y"), Node->NodePosY);
-	Data->SetObjectField(TEXT("position"), Pos);
-
-	TArray<TSharedPtr<FJsonValue>> PinsArray;
-	for (UEdGraphPin* Pin : Node->Pins)
-	{
-		if (Pin == nullptr)
-		{
-			continue;
-		}
-		PinsArray.Add(MakeShared<FJsonValueObject>(SerializePin(Pin, true)));
-	}
-	Data->SetArrayField(TEXT("pins"), PinsArray);
-
-	return FCortexCommandRouter::Success(Data);
+	return FCortexCommandRouter::Success(SerializeNode(Node, true, bCompact));
 }
 
 FCortexCommandResult FCortexGraphNodeOps::SearchNodes(const TSharedPtr<FJsonObject>& Params)
@@ -373,6 +700,12 @@ FCortexCommandResult FCortexGraphNodeOps::SearchNodes(const TSharedPtr<FJsonObje
 	Params->TryGetStringField(TEXT("function_name"), FunctionName);
 	Params->TryGetStringField(TEXT("display_name"), DisplayName);
 
+	FString GraphName;
+	Params->TryGetStringField(TEXT("graph_name"), GraphName);
+
+	FString SubgraphPath;
+	Params->TryGetStringField(TEXT("subgraph_path"), SubgraphPath);
+
 	if (NodeClass.IsEmpty() && FunctionName.IsEmpty() && DisplayName.IsEmpty())
 	{
 		return FCortexCommandRouter::Error(
@@ -388,22 +721,39 @@ FCortexCommandResult FCortexGraphNodeOps::SearchNodes(const TSharedPtr<FJsonObje
 		return LoadError;
 	}
 
+	// compact=true by default: omit node_class from results
+	bool bCompact = true;
+	Params->TryGetBoolField(TEXT("compact"), bCompact);
+
 	TArray<TSharedPtr<FJsonValue>> ResultsArray;
 
-	auto SearchGraph = [&](UEdGraph* Graph)
+	// Lambda: search a single graph, optionally recursing into composites
+	TFunction<void(UEdGraph*, const FString&, int32)> SearchGraphRecursive;
+	SearchGraphRecursive = [&](UEdGraph* Graph, const FString& CurrentSubgraphPath, int32 Depth)
 	{
-		if (Graph == nullptr)
+		if (Graph == nullptr || Depth > MaxSubgraphDepth)
 		{
 			return;
 		}
 
 		for (UEdGraphNode* Node : Graph->Nodes)
 		{
-			if (Node == nullptr)
+			if (!IsValid(Node))
 			{
 				continue;
 			}
 
+			// Recurse into composites
+			UK2Node_Composite* CompositeNode = Cast<UK2Node_Composite>(Node);
+			if (CompositeNode && CompositeNode->BoundGraph)
+			{
+				FString ChildPath = CurrentSubgraphPath.IsEmpty()
+					? CompositeNode->BoundGraph->GetName()
+					: FString::Printf(TEXT("%s.%s"), *CurrentSubgraphPath, *CompositeNode->BoundGraph->GetName());
+				SearchGraphRecursive(CompositeNode->BoundGraph, ChildPath, Depth + 1);
+			}
+
+			// Apply filters
 			if (!NodeClass.IsEmpty())
 			{
 				const FString RuntimeClassName = Node->GetClass()->GetName();
@@ -449,24 +799,46 @@ FCortexCommandResult FCortexGraphNodeOps::SearchNodes(const TSharedPtr<FJsonObje
 
 			TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
 			Entry->SetStringField(TEXT("node_id"), Node->GetName());
-			Entry->SetStringField(TEXT("class"), Node->GetClass()->GetName());
+			const FString SearchNodeClass = Node->GetClass()->GetName();
+			Entry->SetStringField(TEXT("class"), SearchNodeClass);
+			if (!bCompact)
+			{
+				Entry->SetStringField(TEXT("node_class"), SearchNodeClass);
+			}
 			Entry->SetStringField(TEXT("display_name"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
 			Entry->SetStringField(TEXT("graph_name"), Graph->GetName());
+			if (!CurrentSubgraphPath.IsEmpty())
+			{
+				Entry->SetStringField(TEXT("subgraph_path"), CurrentSubgraphPath);
+			}
 			ResultsArray.Add(MakeShared<FJsonValueObject>(Entry));
 		}
 	};
 
-	for (UEdGraph* Graph : Blueprint->UbergraphPages)
+	if (!SubgraphPath.IsEmpty())
 	{
-		SearchGraph(Graph);
+		// Search within a specific subgraph only
+		UEdGraph* RootGraph = FindGraph(Blueprint, GraphName, LoadError);
+		if (RootGraph == nullptr)
+		{
+			return LoadError;
+		}
+		UEdGraph* TargetGraph = ResolveSubgraph(RootGraph, SubgraphPath, LoadError);
+		if (TargetGraph == nullptr)
+		{
+			return LoadError;
+		}
+		SearchGraphRecursive(TargetGraph, SubgraphPath, 0);
 	}
-	for (UEdGraph* Graph : Blueprint->FunctionGraphs)
+	else
 	{
-		SearchGraph(Graph);
-	}
-	for (UEdGraph* Graph : Blueprint->MacroGraphs)
-	{
-		SearchGraph(Graph);
+		// Search all top-level graphs, recursively descending into composites
+		TArray<FCortexGraphEntry> Entries;
+		EnumerateUserGraphs(Blueprint, Entries);
+		for (const FCortexGraphEntry& Entry : Entries)
+		{
+			SearchGraphRecursive(Entry.Graph, TEXT(""), 0);
+		}
 	}
 
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
@@ -508,16 +880,33 @@ FCortexCommandResult FCortexGraphNodeOps::AddNode(const TSharedPtr<FJsonObject>&
 	}
 
 	FCortexCommandResult LoadError;
+	if (!ValidateWritableGraphNodeBlueprintAssetPath(AssetPath, LoadError))
+	{
+		return LoadError;
+	}
+
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath, LoadError);
 	if (Blueprint == nullptr)
 	{
 		return LoadError;
 	}
 
-	UEdGraph* Graph = FindGraph(Blueprint, GraphName, LoadError);
-	if (Graph == nullptr)
+	UEdGraph* Graph = nullptr;
+	if (!ResolveMutableNodeGraph(Blueprint, GraphName, Graph, LoadError))
 	{
 		return LoadError;
+	}
+
+	// Resolve subgraph path if provided
+	FString SubgraphPath;
+	Params->TryGetStringField(TEXT("subgraph_path"), SubgraphPath);
+	if (!SubgraphPath.IsEmpty())
+	{
+		Graph = ResolveSubgraph(Graph, SubgraphPath, LoadError);
+		if (Graph == nullptr)
+		{
+			return LoadError;
+		}
 	}
 
 	// Resolve node class
@@ -540,7 +929,7 @@ FCortexCommandResult FCortexGraphNodeOps::AddNode(const TSharedPtr<FJsonObject>&
 	{
 		NodeClass = UK2Node_VariableGet::StaticClass();
 	}
-	else if (NodeClassName == TEXT("UK2Node_Event"))
+	else if (NodeClassName == TEXT("UK2Node_Event") || NodeClassName == TEXT("Event"))
 	{
 		NodeClass = UK2Node_Event::StaticClass();
 	}
@@ -666,6 +1055,10 @@ FCortexCommandResult FCortexGraphNodeOps::AddNode(const TSharedPtr<FJsonObject>&
 	{
 		NodeClass = UK2Node_CreateDelegate::StaticClass();
 	}
+	else if (NodeClassName == TEXT("UK2Node_Composite") || NodeClassName == TEXT("Composite"))
+	{
+		NodeClass = UK2Node_Composite::StaticClass();
+	}
 
 	if (NodeClass == nullptr)
 	{
@@ -783,6 +1176,30 @@ FCortexCommandResult FCortexGraphNodeOps::AddNode(const TSharedPtr<FJsonObject>&
 			}
 		}
 
+		UK2Node_DynamicCast* CastNode = Cast<UK2Node_DynamicCast>(NewNode);
+		if (CastNode)
+		{
+			FString TargetClassIdentifier;
+			const bool bHasClass =
+				(*NodeParams)->TryGetStringField(TEXT("class"), TargetClassIdentifier)
+				|| (*NodeParams)->TryGetStringField(TEXT("target_class"), TargetClassIdentifier);
+			if (bHasClass)
+			{
+				UClass* TargetClass = ResolveGraphNodeClassIdentifier(TargetClassIdentifier);
+				if (TargetClass == nullptr)
+				{
+					Graph->RemoveNode(NewNode);
+					return FCortexCommandRouter::Error(
+						CortexErrorCodes::InvalidField,
+						FString::Printf(TEXT("Cast target class not found: %s"), *TargetClassIdentifier)
+					);
+				}
+
+				CastNode->TargetType = TargetClass;
+				CastNode->ReconstructNode();
+			}
+		}
+
 		UK2Node_Event* EventNode = Cast<UK2Node_Event>(NewNode);
 		if (EventNode)
 		{
@@ -896,6 +1313,18 @@ FCortexCommandResult FCortexGraphNodeOps::AddNode(const TSharedPtr<FJsonObject>&
 	}
 
 	NewNode->AllocateDefaultPins();
+
+	// Special setup for composite nodes: PostPlacedNewNode creates the BoundGraph
+	// and its tunnel entry/exit nodes. Without this call BoundGraph remains null and
+	// ResolveSubgraph cannot traverse into the composite.
+	UK2Node_Composite* CompositeNewNode = Cast<UK2Node_Composite>(NewNode);
+	if (CompositeNewNode)
+	{
+		CompositeNewNode->PostPlacedNewNode();
+		// Re-allocate pins after PostPlacedNewNode so the entry/exit tunnel pins are present
+		CompositeNewNode->AllocateDefaultPins();
+	}
+
 	Graph->NotifyGraphChanged();
 	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
 
@@ -914,7 +1343,9 @@ FCortexCommandResult FCortexGraphNodeOps::AddNode(const TSharedPtr<FJsonObject>&
 	// Build response
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetStringField(TEXT("node_id"), NewNode->GetName());
-	Data->SetStringField(TEXT("class"), NewNode->GetClass()->GetName());
+	const FString AddedNodeClass = NewNode->GetClass()->GetName();
+	Data->SetStringField(TEXT("class"), AddedNodeClass);
+	Data->SetStringField(TEXT("node_class"), AddedNodeClass);
 	Data->SetStringField(TEXT("display_name"), NewNode->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
 
 	TArray<TSharedPtr<FJsonValue>> PinsArray;
@@ -931,7 +1362,20 @@ FCortexCommandResult FCortexGraphNodeOps::AddNode(const TSharedPtr<FJsonObject>&
 	return FCortexCommandRouter::Success(Data);
 }
 
-TSharedRef<FJsonObject> FCortexGraphNodeOps::SerializePin(const UEdGraphPin* Pin, bool bDetailed)
+bool FCortexGraphNodeOps::ShouldSkipPinCompact(const UEdGraphPin* Pin)
+{
+	if (Pin == nullptr)
+	{
+		return true;
+	}
+	return Pin->bHidden
+		&& Pin->LinkedTo.Num() == 0
+		&& Pin->DefaultValue.IsEmpty()
+		&& Pin->DefaultTextValue.IsEmpty()
+		&& Pin->DefaultObject == nullptr;
+}
+
+TSharedRef<FJsonObject> FCortexGraphNodeOps::SerializePin(const UEdGraphPin* Pin, bool bDetailed, bool bCompact)
 {
 	TSharedRef<FJsonObject> PinEntry = MakeShared<FJsonObject>();
 	PinEntry->SetStringField(TEXT("name"), Pin->PinName.ToString());
@@ -939,14 +1383,23 @@ TSharedRef<FJsonObject> FCortexGraphNodeOps::SerializePin(const UEdGraphPin* Pin
 	PinEntry->SetStringField(TEXT("type"), Pin->PinType.PinCategory.ToString());
 	if (bDetailed)
 	{
-		PinEntry->SetStringField(TEXT("default_value"), Pin->DefaultValue);
+		const bool bIsConnected = Pin->LinkedTo.Num() > 0;
+
+		// In compact mode, omit false is_connected and empty default_value
+		if (!bCompact || !Pin->DefaultValue.IsEmpty())
+		{
+			PinEntry->SetStringField(TEXT("default_value"), Pin->DefaultValue);
+		}
 		if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Text && !Pin->DefaultTextValue.IsEmpty())
 		{
 			PinEntry->SetObjectField(TEXT("default_text_value"), FCortexSerializer::TextToJson(Pin->DefaultTextValue));
 		}
-		PinEntry->SetBoolField(TEXT("is_connected"), Pin->LinkedTo.Num() > 0);
+		if (!bCompact || bIsConnected)
+		{
+			PinEntry->SetBoolField(TEXT("is_connected"), bIsConnected);
+		}
 
-		if (Pin->LinkedTo.Num() > 0)
+		if (bIsConnected)
 		{
 			TArray<TSharedPtr<FJsonValue>> ConnArray;
 			for (const UEdGraphPin* LinkedPin : Pin->LinkedTo)
@@ -962,10 +1415,80 @@ TSharedRef<FJsonObject> FCortexGraphNodeOps::SerializePin(const UEdGraphPin* Pin
 				ConnArray.Add(MakeShared<FJsonValueObject>(Conn));
 			}
 
-			PinEntry->SetArrayField(TEXT("connected_to"), ConnArray);
+			PinEntry->SetArrayField(TEXT("connections"), ConnArray);
 		}
 	}
 	return PinEntry;
+}
+
+TSharedRef<FJsonObject> FCortexGraphNodeOps::SerializeNode(const UEdGraphNode* Node, bool bIncludePins, bool bCompact)
+{
+	TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
+	Entry->SetStringField(TEXT("node_id"), Node->GetName());
+
+	const FString ClassName = Node->GetClass()->GetName();
+	Entry->SetStringField(TEXT("class"), ClassName);
+	if (!bCompact)
+	{
+		Entry->SetStringField(TEXT("node_class"), ClassName);
+	}
+
+	Entry->SetStringField(TEXT("display_name"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+
+	if (!bCompact)
+	{
+		TSharedRef<FJsonObject> Pos = MakeShared<FJsonObject>();
+		Pos->SetNumberField(TEXT("x"), Node->NodePosX);
+		Pos->SetNumberField(TEXT("y"), Node->NodePosY);
+		Entry->SetObjectField(TEXT("position"), Pos);
+		Entry->SetNumberField(TEXT("pin_count"), Node->Pins.Num());
+	}
+
+	int32 ConnectedPinCount = 0;
+	int32 ConnectionCount = 0;
+	for (const UEdGraphPin* Pin : Node->Pins)
+	{
+		if (Pin != nullptr && Pin->LinkedTo.Num() > 0)
+		{
+			++ConnectedPinCount;
+			ConnectionCount += Pin->LinkedTo.Num();
+		}
+	}
+	Entry->SetNumberField(TEXT("connected_pin_count"), ConnectedPinCount);
+	Entry->SetNumberField(TEXT("connections"), ConnectionCount);
+
+	if (const UK2Node_Composite* CompositeNode = Cast<UK2Node_Composite>(Node))
+	{
+		if (CompositeNode->BoundGraph)
+		{
+			Entry->SetStringField(TEXT("subgraph_name"), CompositeNode->BoundGraph->GetName());
+		}
+	}
+
+	if (Node->GetClass() == UK2Node_Tunnel::StaticClass())
+	{
+		Entry->SetBoolField(TEXT("is_tunnel_boundary"), true);
+	}
+
+	if (bIncludePins)
+	{
+		TArray<TSharedPtr<FJsonValue>> PinsArray;
+		for (UEdGraphPin* Pin : Node->Pins)
+		{
+			if (Pin == nullptr)
+			{
+				continue;
+			}
+			if (bCompact && ShouldSkipPinCompact(Pin))
+			{
+				continue;
+			}
+			PinsArray.Add(MakeShared<FJsonValueObject>(SerializePin(Pin, true, bCompact)));
+		}
+		Entry->SetArrayField(TEXT("pins"), PinsArray);
+	}
+
+	return Entry;
 }
 
 FCortexCommandResult FCortexGraphNodeOps::RemoveNode(const TSharedPtr<FJsonObject>& Params)
@@ -986,6 +1509,11 @@ FCortexCommandResult FCortexGraphNodeOps::RemoveNode(const TSharedPtr<FJsonObjec
 	}
 
 	FCortexCommandResult LoadError;
+	if (!ValidateWritableGraphNodeBlueprintAssetPath(AssetPath, LoadError))
+	{
+		return LoadError;
+	}
+
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath, LoadError);
 	if (Blueprint == nullptr)
 	{
@@ -995,10 +1523,22 @@ FCortexCommandResult FCortexGraphNodeOps::RemoveNode(const TSharedPtr<FJsonObjec
 	FString GraphName;
 	Params->TryGetStringField(TEXT("graph_name"), GraphName);
 
-	UEdGraph* Graph = FindGraph(Blueprint, GraphName, LoadError);
-	if (Graph == nullptr)
+	UEdGraph* Graph = nullptr;
+	if (!ResolveMutableNodeGraph(Blueprint, GraphName, Graph, LoadError))
 	{
 		return LoadError;
+	}
+
+	// Resolve subgraph path if provided
+	FString SubgraphPath;
+	Params->TryGetStringField(TEXT("subgraph_path"), SubgraphPath);
+	if (!SubgraphPath.IsEmpty())
+	{
+		Graph = ResolveSubgraph(Graph, SubgraphPath, LoadError);
+		if (Graph == nullptr)
+		{
+			return LoadError;
+		}
 	}
 
 	// Find the node
@@ -1062,6 +1602,11 @@ FCortexCommandResult FCortexGraphNodeOps::SetPinValue(const TSharedPtr<FJsonObje
 	}
 
 	FCortexCommandResult LoadError;
+	if (!ValidateWritableGraphNodeBlueprintAssetPath(AssetPath, LoadError))
+	{
+		return LoadError;
+	}
+
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath, LoadError);
 	if (Blueprint == nullptr)
 	{
@@ -1071,10 +1616,22 @@ FCortexCommandResult FCortexGraphNodeOps::SetPinValue(const TSharedPtr<FJsonObje
 	FString GraphName;
 	Params->TryGetStringField(TEXT("graph_name"), GraphName);
 
-	UEdGraph* Graph = FindGraph(Blueprint, GraphName, LoadError);
-	if (Graph == nullptr)
+	UEdGraph* Graph = nullptr;
+	if (!ResolveMutableNodeGraph(Blueprint, GraphName, Graph, LoadError))
 	{
 		return LoadError;
+	}
+
+	// Resolve subgraph path if provided
+	FString SubgraphPath;
+	Params->TryGetStringField(TEXT("subgraph_path"), SubgraphPath);
+	if (!SubgraphPath.IsEmpty())
+	{
+		Graph = ResolveSubgraph(Graph, SubgraphPath, LoadError);
+		if (Graph == nullptr)
+		{
+			return LoadError;
+		}
 	}
 
 	UEdGraphNode* Node = FindNode(Graph, NodeId, LoadError);
@@ -1161,6 +1718,11 @@ FCortexCommandResult FCortexGraphNodeOps::AutoLayout(const TSharedPtr<FJsonObjec
 	}
 
 	FCortexCommandResult LoadError;
+	if (!ValidateWritableGraphNodeBlueprintAssetPath(AssetPath, LoadError))
+	{
+		return LoadError;
+	}
+
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath, LoadError);
 	if (!Blueprint) return LoadError;
 
@@ -1186,19 +1748,42 @@ FCortexCommandResult FCortexGraphNodeOps::AutoLayout(const TSharedPtr<FJsonObjec
 		Config.VerticalSpacing = static_cast<int32>(VSpacingVal);
 	}
 
+	FString SubgraphPath;
+	Params->TryGetStringField(TEXT("subgraph_path"), SubgraphPath);
+
 	// Collect graphs to process
 	TArray<UEdGraph*> Graphs;
 	if (!GraphFilter.IsEmpty())
 	{
-		UEdGraph* Graph = FindGraph(Blueprint, GraphFilter, LoadError);
-		if (!Graph) return LoadError;
+		UEdGraph* Graph = nullptr;
+		if (!ResolveMutableNodeGraph(Blueprint, GraphFilter, Graph, LoadError))
+		{
+			return LoadError;
+		}
+
+		// Resolve subgraph path if provided
+		if (!SubgraphPath.IsEmpty())
+		{
+			Graph = ResolveSubgraph(Graph, SubgraphPath, LoadError);
+			if (Graph == nullptr)
+			{
+				return LoadError;
+			}
+		}
+
 		Graphs.Add(Graph);
 	}
 	else
 	{
-		for (UEdGraph* G : Blueprint->UbergraphPages) { if (G) Graphs.Add(G); }
-		for (UEdGraph* G : Blueprint->FunctionGraphs) { if (G) Graphs.Add(G); }
-		for (UEdGraph* G : Blueprint->MacroGraphs) { if (G) Graphs.Add(G); }
+		TArray<FCortexGraphEntry> Entries;
+		EnumerateUserGraphs(Blueprint, Entries);
+		for (const FCortexGraphEntry& Entry : Entries)
+		{
+			if (Entry.Graph && IsMutableGraphKind(Entry.Kind))
+			{
+				Graphs.Add(Entry.Graph);
+			}
+		}
 	}
 
 	int32 TotalNodesProcessed = 0;

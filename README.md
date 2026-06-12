@@ -3,7 +3,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Unreal%20Engine-5.6%2B-blue?style=flat-square&logo=unrealengine" alt="UE 5.6+">
   <img src="https://img.shields.io/badge/Type-Editor%20Only-green?style=flat-square" alt="Editor Only">
-  <img src="https://img.shields.io/badge/Modules-12-lightgrey?style=flat-square" alt="12 Modules">
+  <img src="https://img.shields.io/badge/Modules-13-lightgrey?style=flat-square" alt="13 Modules">
   <img src="https://img.shields.io/badge/Python-3.10%2B-yellow?style=flat-square&logo=python" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/License-MIT-lightgrey?style=flat-square" alt="MIT">
 </p>
@@ -12,7 +12,7 @@
 
 Your AI assistant can already write code. UnrealCortex lets it work *inside* the editor — querying DataTables, editing Blueprint graphs, building UMG hierarchies, placing actors, converting Blueprints to C++, analyzing Blueprints for bugs and performance issues, generating 3D assets, and even playing and testing your game autonomously. No copy-pasting, no file exports. Changes appear live with full undo support.
 
-> **Status:** v0.1.0 Beta — All 12 modules shipped and tested.
+> **Status:** v0.1.9 Beta — All 13 modules shipped and tested.
 
 ---
 
@@ -145,6 +145,25 @@ Every mutation wrapped in `FScopedTransaction`. Large responses auto-truncate wi
 </details>
 
 <details>
+<summary><strong>AI State Machines — CortexStateTree</strong> &nbsp;·&nbsp; StateTree assets, state hierarchy, transitions, validation, compile</summary>
+
+<br>
+
+**Asset lifecycle:** List, create, duplicate, delete, and save StateTree assets with referencer checks and stale-write fingerprints.
+
+**Inspection:** Dump full StateTree structure, read individual states by GUID or path, and run read-only structure checks for missing editor data, ambiguous paths, duplicate IDs, and dangling transitions.
+
+**Authoring:** Add, remove, rename, move, and configure states. Add and update simple transitions with trigger, priority, target, and Gameplay Tag validation.
+
+**Validation and compile:** Run mutating StateTree validation fixups and explicit compile with structured diagnostics. `statetree_compose` creates or updates multi-state structures with fingerprint threading and cleanup on create failure.
+
+**Current boundary:** Structure-level authoring only. Task, condition, evaluator, parameter bag, and property binding authoring are intentionally not exposed yet.
+
+**Example tasks:** *"Create ST_Guard with Patrol and Chase states and a SawTarget transition"* · *"Review all StateTrees for dangling transitions and invalid tags"* · *"Compile ST_BossBehavior and summarize diagnostics"*
+
+</details>
+
+<details>
 <summary><strong>Project Analysis — CortexReflect</strong> &nbsp;·&nbsp; Class hierarchy, properties, cross-references, migration intelligence</summary>
 
 <br>
@@ -220,6 +239,7 @@ flowchart TB
         Data["CortexData<br/>DataTables · Tags<br/>DataAssets · Curves"]
         BP["CortexBlueprint<br/>Blueprint CRUD<br/>Graph Editing"]
         Mat["CortexMaterial<br/>Materials · Instances<br/>Parameter Collections"]
+        ST["CortexStateTree<br/>StateTrees<br/>States · Transitions"]
         UMG["CortexUMG<br/>Widget Trees<br/>Properties · Animations"]
         Level["CortexLevel<br/>Actors · Components<br/>Streaming"]
         Editor["CortexEditor<br/>PIE · Viewport<br/>Input · Console"]
@@ -241,6 +261,8 @@ flowchart TB
 ```
 
 Commands are namespaced: `{domain}.{command}` — e.g. `data.query_datatable`, `bp.create`, `graph.add_node`. CortexCore routes each command to its registered domain handler and dispatches to the Game Thread. The port is auto-discovered via `Saved/CortexPort-{PID}.txt` — multiple editor instances each get their own port.
+
+Representative command examples include `data.query_datatable`, `bp.create`, `graph.add_node`, `statetree.dump_tree`, `statetree.add_state`, and `statetree.compile`.
 
 ---
 
@@ -291,7 +313,7 @@ Add the plugin to your `.uproject`:
 }
 ```
 
-Rebuild your project. All 12 modules load automatically at `PostEngineInit` — after `IAssetRegistry` and the Blueprint compilation system are ready. All modules are `Type: Editor` and are stripped from shipping builds.
+Rebuild your project. All 13 modules load automatically at `PostEngineInit` — after `IAssetRegistry` and the Blueprint compilation system are ready. All modules are `Type: Editor` and are stripped from shipping builds.
 
 ### Step 2 — Install Python Dependencies
 
@@ -307,41 +329,61 @@ Choose one of the two installation paths below.
 #### Option A — Automatic Setup with Cortex Toolkit *(Claude Code, Codex, Cursor)*
 
 > [!NOTE]
-> **[Cortex Toolkit](https://github.com/etelyatn/cortex-toolkit)** adds 26 domain-specific skills, 14 specialist agents, and project memory on top of UnrealCortex. It handles MCP configuration, editor auto-launch, and context injection automatically.
+> **[Cortex Toolkit](https://github.com/etelyatn/cortex-toolkit)** adds domain-specific skills, specialist agents, and project memory on top of UnrealCortex. It handles MCP configuration, editor auto-launch, and context injection automatically.
 
 **Install the toolkit:**
+
+Claude Code:
 
 ```bash
 claude plugin marketplace add etelyatn/cortex-toolkit
 claude plugin install cortex-toolkit
 ```
 
-For Codex or Cursor setup, see the [Cortex Toolkit README](https://github.com/etelyatn/cortex-toolkit).
+Codex:
 
-**Initialize your project** — run `/cortex-init` inside Claude Code. It will:
+```bash
+codex plugin marketplace add etelyatn/cortex-toolkit
+codex plugin add cortex-toolkit@cortex-toolkit
+```
+
+Then restart Codex if it was already running.
+For Cursor setup, see the [Cortex Toolkit README](https://github.com/etelyatn/cortex-toolkit).
+
+**Start the assisted workflow** — run `/cortex-start` (or `cortex-start` in Codex) first. It verifies the editor/MCP connection, checks project context, and recommends the next action for your project.
+
+If you only want setup without the full guided flow, run `/cortex-init` (or `cortex-init`) directly. It will:
 
 1. Detect your Unreal Engine installation
 2. Scan the plugin for enabled domain modules
 3. Create `.mcp.json` with the correct MCP server configuration
 4. Set up `.cortex/` project memory directory with domain knowledge templates
 
-After that, `/cortex-start` verifies the connection and walks you through your first task. Use `/cortex-help` anytime for contextual suggestions.
+After init, run `/cortex-schema-refresh` (or `cortex-schema-refresh`) to regenerate `.cortex/schema/` from live editor data. Use `/cortex-help` anytime for contextual suggestions. Codex users can also configure `.mcp.json` manually using Option B below; the Codex plugin supplies skills and setup guidance while the project-local MCP config supplies the live UnrealCortex connection.
 
 #### Option B — Manual Setup *(Cursor, Windsurf, or any MCP client)*
 
-Create `.mcp.json` at your project root:
+Create `.mcp.json` at your project root. Both paths must be **absolute** — relative paths fail when the MCP client's working directory doesn't match your project root, which is the default for most clients.
 
 ```json
 {
   "mcpServers": {
     "cortex_mcp": {
       "command": "uv",
-      "args": ["run", "--directory", "Plugins/Developer/UnrealCortex/MCP", "cortex-mcp"],
-      "env": { "CORTEX_PROJECT_DIR": "." }
+      "args": ["run", "--directory", "D:/UnrealProjects/YourProject/Plugins/Developer/UnrealCortex/MCP", "cortex-mcp"],
+      "env": { "CORTEX_PROJECT_DIR": "D:/UnrealProjects/YourProject" }
     }
   }
 }
 ```
+
+To get the correct absolute path, run this from your project root:
+
+```bash
+uv run python -c "import os; print(os.path.abspath('.').replace(chr(92), '/'))"
+```
+
+That prints your project root. Append `/Plugins/Developer/UnrealCortex/MCP` (adjust the subfolder if your install path differs) for the `--directory` value.
 
 Open your project in the Unreal Editor. CortexCore writes `Saved/CortexPort-{PID}.txt` on startup (one per editor instance) — the MCP server discovers it automatically. If the editor is not open, MCP tool calls will return an `EDITOR_NOT_RUNNING` error. If you restart the editor, the MCP server picks up the new port file automatically. Multiple editors can run simultaneously — each gets its own port.
 
@@ -356,18 +398,22 @@ The session-start hook injects `context.md` automatically. Domain agents read th
 
 ```
 .cortex/
-├── config.yaml          ← engine path, active domains
+├── config.yaml          ← shared engine defaults, active domains
+├── config.local.yaml    ← optional per-machine overrides, not committed
 ├── context.md           ← shared project knowledge (read every session)
 └── domains/
     ├── data.md          ← table schemas, balance rules
     ├── blueprints.md    ← class hierarchy, conventions
     ├── material.md      ← material conventions, instance hierarchies
+    ├── statetree.md     ← state hierarchy, transitions, validation rules
     ├── umg.md           ← screen inventory, style guide
     ├── level.md         ← actor conventions, level structure
     ├── qa.md            ← test scenarios, assertion patterns
     ├── reflect.md       ← class hierarchy notes, scan scope
     └── gen.md           ← generation providers, import destinations, job patterns
 ```
+
+Check `.cortex/config.yaml` into version control for shared project defaults. Put workstation-specific values, especially a local Unreal Engine install path, in `.cortex/config.local.yaml`. Cortex Toolkit merges the local file over the shared config when present, and editor helpers fall back to `UE_PATH` only when the effective Cortex config has no `engine.path`.
 
 ---
 
@@ -445,6 +491,7 @@ void FMyDomainModule::StartupModule()
 | **CortexData** | CortexCore | `GameplayTags` · `AssetRegistry` · `UnrealEd` |
 | **CortexEditor** | CortexCore | `LevelEditor` · `Slate` · `SlateCore` · `EnhancedInput` · `ImageWrapper` · `RenderCore` |
 | **CortexQA** | CortexCore · CortexEditor | `NavigationSystem` · `AIModule` · `GameplayTags` |
+| **CortexStateTree** | CortexCore | `CoreUObject` · `Engine` · `Json` · `JsonUtilities` · `AssetRegistry` · `AssetTools` · `UnrealEd` · `GameplayTags` · `StateTreeModule` · `StateTreeEditorModule` |
 | **CortexLevel** | CortexCore | `LevelEditor` · `DataLayerEditor` |
 | **CortexUMG** | CortexCore | `UMG` · `UMGEditor` · `Slate` · `SlateCore` · `MovieScene` |
 | **CortexReflect** | CortexCore | `AssetRegistry` · `BlueprintGraph` · `Kismet` |
@@ -455,7 +502,7 @@ Domain modules depend only on CortexCore (and shared infrastructure: CortexGraph
 
 ### Cook and Packaging Safety
 
-All 12 modules declare `"Type": "Editor"` in `UnrealCortex.uplugin`. Because `Type: Editor` modules are not loaded in non-editor targets (cook, server, game), the `PostEngineInit` load phase is only relevant in the editor. The plugin is never included in cooked or packaged builds.
+All 13 modules declare `"Type": "Editor"` in `UnrealCortex.uplugin`. Because `Type: Editor` modules are not loaded in non-editor targets (cook, server, game), the `PostEngineInit` load phase is only relevant in the editor. The plugin is never included in cooked or packaged builds.
 
 ### Generic Serialization
 

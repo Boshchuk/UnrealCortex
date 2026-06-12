@@ -4,7 +4,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 # Add src/ and tools/ for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -237,13 +237,13 @@ class TestDoRestartEditor:
     def test_returns_error_dict_when_project_dir_not_set(self):
         conn = MagicMock(spec=UEConnection)
 
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("CORTEX_PROJECT_DIR", None)
+        # resolve_project_dir() has multiple fallbacks (CLAUDE_PROJECT_DIR, walk-up).
+        # Mock it to return None to simulate a fully unresolvable project directory.
+        with patch("composites.resolve_project_dir", return_value=None):
             result = do_restart_editor(conn, timeout=10)
 
         assert isinstance(result, dict)
         assert "error" in result
-        assert "CORTEX_PROJECT_DIR" in result["error"]
 
     def test_returns_error_dict_when_project_path_unknown(self, tmp_path):
         conn = MagicMock(spec=UEConnection)
@@ -322,3 +322,27 @@ class TestDoRestartEditor:
 
         assert isinstance(result, dict)
         assert "error" in result
+
+
+class TestStartPieSessionFPSThrottle:
+    """start_pie_session should inject FPS throttle commands."""
+
+    def test_start_pie_session_sends_fps_throttle_commands(self):
+        conn = MagicMock(spec=UEConnection)
+        conn.send_command.return_value = {
+            "success": True,
+            "data": {"state": "Playing", "mode": "selected_viewport"},
+        }
+
+        mcp = MockMCP()
+        register_editor_composite_tools(mcp, conn)
+
+        mcp.tools["start_pie_session"]()
+
+        expected_calls = [
+            call("editor.start_pie", {"mode": "selected_viewport"}, timeout=60.0),
+            call("editor.execute_console_command", {"command": "t.MaxFPS 0"}),
+            call("editor.execute_console_command", {"command": "t.UnfocusedFrameRateLimit 0"}),
+            call("editor.get_pie_state"),
+        ]
+        conn.send_command.assert_has_calls(expected_calls)

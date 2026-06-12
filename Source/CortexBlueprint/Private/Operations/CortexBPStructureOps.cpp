@@ -37,6 +37,12 @@ FCortexCommandResult FCortexBPStructureOps::AddVariable(const TSharedPtr<FJsonOb
 		);
 	}
 
+	FString ValidationError;
+	if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(AssetPath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
+	}
+
 	FString LoadError;
 	UBlueprint* Blueprint = FCortexBPAssetOps::LoadBlueprint(AssetPath, LoadError);
 	if (Blueprint == nullptr)
@@ -44,16 +50,26 @@ FCortexCommandResult FCortexBPStructureOps::AddVariable(const TSharedPtr<FJsonOb
 		return FCortexCommandRouter::Error(CortexErrorCodes::BlueprintNotFound, LoadError);
 	}
 
+	const FName VarFName(*VarName);
+
 	// Check if variable already exists
 	for (const FBPVariableDescription& Var : Blueprint->NewVariables)
 	{
-		if (Var.VarName == FName(*VarName))
+		if (Var.VarName == VarFName)
 		{
 			return FCortexCommandRouter::Error(
 				CortexErrorCodes::VariableExists,
 				FString::Printf(TEXT("Variable '%s' already exists"), *VarName)
 			);
 		}
+	}
+
+	if (Blueprint->ParentClass && Blueprint->ParentClass->FindPropertyByName(VarFName) != nullptr)
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidValue,
+			FString::Printf(TEXT("Variable '%s' collides with an inherited UPROPERTY"), *VarName)
+		);
 	}
 
 	FEdGraphPinType PinType = ResolveVariableType(VarType);
@@ -63,7 +79,7 @@ FCortexCommandResult FCortexBPStructureOps::AddVariable(const TSharedPtr<FJsonOb
 	));
 
 	bool bSuccess = FBlueprintEditorUtils::AddMemberVariable(
-		Blueprint, FName(*VarName), PinType);
+		Blueprint, VarFName, PinType);
 
 	if (!bSuccess)
 	{
@@ -85,7 +101,7 @@ FCortexCommandResult FCortexBPStructureOps::AddVariable(const TSharedPtr<FJsonOb
 
 	for (FBPVariableDescription& Var : Blueprint->NewVariables)
 	{
-		if (Var.VarName == FName(*VarName))
+		if (Var.VarName == VarFName)
 		{
 			if (!DefaultValue.IsEmpty())
 			{
@@ -103,12 +119,39 @@ FCortexCommandResult FCortexBPStructureOps::AddVariable(const TSharedPtr<FJsonOb
 		}
 	}
 
-	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+	// For event dispatchers, create the signature graph so parameters can be added later
+	if (PinType.PinCategory == UEdGraphSchema_K2::PC_MCDelegate)
+	{
+		const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
+		UEdGraph* SignatureGraph = FBlueprintEditorUtils::CreateNewGraph(
+			Blueprint, VarFName, UEdGraph::StaticClass(), UEdGraphSchema_K2::StaticClass());
+
+		if (SignatureGraph == nullptr)
+		{
+			FBlueprintEditorUtils::RemoveMemberVariable(Blueprint, VarFName);
+			return FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidValue,
+				FString::Printf(TEXT("Failed to create delegate signature graph for '%s'"), *VarName)
+			);
+		}
+
+		SignatureGraph->bEditable = false;
+		K2Schema->CreateDefaultNodesForGraph(*SignatureGraph);
+		K2Schema->CreateFunctionGraphTerminators(*SignatureGraph, (UClass*)nullptr);
+		K2Schema->AddExtraFunctionFlags(SignatureGraph, FUNC_BlueprintCallable | FUNC_BlueprintEvent | FUNC_Public);
+		K2Schema->MarkFunctionEntryAsEditable(SignatureGraph, true);
+		Blueprint->DelegateSignatureGraphs.Add(SignatureGraph);
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+	}
+	else
+	{
+		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+	}
 
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetBoolField(TEXT("added"), true);
 	Data->SetStringField(TEXT("name"), VarName);
-	Data->SetStringField(TEXT("type"), VarType);
+	Data->SetStringField(TEXT("type"), FriendlyTypeName(PinType));
 	if (!DefaultValue.IsEmpty())
 	{
 		Data->SetStringField(TEXT("default_value"), DefaultValue);
@@ -133,6 +176,12 @@ FCortexCommandResult FCortexBPStructureOps::RemoveVariable(const TSharedPtr<FJso
 			CortexErrorCodes::InvalidField,
 			TEXT("Missing required params: asset_path, name")
 		);
+	}
+
+	FString ValidationError;
+	if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(AssetPath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
 	}
 
 	FString LoadError;
@@ -190,6 +239,12 @@ FCortexCommandResult FCortexBPStructureOps::AddFunction(const TSharedPtr<FJsonOb
 			CortexErrorCodes::InvalidField,
 			TEXT("Missing required params: asset_path, name")
 		);
+	}
+
+	FString ValidationError;
+	if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(AssetPath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
 	}
 
 	FString LoadError;
@@ -261,11 +316,11 @@ FCortexCommandResult FCortexBPStructureOps::AddFunction(const TSharedPtr<FJsonOb
 		return true;
 	};
 
-	FString ValidationError;
-	if (!ParsePinArray(InputsArray, InputSpecs, ValidationError) ||
-		!ParsePinArray(OutputsArray, OutputSpecs, ValidationError))
+	FString PinValidationError;
+	if (!ParsePinArray(InputsArray, InputSpecs, PinValidationError) ||
+		!ParsePinArray(OutputsArray, OutputSpecs, PinValidationError))
 	{
-		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidValue, ValidationError);
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidValue, PinValidationError);
 	}
 
 	FScopedTransaction Transaction(FText::FromString(
@@ -487,6 +542,12 @@ FCortexCommandResult FCortexBPStructureOps::RemoveGraph(const TSharedPtr<FJsonOb
 		return FCortexCommandRouter::Error(
 			CortexErrorCodes::InvalidField,
 			TEXT("Missing required params: asset_path, name"));
+	}
+
+	FString ValidationError;
+	if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(AssetPath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
 	}
 
 	FString LoadError;

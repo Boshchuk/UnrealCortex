@@ -95,7 +95,7 @@ bool FCortexTcpServer::Start(int32 StartPort, FCommandDispatcher InDispatcher)
 		if (Listener->IsActive())
 		{
 			bRunning = true;
-			int32 BoundPort = Port;
+			BoundPort = Port;
 			if (FSocket* ListenSocket = Listener->GetSocket())
 			{
 				TSharedRef<FInternetAddr> LocalAddress =
@@ -131,11 +131,26 @@ bool FCortexTcpServer::Start(int32 StartPort, FCommandDispatcher InDispatcher)
 					CurrentPID);
 			}
 
+			LastTickTime.Store(FPlatformTime::Seconds());
+
 			TickDelegateHandle = FTSTicker::GetCoreTicker().AddTicker(
 				FTickerDelegate::CreateLambda([this](float DeltaTime) -> bool
 				{
 					if (bRunning)
 					{
+						const double Now = FPlatformTime::Seconds();
+						const double PrevTick = LastTickTime.Load();
+						const double Gap = Now - PrevTick;
+						LastTickTime.Store(Now);
+
+						if (Gap > StallWarningThresholdSeconds && PrevTick > 0.0)
+						{
+							UE_LOG(LogCortex, Warning,
+								TEXT("Game thread stall detected: %.1fs since last tick. "
+									 "Commands were queued but not processed during this period."),
+								Gap);
+						}
+
 						{
 							FScopeLock Lock(&PendingSocketsCS);
 							for (FSocket* PendingSocket : PendingClientSockets)
@@ -174,6 +189,7 @@ void FCortexTcpServer::Stop()
 	}
 
 	bRunning = false;
+	BoundPort = 0;
 
 	if (!PortFilePath.IsEmpty())
 	{
@@ -210,6 +226,16 @@ void FCortexTcpServer::Stop()
 void FCortexTcpServer::SetClientDisconnectCallback(FClientDisconnectCallback Callback)
 {
 	ClientDisconnectCallback = MoveTemp(Callback);
+}
+
+int32 FCortexTcpServer::GetBoundPort() const
+{
+	return BoundPort;
+}
+
+int32 FCortexTcpServer::GetClientCount() const
+{
+	return ClientSockets.Num();
 }
 
 bool FCortexTcpServer::IsRunning() const
@@ -435,7 +461,11 @@ bool FCortexTcpServer::ProcessSingleClient(FSocket* InClientSocket)
 				AckJson->SetStringField(TEXT("id"), RequestId);
 			}
 			AckJson->SetStringField(TEXT("status"), TEXT("deferred"));
-			AckJson->SetNumberField(TEXT("timeout_seconds"), Pending.TimeoutSeconds);
+			AckJson->SetBoolField(TEXT("success"), true);
+			TSharedPtr<FJsonObject> AckData = MakeShared<FJsonObject>();
+			AckData->SetStringField(TEXT("status"), TEXT("deferred"));
+			AckData->SetNumberField(TEXT("timeout_seconds"), Pending.TimeoutSeconds);
+			AckJson->SetObjectField(TEXT("data"), AckData);
 
 			FString AckString;
 			TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> AckWriter =

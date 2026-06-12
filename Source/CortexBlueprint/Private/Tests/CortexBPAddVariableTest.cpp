@@ -11,6 +11,12 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexBPAddVariableInheritedPropertyCollisionTest,
+	"Cortex.Blueprint.AddVariable.InheritedPropertyCollision",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
 bool FCortexBPAddVariableTest::RunTest(const FString& Parameters)
 {
 	FCortexBPCommandHandler Handler;
@@ -62,6 +68,28 @@ bool FCortexBPAddVariableTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("add bool variable should succeed"), Result.bSuccess);
 	}
 
+	// Test: add a dispatcher (multicast delegate) variable
+	{
+		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("asset_path"), TestBPPath);
+		Params->SetStringField(TEXT("name"), TEXT("OnHealthChanged"));
+		Params->SetStringField(TEXT("type"), TEXT("dispatcher"));
+
+		FCortexCommandResult Result = Handler.Execute(TEXT("add_variable"), Params);
+		TestTrue(TEXT("add dispatcher variable should succeed"), Result.bSuccess);
+
+		if (Result.Data.IsValid())
+		{
+			bool bAdded = false;
+			Result.Data->TryGetBoolField(TEXT("added"), bAdded);
+			TestTrue(TEXT("dispatcher added should be true"), bAdded);
+
+			FString VarType;
+			Result.Data->TryGetStringField(TEXT("type"), VarType);
+			TestEqual(TEXT("dispatcher type should round-trip as dispatcher"), VarType, TEXT("dispatcher"));
+		}
+	}
+
 	// Verify via get_info
 	{
 		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
@@ -77,6 +105,7 @@ bool FCortexBPAddVariableTest::RunTest(const FString& Parameters)
 			{
 				bool bFoundHealth = false;
 				bool bFoundIsAlive = false;
+				bool bFoundDispatcher = false;
 
 				for (const TSharedPtr<FJsonValue>& VarVal : *VarsArray)
 				{
@@ -97,11 +126,36 @@ bool FCortexBPAddVariableTest::RunTest(const FString& Parameters)
 					{
 						bFoundIsAlive = true;
 					}
+					if (VarName == TEXT("OnHealthChanged"))
+					{
+						bFoundDispatcher = true;
+
+						// Verify FriendlyTypeName round-trip: get_info must report "dispatcher", not raw "PC_MCDelegate"
+						FString DispatcherType;
+						VarObj->TryGetStringField(TEXT("type"), DispatcherType);
+						TestEqual(TEXT("OnHealthChanged type should be dispatcher in get_info"), DispatcherType, TEXT("dispatcher"));
+					}
 				}
 
 				TestTrue(TEXT("Health variable should exist"), bFoundHealth);
 				TestTrue(TEXT("bIsAlive variable should exist"), bFoundIsAlive);
+				TestTrue(TEXT("OnHealthChanged dispatcher should exist"), bFoundDispatcher);
 			}
+		}
+	}
+
+	// Verify: DelegateSignatureGraph was created for the dispatcher variable
+	{
+		UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *TestBPPath);
+		if (BP != nullptr)
+		{
+			const bool bHasSignatureGraph = BP->DelegateSignatureGraphs.ContainsByPredicate(
+				[](const UEdGraph* Graph)
+				{
+					return Graph && Graph->GetFName() == FName(TEXT("OnHealthChanged"));
+				}
+			);
+			TestTrue(TEXT("OnHealthChanged should have a DelegateSignatureGraph"), bHasSignatureGraph);
 		}
 	}
 
@@ -133,6 +187,55 @@ bool FCortexBPAddVariableTest::RunTest(const FString& Parameters)
 	// GeneratedClass, and CDO are all collected together.  Marking only the
 	// UBlueprint object leaves the (dirty, uncompiled) GeneratedClass live,
 	// which causes a background GC worker crash on the next test.
+	UObject* CreatedBP = LoadObject<UBlueprint>(nullptr, *TestBPPath);
+	if (CreatedBP)
+	{
+		CreatedBP->GetOutermost()->MarkAsGarbage();
+	}
+
+	return true;
+}
+
+bool FCortexBPAddVariableInheritedPropertyCollisionTest::RunTest(const FString& Parameters)
+{
+	FCortexBPCommandHandler Handler;
+
+	{
+		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("name"), TEXT("BP_AddVarComponentTest"));
+		Params->SetStringField(TEXT("path"), TEXT("/Game/Temp/CortexBPTest_AddVarComponent"));
+		Params->SetStringField(TEXT("type"), TEXT("Component"));
+
+		const FCortexCommandResult CreateResult = Handler.Execute(TEXT("create"), Params);
+		TestTrue(TEXT("Component Blueprint create should succeed"), CreateResult.bSuccess);
+	}
+
+	const FString TestBPPath = TEXT("/Game/Temp/CortexBPTest_AddVarComponent/BP_AddVarComponentTest");
+
+	{
+		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("asset_path"), TestBPPath);
+		Params->SetStringField(TEXT("name"), TEXT("TickCount"));
+		Params->SetStringField(TEXT("type"), TEXT("int"));
+
+		const FCortexCommandResult Result = Handler.Execute(TEXT("add_variable"), Params);
+		TestTrue(TEXT("Non-colliding component variable should succeed"), Result.bSuccess);
+	}
+
+	{
+		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("asset_path"), TestBPPath);
+		Params->SetStringField(TEXT("name"), TEXT("bIsActive"));
+		Params->SetStringField(TEXT("type"), TEXT("bool"));
+
+		const FCortexCommandResult Result = Handler.Execute(TEXT("add_variable"), Params);
+		TestFalse(TEXT("Inherited property collision should be rejected"), Result.bSuccess);
+		TestEqual(TEXT("Inherited property collision should use INVALID_VALUE"),
+			Result.ErrorCode, CortexErrorCodes::InvalidValue);
+		TestTrue(TEXT("Error should explain inherited UPROPERTY collision"),
+			Result.ErrorMessage.Contains(TEXT("inherited UPROPERTY")));
+	}
+
 	UObject* CreatedBP = LoadObject<UBlueprint>(nullptr, *TestBPPath);
 	if (CreatedBP)
 	{

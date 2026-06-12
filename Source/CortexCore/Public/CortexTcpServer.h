@@ -36,6 +36,12 @@ public:
 	void SendDeferredResponse(int32 DeferredId, const FCortexCommandResult& Result);
 	void SetClientDisconnectCallback(FClientDisconnectCallback Callback);
 
+	/** Get the port the server is currently bound to. Returns 0 if not running. Game-thread-only. */
+	int32 GetBoundPort() const;
+
+	/** Get number of active clients. Excludes sockets accepted since the last tick (pending promotion). Game-thread-only. */
+	int32 GetClientCount() const;
+
 	static constexpr int32 MaxMessageSize = 2 * 1024 * 1024;  // 2MB
 
 private:
@@ -61,6 +67,7 @@ private:
 	FCriticalSection PendingSocketsCS;
 	TMap<FSocket*, FString> ReceiveBuffers;
 	void CheckDeferredTimeouts();
+	/** Thread-safe flag for running state. Overall server state queries (GetBoundPort, GetClientCount) remain game-thread-only. */
 	FThreadSafeBool bRunning = false;
 	FTSTicker::FDelegateHandle TickDelegateHandle;
 	FCommandDispatcher CommandDispatcher;
@@ -69,8 +76,17 @@ private:
 
 	FClientDisconnectCallback ClientDisconnectCallback;
 
+	/** Port the server successfully bound to. Written in Start() before bRunning is set, reset to 0 in Stop(). */
+	int32 BoundPort = 0;
+
 	/** Full path to this editor's port file (CortexPort-{PID}.txt) */
 	FString PortFilePath;
+
+	/** Timestamp of last successful tick (game thread heartbeat). Updated atomically for cross-thread reads. */
+	TAtomic<double> LastTickTime{0.0};
+
+	/** Threshold in seconds after which a tick gap is considered a stall */
+	static constexpr double StallWarningThresholdSeconds = 5.0;
 
 	/** Remove port files whose PIDs are no longer running */
 	static void CleanupStalePortFiles();

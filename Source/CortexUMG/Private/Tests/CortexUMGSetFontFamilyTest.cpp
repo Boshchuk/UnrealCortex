@@ -22,7 +22,7 @@ bool FCortexUMGSetFontFamilyTest::RunTest(const FString& Parameters)
     const FString AssetPath = WBP->GetPathName();
 
     FCortexCommandRouter Router;
-    Router.RegisterDomain(TEXT("umg"), TEXT("Cortex UMG"), TEXT("1.0.0"),
+    Router.RegisterDomain(TEXT("umg"), TEXT("Cortex UMG"), TEXT("1.0.1"),
         MakeShared<FCortexUMGCommandHandler>());
 
     // Setup: Root + TextBlock

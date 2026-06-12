@@ -645,8 +645,8 @@ class TestGraphCRUD:
         graph_names = [g["name"] for g in data["graphs"]]
         assert "EventGraph" in graph_names
 
-    def test_list_nodes(self, tcp_connection, blueprint_for_test):
-        resp = tcp_connection.send_command("graph.list_nodes", {
+    def test_get_subgraph(self, tcp_connection, blueprint_for_test):
+        resp = tcp_connection.send_command("graph.get_subgraph", {
             "asset_path": blueprint_for_test,
             "graph_name": "EventGraph",
         })
@@ -656,18 +656,18 @@ class TestGraphCRUD:
         node_id = _add_print_string_node(tcp_connection, blueprint_for_test)
         assert node_id
 
-    def test_get_node(self, tcp_connection, blueprint_for_test):
+    def test_trace_exec(self, tcp_connection, blueprint_for_test):
         node_id = _add_print_string_node(tcp_connection, blueprint_for_test)
-        resp = tcp_connection.send_command("graph.get_node", {
+        resp = tcp_connection.send_command("graph.trace_exec", {
             "asset_path": blueprint_for_test,
-            "node_id": node_id,
-            "graph_name": "EventGraph",
+            "start_node_id": node_id,
+            "include_edges": True,
         })
-        assert "pins" in resp["data"]
+        assert "nodes" in resp["data"]
 
     def test_connect_pins(self, tcp_connection, blueprint_for_test):
         _add_print_string_node(tcp_connection, blueprint_for_test)
-        nodes_resp = tcp_connection.send_command("graph.list_nodes", {
+        nodes_resp = tcp_connection.send_command("graph.get_subgraph", {
             "asset_path": blueprint_for_test,
             "graph_name": "EventGraph",
         })
@@ -748,9 +748,9 @@ class TestGraphErrors:
                 "graph_name": "EventGraph",
             })
 
-    def test_list_nodes_invalid_graph(self, tcp_connection, blueprint_for_test):
+    def test_get_subgraph_invalid_graph(self, tcp_connection, blueprint_for_test):
         with pytest.raises(RuntimeError):
-            tcp_connection.send_command("graph.list_nodes", {
+            tcp_connection.send_command("graph.get_subgraph", {
                 "asset_path": blueprint_for_test,
                 "graph_name": "NonExistentGraph_12345",
             })
@@ -1199,4 +1199,137 @@ class TestBlueprintAnalysis:
         metrics = resp["data"]["complexity_metrics"]
         assert metrics["total_nodes"] > 0, f"BP_ComplexActor total_nodes should be > 0: {metrics}"
         assert isinstance(metrics["total_connections"], int) and metrics["total_connections"] >= 0
+        assert metrics["migration_confidence"] in {"high", "medium", "low"}
+
+
+# ================================================================
+# Blueprint Domain — Migration Asset Fixtures
+# ================================================================
+
+_MIGRATION_PATH = "/Game/Blueprints/Migration"
+_BP_TIMELINE_TEST = f"{_MIGRATION_PATH}/BP_TimelineTest"
+_BP_DISPATCHER_TEST = f"{_MIGRATION_PATH}/BP_DispatcherTest"
+_BP_LATENT_TEST = f"{_MIGRATION_PATH}/BP_LatentTest"
+_BP_INTERFACE_TEST = f"{_MIGRATION_PATH}/BP_InterfaceTest"
+_BP_COMPONENT_MIGRATE = f"{_MIGRATION_PATH}/BP_ComponentMigrate"
+_BP_FUNC_LIB_MIGRATE = f"{_MIGRATION_PATH}/BP_FuncLibMigrate"
+_BPI_MIGRATION_TEST = f"{_MIGRATION_PATH}/BPI_MigrationTest"
+
+
+@pytest.mark.e2e
+class TestMigrationAssets:
+    """Tests for analyze_for_migration against purpose-built migration fixture BPs."""
+
+    def test_aaa_migration_assets_all_exist(self, tcp_connection):
+        """Smoke guard — runs first so missing fixtures produce a clear error, not cryptic assertion failures."""
+        paths = [
+            _BPI_MIGRATION_TEST,
+            _BP_TIMELINE_TEST,
+            _BP_DISPATCHER_TEST,
+            _BP_LATENT_TEST,
+            _BP_INTERFACE_TEST,
+            _BP_COMPONENT_MIGRATE,
+            _BP_FUNC_LIB_MIGRATE,
+        ]
+        for path in paths:
+            # send_command raises RuntimeError on failure — no need for success assertion
+            tcp_connection.send_command("blueprint.get_info", {"asset_path": path})
+
+    def test_timeline_bp_detects_timeline(self, tcp_connection):
+        resp = tcp_connection.send_command(
+            "blueprint.analyze_for_migration",
+            {"asset_path": _BP_TIMELINE_TEST},
+        )
+        data = resp["data"]
+        assert len(data["timelines"]) >= 1, "BP_TimelineTest should have at least one timeline"
+        timeline = data["timelines"][0]
+        assert "float_tracks" in timeline
+        assert "auto_play" in timeline
+        assert "loop" in timeline
+
+    def test_dispatcher_bp_detects_event_dispatcher(self, tcp_connection):
+        resp = tcp_connection.send_command(
+            "blueprint.analyze_for_migration",
+            {"asset_path": _BP_DISPATCHER_TEST},
+        )
+        data = resp["data"]
+        dispatchers = data["event_dispatchers"]
+        assert len(dispatchers) >= 1, "BP_DispatcherTest should have OnHealthChanged dispatcher"
+
+        # Name-based lookup — robust to ordering changes or future additional dispatchers
+        dispatcher = next((d for d in dispatchers if d.get("name") == "OnHealthChanged"), None)
+        assert dispatcher is not None, f"OnHealthChanged not found in: {[d.get('name') for d in dispatchers]}"
+        assert isinstance(dispatcher["params"], list)
+
+    def test_dispatcher_variables_consistent_with_event_dispatchers(self, tcp_connection):
+        """Dispatcher names in event_dispatchers must also appear in variables with type='dispatcher'."""
+        resp = tcp_connection.send_command(
+            "blueprint.analyze_for_migration",
+            {"asset_path": _BP_DISPATCHER_TEST},
+        )
+        data = resp["data"]
+        dispatcher_names = {d["name"] for d in data["event_dispatchers"] if "name" in d}
+        variable_dispatcher_names = {
+            v["name"] for v in data["variables"]
+            if v.get("type") == "dispatcher"
+        }
+        assert dispatcher_names == variable_dispatcher_names, (
+            f"event_dispatchers names {dispatcher_names} should match "
+            f"variables with type='dispatcher' {variable_dispatcher_names}"
+        )
+
+    def test_latent_bp_detects_latent_nodes(self, tcp_connection):
+        resp = tcp_connection.send_command(
+            "blueprint.analyze_for_migration",
+            {"asset_path": _BP_LATENT_TEST},
+        )
+        data = resp["data"]
+        assert len(data["latent_nodes"]) >= 1, "BP_LatentTest should have at least one latent node (Delay)"
+        latent = data["latent_nodes"][0]
+        assert "is_sequential" in latent
+        assert "sequence_length" in latent
+        # duration_pin_value is only emitted when non-empty; BP_LatentTest sets Duration=2.0
+        assert "duration_pin_value" in latent, "BP_LatentTest Delay node should have a duration default value"
+
+    def test_interface_bp_detects_implemented_interfaces(self, tcp_connection):
+        resp = tcp_connection.send_command(
+            "blueprint.analyze_for_migration",
+            {"asset_path": _BP_INTERFACE_TEST},
+        )
+        data = resp["data"]
+        interfaces = data["interfaces_implemented"]
+        assert len(interfaces) >= 1, "BP_InterfaceTest should implement BPI_MigrationTest"
+        iface_names = [i["name"] for i in interfaces if "name" in i]
+        assert any("MigrationTest" in name for name in iface_names), (
+            f"Expected BPI_MigrationTest in interfaces: {interfaces}"
+        )
+
+    def test_component_bp_variable_schema(self, tcp_connection):
+        resp = tcp_connection.send_command(
+            "blueprint.analyze_for_migration",
+            {"asset_path": _BP_COMPONENT_MIGRATE},
+        )
+        data = resp["data"]
+        variables = data["variables"]
+        assert len(variables) >= 2, "BP_ComponentMigrate should have TickCount and bCustomIsActive"
+        var_names = {v["name"] for v in variables}
+        assert "TickCount" in var_names
+        assert "bCustomIsActive" in var_names
+        for var in variables:
+            assert "is_replicated" in var
+            assert "container_type" in var
+            assert "usage_count" in var
+
+    def test_function_library_bp_functions(self, tcp_connection):
+        resp = tcp_connection.send_command(
+            "blueprint.analyze_for_migration",
+            {"asset_path": _BP_FUNC_LIB_MIGRATE},
+        )
+        data = resp["data"]
+        func_names = {f["name"] for f in data.get("functions", [])}
+        assert "CalculateValue" in func_names
+        assert "IsValidTarget" in func_names
+        assert "FormatLabel" in func_names
+        metrics = data["complexity_metrics"]
+        assert metrics["total_nodes"] >= 0
         assert metrics["migration_confidence"] in {"high", "medium", "low"}

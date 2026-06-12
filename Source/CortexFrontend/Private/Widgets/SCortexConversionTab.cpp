@@ -90,6 +90,12 @@ void SCortexConversionTab::Construct(const FArguments& InArgs)
 SCortexConversionTab::~SCortexConversionTab()
 {
 	CancelBuild();
+
+	if (Context.IsValid() && Context->Session.IsValid())
+	{
+		Context->Session->OnTurnComplete.RemoveAll(this);
+		Context->Session->OnStateChanged.RemoveAll(this);
+	}
 }
 
 void SCortexConversionTab::OnConvertClicked()
@@ -298,10 +304,8 @@ void SCortexConversionTab::StartConversion(const FString& AssembledSystemPrompt)
 
 	Context->bConversionStarted = true;
 
-	FCortexSessionConfig SessionConfig;
+	FCortexSessionConfig SessionConfig = FCortexFrontendModule::CreateLightweightSessionConfig();
 	SessionConfig.SessionId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
-	SessionConfig.WorkingDirectory = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
-	SessionConfig.bConversionMode = true;
 
 	// Use the fully assembled layered prompt (Base + Scope + Depth + Mode + Fragments)
 	SessionConfig.SystemPrompt = AssembledSystemPrompt;
@@ -315,6 +319,7 @@ void SCortexConversionTab::StartConversion(const FString& AssembledSystemPrompt)
 	if (!Context->Session->Connect())
 	{
 		UE_LOG(LogCortexFrontend, Error, TEXT("  Connect() FAILED"));
+		Context->bConversionStarted = false;
 		Context->Session.Reset();
 		return;
 	}
@@ -334,6 +339,9 @@ void SCortexConversionTab::StartConversion(const FString& AssembledSystemPrompt)
 
 	// Dismiss canvas overlay when the session ends (cancel, error, or completion)
 	Context->Session->OnTurnComplete.AddSP(this, &SCortexConversionTab::OnSessionTurnComplete);
+
+	// Reset bConversionStarted if the CLI process crashes or exits unexpectedly (FE-TD-020)
+	Context->Session->OnStateChanged.AddSP(this, &SCortexConversionTab::OnSessionStateChanged);
 }
 
 void SCortexConversionTab::OnSessionTurnComplete(const FCortexTurnResult& Result)
@@ -352,6 +360,27 @@ void SCortexConversionTab::OnSessionTurnComplete(const FCortexTurnResult& Result
 	if (!Result.bIsError && !Result.ResultText.IsEmpty())
 	{
 		SaveConversionNotes(Result.ResultText);
+	}
+}
+
+void SCortexConversionTab::OnSessionStateChanged(const FCortexSessionStateChange& Change)
+{
+	if (!Context.IsValid() || !Context->bConversionStarted)
+	{
+		return;
+	}
+
+	// CLI process crashed or exited unexpectedly — unlock the class name field so user can retry
+	if (Change.NewState == ECortexSessionState::Inactive)
+	{
+		Context->bConversionStarted = false;
+
+		if (CodeCanvas.IsValid())
+		{
+			CodeCanvas->SetProcessing(false);
+		}
+
+		UE_LOG(LogCortexFrontend, Warning, TEXT("Conversion session ended (reason: %s) — unlocking class name field"), *Change.Reason);
 	}
 }
 

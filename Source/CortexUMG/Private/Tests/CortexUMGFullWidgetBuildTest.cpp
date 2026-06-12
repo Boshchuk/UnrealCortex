@@ -24,7 +24,7 @@ bool FCortexUMGFullWidgetBuildTest::RunTest(const FString& Parameters)
     const FString AP = WBP->GetPathName();
 
     FCortexCommandRouter R;
-    R.RegisterDomain(TEXT("umg"), TEXT("Cortex UMG"), TEXT("1.0.0"),
+    R.RegisterDomain(TEXT("umg"), TEXT("Cortex UMG"), TEXT("1.0.1"),
         MakeShared<FCortexUMGCommandHandler>());
 
     auto Cmd = [&](const FString& CmdName, TSharedPtr<FJsonObject> P) -> FCortexCommandResult

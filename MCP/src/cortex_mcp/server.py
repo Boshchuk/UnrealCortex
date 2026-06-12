@@ -3,6 +3,7 @@
 import logging
 import os
 import sys
+import json
 from mcp.server.fastmcp import FastMCP
 from .capabilities import build_router_docstrings, get_registered_domains, load_capabilities_cache
 from .project import resolve_project_dir as _resolve_project_dir
@@ -13,11 +14,13 @@ from .tools.composites.blueprint import register_blueprint_compose_tools
 from .tools.composites.level import register_level_compose_tools
 from .tools.composites.material import register_material_compose_tools
 from .tools.composites.scenario import register_scenario_compose_tools
+from .tools.composites.statetree import register_statetree_compose_tools
 from .tools.composites.widget import register_widget_compose_tools
 from .tools.routers import register_router_tools
 from .tools.standalone.editor import register_editor_standalone_tools
 from .tools.standalone.qa import register_qa_standalone_tools
 from .tools.standalone.schema import register_schema_standalone_tools
+from tools.data.import_queues import register_import_queue_tools
 from tools.reflect import register_reflect_tools
 
 _log_level = getattr(logging, os.environ.get("CORTEX_LOG_LEVEL", "INFO").upper(), logging.INFO)
@@ -51,12 +54,14 @@ def _register_explicit_tools(mcp_server, connection) -> None:
     register_widget_compose_tools(mcp_server, connection)
     register_level_compose_tools(mcp_server, connection)
     register_scenario_compose_tools(mcp_server, connection)
+    register_statetree_compose_tools(mcp_server, connection)
     if "gen" in registered:
         from .tools.composites.gen import register_gen_compose_tools
         register_gen_compose_tools(mcp_server, connection)
     register_editor_standalone_tools(mcp_server, connection)
     register_schema_standalone_tools(mcp_server, connection)
     register_qa_standalone_tools(mcp_server, connection)
+    register_import_queue_tools(mcp_server, connection)
     register_reflect_tools(mcp_server, connection)
 
 
@@ -68,7 +73,11 @@ def get_status() -> str:
         response = _connection.send_command("get_status")
         data = _decode_data(response)
         editors = _discover_all_editors()
-        data["connected_editor"] = {"pid": _connection._pid, "port": _connection.port}
+        connected = next((editor for editor in editors if editor.port == _connection.port), None)
+        if connected is not None:
+            data["connected_editor"] = {"pid": connected.pid, "port": connected.port}
+        else:
+            data["connected_editor"] = {"pid": _connection._pid, "port": _connection.port}
         data["available_editors"] = [
             {"pid": editor.pid, "port": editor.port, "started_at": editor.started_at}
             for editor in editors
@@ -93,6 +102,13 @@ def refresh_cache() -> str:
     """Compatibility helper for tests; not MCP-registered."""
     _connection.invalidate_cache(None)
     return '{"cleared": true}'
+
+
+def get_call_count_metrics() -> str:
+    """Compatibility helper for tests; not MCP-registered."""
+    return json.dumps(_connection.get_call_metrics())
+
+
 # Register explicit consolidated tools only.
 _register_explicit_tools(mcp, _connection)
 

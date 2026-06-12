@@ -15,7 +15,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexGraphPinConnectionTest::RunTest(const FString& Parameters)
 {
-	UPackage* TestPackage = NewObject<UPackage>(nullptr, TEXT("/Temp/CortexGraphPinConnectionTest"), RF_Transient);
+	UPackage* TestPackage = CreatePackage(TEXT("/Game/Temp/CortexGraphPinConnectionTest"));
 	TestPackage->SetPackageFlags(PKG_PlayInEditor);
 
 	UBlueprint* TestBP = FKismetEditorUtilities::CreateBlueprint(
@@ -35,7 +35,7 @@ bool FCortexGraphPinConnectionTest::RunTest(const FString& Parameters)
 	const FString AssetPath = TestBP->GetPathName();
 
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"), MakeShared<FCortexGraphCommandHandler>());
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"), MakeShared<FCortexGraphCommandHandler>());
 
 	FString NodeIdA;
 	FString NodeIdB;
@@ -99,7 +99,7 @@ bool FCortexGraphPinConnectionTest::RunTest(const FString& Parameters)
 		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("asset_path"), AssetPath);
 		Params->SetStringField(TEXT("node_id"), NodeIdA);
-		const FCortexCommandResult R = Router.Execute(TEXT("graph.get_node"), Params);
+		const FCortexCommandResult R = Router.Execute(TEXT("graph.get_subgraph"), Params);
 		TestTrue(TEXT("get_node A should succeed"), R.bSuccess);
 
 		if (R.Data.IsValid())
@@ -131,7 +131,7 @@ bool FCortexGraphPinConnectionTest::RunTest(const FString& Parameters)
 					const TArray<TSharedPtr<FJsonValue>>* ConnArray = nullptr;
 					TestTrue(
 						TEXT("'then' pin should have connected_to array"),
-						(*PinObj)->TryGetArrayField(TEXT("connected_to"), ConnArray)
+						(*PinObj)->TryGetArrayField(TEXT("connections"), ConnArray)
 					);
 
 					if (ConnArray)
@@ -164,7 +164,7 @@ bool FCortexGraphPinConnectionTest::RunTest(const FString& Parameters)
 		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("asset_path"), AssetPath);
 		Params->SetStringField(TEXT("node_id"), NodeIdB);
-		const FCortexCommandResult R = Router.Execute(TEXT("graph.get_node"), Params);
+		const FCortexCommandResult R = Router.Execute(TEXT("graph.get_subgraph"), Params);
 		TestTrue(TEXT("get_node B should succeed"), R.bSuccess);
 
 		if (R.Data.IsValid())
@@ -195,7 +195,7 @@ bool FCortexGraphPinConnectionTest::RunTest(const FString& Parameters)
 					const TArray<TSharedPtr<FJsonValue>>* ConnArray = nullptr;
 					TestTrue(
 						TEXT("'execute' pin should have connected_to array"),
-						(*PinObj)->TryGetArrayField(TEXT("connected_to"), ConnArray)
+						(*PinObj)->TryGetArrayField(TEXT("connections"), ConnArray)
 					);
 
 					if (ConnArray && ConnArray->Num() > 0)

@@ -243,6 +243,14 @@ FCortexCommandResult FCortexLevelQueryOps::FindActors(const TSharedPtr<FJsonObje
         return FCortexCommandRouter::Error(CortexErrorCodes::InvalidValue, TEXT("Missing required parameter: pattern"));
     }
 
+    if (!Pattern.Contains(TEXT("*")) && !Pattern.Contains(TEXT("?")))
+    {
+        Pattern = FString::Printf(TEXT("*%s*"), *Pattern);
+    }
+
+    bool bIncludeComponents = false;
+    Params->TryGetBoolField(TEXT("include_components"), bIncludeComponents);
+
     FCortexCommandResult Error;
     UWorld* World = FCortexLevelUtils::GetEditorWorld(Error);
     if (!World)
@@ -263,7 +271,12 @@ FCortexCommandResult FCortexLevelQueryOps::FindActors(const TSharedPtr<FJsonObje
         const FString Name = Actor->GetName();
         if (Label.MatchesWildcard(Pattern) || Name.MatchesWildcard(Pattern))
         {
-            Matches.Add(MakeShared<FJsonValueObject>(ToSummary(Actor)));
+            TSharedPtr<FJsonObject> Summary = ToSummary(Actor);
+            if (bIncludeComponents)
+            {
+                FCortexLevelUtils::AppendComponentSummary(Actor, Summary);
+            }
+            Matches.Add(MakeShared<FJsonValueObject>(Summary));
         }
     }
 
@@ -374,6 +387,7 @@ FCortexCommandResult FCortexLevelQueryOps::SelectActors(const TSharedPtr<FJsonOb
     TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
     Data->SetArrayField(TEXT("selection"), Selected);
     Data->SetNumberField(TEXT("count"), Selected.Num());
+    Data->SetNumberField(TEXT("selected_count"), Selected.Num());
     return FCortexCommandRouter::Success(Data);
 }
 

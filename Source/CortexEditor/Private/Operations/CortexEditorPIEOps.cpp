@@ -33,11 +33,26 @@ FCortexCommandResult FCortexEditorPIEOps::StartPIE(
 			CortexErrorCodes::PIETransitionInProgress,
 			TEXT("PIE is currently starting/stopping. Wait and retry."));
 	}
+
+	// Ground-truth check: if tracked state says active but PlayWorld is null,
+	// the delegate-driven state is stale — reset to Stopped.
+	if (PIEState.IsActive() && GEditor->PlayWorld == nullptr)
+	{
+		UE_LOG(LogCortexEditor, Warning,
+			TEXT("PIE state tracker reported active (%s) but PlayWorld is null — resetting to Stopped"),
+			*FCortexEditorPIEState::StateToString(PIEState.GetState()));
+		PIEState.SetState(ECortexPIEState::Stopped);
+	}
+
 	if (PIEState.IsActive())
 	{
+		TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+		Data->SetStringField(TEXT("current_state"), FCortexEditorPIEState::StateToString(PIEState.GetState()));
+		Data->SetBoolField(TEXT("is_active"), true);
 		return FCortexCommandRouter::Error(
 			CortexErrorCodes::PIEAlreadyActive,
-			TEXT("PIE is already running. Call stop_pie or restart_pie."));
+			TEXT("PIE is already running. Call stop_pie or restart_pie."),
+			Data);
 	}
 
 	if (DeferredCallback)

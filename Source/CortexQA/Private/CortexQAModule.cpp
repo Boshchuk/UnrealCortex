@@ -16,7 +16,7 @@ void FCortexQAModule::StartupModule()
     Registry.RegisterDomain(
         TEXT("qa"),
         TEXT("Cortex QA"),
-        TEXT("1.0.0"),
+        TEXT("1.0.1"),
         MakeShared<FCortexQACommandHandler>());
 
     UE_LOG(LogCortexQA, Log, TEXT("CortexQA registered with CortexCore"));

@@ -25,15 +25,42 @@ enum class ECortexWorkflowMode : uint8
     Thorough
 };
 
+enum class ECortexSessionLifetimePolicy : uint8
+{
+    Default,
+    Persistent,
+    TurnBound
+};
+
 enum class ECortexSessionState : uint8
 {
     Inactive,
     Spawning,
     Idle,
     Processing,
+    AwaitingTurnExit,
     Cancelling,
     Respawning,
     Terminated
+};
+
+struct FCortexResolvedLaunchOptions
+{
+    ECortexAccessMode AccessMode = ECortexAccessMode::ReadOnly;
+    bool bSkipPermissions = false;
+    ECortexWorkflowMode WorkflowMode = ECortexWorkflowMode::Direct;
+    bool bProjectContext = true;
+    bool bAutoContext = true;
+    FString CustomDirective;
+};
+
+struct FCortexResolvedSessionOptions
+{
+    FName ProviderId = NAME_None;
+    FString ProviderDisplayName;
+    FString ModelId;
+    ECortexEffortLevel EffortLevel = ECortexEffortLevel::Default;
+    int64 ContextLimitTokens = 0;
 };
 
 struct FCortexSessionConfig
@@ -42,8 +69,15 @@ struct FCortexSessionConfig
     FString WorkingDirectory;
     FString McpConfigPath;
     FString SystemPrompt;  // Optional system prompt override (used by conversion tabs)
-    bool bSkipPermissions = true;
+    FName ProviderId = NAME_None;
+    FCortexResolvedSessionOptions ResolvedOptions;
+    FCortexResolvedLaunchOptions LaunchOptions;
+    bool bHasLaunchOptions = false;
+    FString ModelId;
+    ECortexEffortLevel EffortLevel = ECortexEffortLevel::Default;
+    bool bSkipPermissions = false;
     bool bConversionMode = false;  // Lightweight mode: no MCP, no project context, no tools
+    ECortexSessionLifetimePolicy LifetimePolicy = ECortexSessionLifetimePolicy::Default;
 };
 
 struct FCortexPromptRequest
@@ -75,7 +109,8 @@ enum class ECortexChatEntryType : uint8
     AssistantMessage,
     ToolCall,
     CodeBlock,
-    Table
+    Table,
+    AuthError
 };
 
 struct FCortexChatEntry

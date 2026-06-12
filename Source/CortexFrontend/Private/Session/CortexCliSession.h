@@ -14,6 +14,7 @@ DECLARE_MULTICAST_DELEGATE_OneParam(FOnCortexSessionTurnComplete, const FCortexT
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnCortexSessionStateChanged, const FCortexSessionStateChange&);
 
 class FCortexCliWorker;
+class ICortexCliProvider;
 
 class FCortexCliSession : public TSharedFromThis<FCortexCliSession>
 {
@@ -56,6 +57,12 @@ public:
 	int64 GetTotalCacheReadTokens() const { return TotalCacheReadTokens.load(); }
 	int64 GetTotalCacheCreationTokens() const { return TotalCacheCreationTokens.load(); }
 	int64 GetConversationContextTokens() const { return ConversationContextTokens.load(); }
+	FName GetProviderId() const;
+	const FCortexResolvedSessionOptions& GetResolvedOptions() const;
+	FString GetAuthCommandText() const;
+	int64 GetContextLimitTokens() const;
+	ECortexAccessMode GetPinnedAccessMode() const { return Config.LaunchOptions.AccessMode; }
+	ECortexSessionLifetimePolicy GetLifetimePolicy() const { return ResolvedLifetimePolicy; }
 	FString GetModelId() const { return ModelId; }
 	FString GetProvider() const { return Provider; }
 
@@ -65,11 +72,37 @@ public:
 		return (Total > 0) ? static_cast<float>(CacheRead) / static_cast<float>(Total) * 100.0f : 0.0f;
 	}
 
+#if WITH_DEV_AUTOMATION_TESTS
+	static void SetSpawnProcessOverrideForTests(TFunction<bool(FCortexCliSession&, ECortexAccessMode, bool)> InOverride);
+	static void ClearSpawnProcessOverrideForTests();
+	void CompleteSpawnForTests(ECortexAccessMode AccessMode);
+#endif
+
 private:
 	friend class FCortexCliWorker;
 	friend class FCortexCliSessionBuildInitialLaunchArgsTest;
 	friend class FCortexCliSessionBuildResumeLaunchArgsTest;
-	friend class FCortexCliSessionBuildPromptEnvelopeTest;
+	friend class FCortexCliSessionBuildClaudePromptEnvelopeTest;
+	friend class FCortexCliSessionBuildCodexPromptEnvelopeTest;
+	friend class FCortexCliSessionBuildCodexExecArgsTest;
+	friend class FCortexCliSessionBuildCodexResumeArgsTest;
+	friend class FCortexCliSessionLaunchOptionsPinnedAcrossSettingChangeTest;
+	friend class FCortexCliSessionDefaultLaunchPinsLiveSkipPermissionsTest;
+	friend class FCortexCliSessionCodexTurnExitPreservesResumableIdleStateTest;
+	friend class FCortexCliSessionCodexErrorWithoutThreadDoesNotResumeTest;
+	friend class FCortexCliSessionProcessExitCompletesErrorTurnTest;
+	friend class FCortexCliSessionProcessExitDuringSpawnDoesNotCompleteTurnTest;
+	friend class FCortexCliSessionSendPromptDoesNotMutatePinnedAccessModeTest;
+	friend class FCortexCliSessionCodexOverridePathRecomputesResolvedOptionsTest;
+	friend class FCortexCliSessionLightweightConfigStaysMcpFreeTest;
+	friend class FCortexCliSessionPerTurnExecFirstTurnDoesNotResumeWithoutConversationTest;
+	friend class FCortexCliSessionCodexClosesStdinAfterPromptWriteTest;
+	friend class FCortexCliSessionCodexChatClosesStdinAfterPromptWriteTest;
+	friend class FCortexCliSessionCodexTurnBoundTaskClosesStdinAfterPromptWriteTest;
+	friend class FCortexCliSessionCodexChatResumesAcrossExecTurnsTest;
+	friend class FCortexCliSessionCodexChatUnexpectedExitDuringTurnFailsTest;
+	friend class FCortexCliSessionTurnBoundFollowUpQueuesUntilProcessExitTest;
+	friend class FCortexCliSessionTurnBoundFollowUpRespawnFailureCompletesQueuedTurnTest;
 	friend class FCortexCliSessionQueuePromptWhileSpawningTest;
 	friend class FCortexCliSessionTurnCompleteReturnsIdleTest;
 	friend class FCortexCliSessionCancelTransitionsTest;
@@ -91,14 +124,18 @@ private:
 	friend class FCortexReconnectRejectsNonIdleTest;
 	friend class FCortexReconnectFromIdleTransitionsTest;
 	friend class FCortexReconnectDirtyStatePreservedOnFailureTest;
+	friend class FCortexReconnectPinsLaunchMetadataAcrossSettingsChangeTest;
 
 	FString BuildLaunchCommandLine(bool bResumeSession, ECortexAccessMode AccessMode) const;
 	FString BuildAllowedToolsArg(ECortexAccessMode AccessMode) const;
-	FString BuildPromptEnvelope(const FString& Prompt) const;
+	FString BuildPromptEnvelope(const FString& Prompt, ECortexAccessMode AccessMode) const;
 	bool SpawnProcess(ECortexAccessMode AccessMode, bool bResumeSession);
 	void CleanupProcess();
 	void WakeWorker();
 	FString ConsumePendingPromptEnvelope();
+	void HandlePromptWriteCompleted();
+	bool ShouldCloseStdinAfterPromptWrite() const;
+	bool UsesTurnBoundLifetimePolicy() const;
 	ECortexAccessMode GetPendingAccessMode() const;
 	bool TransitionState(ECortexSessionState ExpectedState, ECortexSessionState NewState, const FString& Reason = FString());
 	void BroadcastStateChange(ECortexSessionState PreviousState, ECortexSessionState NewState, const FString& Reason);
@@ -107,6 +144,7 @@ private:
 	void CloseStdinPipe();
 	ECortexSessionState GetStateForTest() const;
 	void SetStateForTest(ECortexSessionState NewState);
+	bool ShouldCloseStdinAfterPromptWriteForTest() const { return ShouldCloseStdinAfterPromptWrite(); }
 	FString GetPendingPromptForTest() const;
 	void SetPendingPromptForTest(const FString& Prompt);  // mutex-safe
 	void DrainPendingPromptForTest();
@@ -130,7 +168,11 @@ private:
 	int32 CurrentTurnIndex = 0;
 
 	FCortexSessionConfig Config;
+	const ICortexCliProvider* PinnedProvider = nullptr;
+	ECortexSessionLifetimePolicy ResolvedLifetimePolicy = ECortexSessionLifetimePolicy::Persistent;
 	FCortexCliInfo CachedCliInfo;
+	bool bHasProviderConversationId = false;
+	bool bHasResumableProviderConversation = false;
 	std::atomic<ECortexSessionState> State;
 	TOptional<FString> PendingPrompt;
 	TOptional<ECortexAccessMode> PendingAccessMode;

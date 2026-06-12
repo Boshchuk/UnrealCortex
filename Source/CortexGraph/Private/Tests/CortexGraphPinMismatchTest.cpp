@@ -16,9 +16,11 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexGraphPinMismatchTest::RunTest(const FString& Parameters)
 {
+	UPackage* TestPackage = CreatePackage(TEXT("/Game/Temp/CortexGraphPinMismatchTest"));
+	TestPackage->SetPackageFlags(PKG_PlayInEditor);
 	UBlueprint* TestBP = FKismetEditorUtilities::CreateBlueprint(
 		AActor::StaticClass(),
-		GetTransientPackage(),
+		TestPackage,
 		FName(TEXT("BP_CortexGraphTest_PinMismatch")),
 		BPTYPE_Normal,
 		UBlueprint::StaticClass(),
@@ -28,13 +30,14 @@ bool FCortexGraphPinMismatchTest::RunTest(const FString& Parameters)
 
 	if (TestBP == nullptr)
 	{
+		TestPackage->MarkAsGarbage();
 		return true;
 	}
 
 	FString AssetPath = TestBP->GetPathName();
 
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>());
 
 	// Add two PrintString nodes
@@ -101,6 +104,7 @@ bool FCortexGraphPinMismatchTest::RunTest(const FString& Parameters)
 
 	// Cleanup
 	TestBP->MarkAsGarbage();
+	TestPackage->MarkAsGarbage();
 
 	return true;
 }

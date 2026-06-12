@@ -11,7 +11,7 @@ namespace
     FCortexCommandRouter CreateLevelRouterComponent()
     {
         FCortexCommandRouter Router;
-        Router.RegisterDomain(TEXT("level"), TEXT("Cortex Level"), TEXT("1.0.0"),
+        Router.RegisterDomain(TEXT("level"), TEXT("Cortex Level"), TEXT("1.0.1"),
             MakeShared<FCortexLevelCommandHandler>());
         return Router;
     }

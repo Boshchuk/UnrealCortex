@@ -4,8 +4,10 @@
 #include "CoreMinimal.h"
 #include "CortexCommandRouter.h"
 
+struct FAssetData;
 class UDataTable;
 class UCompositeDataTable;
+class FCortexDataMutationHelpers;
 
 class FCortexDataTableOps
 {
@@ -23,8 +25,20 @@ public:
 	static FCortexCommandResult SearchDatatableContent(const TSharedPtr<FJsonObject>& Params);
 	static FCortexCommandResult GetDataCatalog(const TSharedPtr<FJsonObject>& Params);
 	static FCortexCommandResult ResolveTags(const TSharedPtr<FJsonObject>& Params);
+	static void ScanStringTableReferences(
+		const UStruct* StructType,
+		const void* StructData,
+		const FString& TablePath,
+		const FString& RowName,
+		const FString& StringTablePath,
+		const FString& KeyPattern,
+		const TSet<FString>& Keys,
+		const FString& FieldPrefix,
+		TArray<TSharedPtr<FJsonValue>>& OutReferences);
 
 private:
+	friend class FCortexDataMutationHelpers;
+
 	/** Resolve a row struct by short name, searching all UScriptStruct objects */
 	static UScriptStruct* ResolveRowStruct(const FString& StructName, FCortexCommandResult& OutError);
 
@@ -39,4 +53,7 @@ private:
 
 	/** Find which source table actually owns a row (searches back-to-front for override semantics) */
 	static UDataTable* FindSourceTableForRow(const UCompositeDataTable* CompositeTable, FName RowName);
+
+	/** Extract row struct short name from AssetRegistry tag (no asset load required) */
+	static FString GetRowStructNameFromTag(const FAssetData& AssetData);
 };

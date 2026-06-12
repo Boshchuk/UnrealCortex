@@ -9,6 +9,7 @@ public class CortexCore : ModuleRules
         PublicDependencyModuleNames.AddRange(new string[]
         {
             "Core",
+            "Json",
         });
 
         PrivateDependencyModuleNames.AddRange(new string[]
@@ -16,12 +17,13 @@ public class CortexCore : ModuleRules
             "CoreUObject",
             "Engine",
             "DeveloperSettings",
+            "Projects",
             "Sockets",
             "Networking",
-            "Json",
             "JsonUtilities",
             "GameplayTags",
             "UnrealEd",
+            // Shared asset registry access is used by asset operations and fingerprinting.
             "AssetRegistry",
             // Test-only: required for CortexSerializerInstancedSubObjectTest.cpp (InputMappingContext, InputModifiers)
             // Not used in production CortexCore code.
@@ -33,6 +35,11 @@ public class CortexCore : ModuleRules
         if (Target.Version.MajorVersion == 5 && Target.Version.MinorVersion < 5)
         {
             PrivateDependencyModuleNames.Add("StructUtils");
+        }
+
+        if (Target.Platform == UnrealTargetPlatform.Win64)
+        {
+            PublicSystemLibraries.Add("bcrypt.lib");
         }
     }
 }

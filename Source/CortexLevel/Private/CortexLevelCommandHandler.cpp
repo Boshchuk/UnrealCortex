@@ -6,6 +6,7 @@
 #include "Operations/CortexLevelDiscoveryOps.h"
 #include "Operations/CortexLevelOrganizationOps.h"
 #include "Operations/CortexLevelQueryOps.h"
+#include "Operations/CortexLevelLifecycleOps.h"
 #include "Operations/CortexLevelStreamingOps.h"
 #include "Operations/CortexLevelTransformOps.h"
 
@@ -160,6 +161,30 @@ FCortexCommandResult FCortexLevelCommandHandler::Execute(
     {
         return FCortexLevelStreamingOps::SaveAll(Params);
     }
+    if (Command == TEXT("list_templates"))
+    {
+        return FCortexLevelLifecycleOps::ListTemplates(Params);
+    }
+    if (Command == TEXT("create_level"))
+    {
+        return FCortexLevelLifecycleOps::CreateLevel(Params);
+    }
+    if (Command == TEXT("open_level"))
+    {
+        return FCortexLevelLifecycleOps::OpenLevel(Params);
+    }
+    if (Command == TEXT("duplicate_level"))
+    {
+        return FCortexLevelLifecycleOps::DuplicateLevel(Params);
+    }
+    if (Command == TEXT("rename_level"))
+    {
+        return FCortexLevelLifecycleOps::RenameLevel(Params);
+    }
+    if (Command == TEXT("delete_level"))
+    {
+        return FCortexLevelLifecycleOps::DeleteLevel(Params);
+    }
 
     return FCortexCommandRouter::Error(
         CortexErrorCodes::UnknownCommand,
@@ -180,12 +205,18 @@ TArray<FCortexCommandInfo> FCortexLevelCommandHandler::GetSupportedCommands() co
             .Optional(TEXT("mesh"), TEXT("string"), TEXT("Optional mesh asset"))
             .Optional(TEXT("material"), TEXT("string"), TEXT("Optional material override")),
         FCortexCommandInfo{ TEXT("delete_actor"), TEXT("Delete actor by name/label") }
+            .OptionalBatchItems(TEXT("Batch items with target, confirm_class, expected_fingerprint"))
+            .OptionalExpectedFingerprint()
             .Required(TEXT("actor"), TEXT("string"), TEXT("Actor identifier"))
             .Optional(TEXT("confirm_class"), TEXT("string"), TEXT("Expected actor class guard")),
         FCortexCommandInfo{ TEXT("duplicate_actor"), TEXT("Duplicate an existing actor") }
+            .OptionalBatchItems(TEXT("Batch items with target, offset, expected_fingerprint"))
+            .OptionalExpectedFingerprint()
             .Required(TEXT("actor"), TEXT("string"), TEXT("Actor identifier"))
             .Optional(TEXT("offset"), TEXT("array"), TEXT("Optional world offset")),
         FCortexCommandInfo{ TEXT("rename_actor"), TEXT("Change actor label") }
+            .OptionalBatchItems(TEXT("Batch items with target, label, expected_fingerprint"))
+            .OptionalExpectedFingerprint()
             .Required(TEXT("actor"), TEXT("string"), TEXT("Actor identifier"))
             .Required(TEXT("label"), TEXT("string"), TEXT("New actor label")),
         FCortexCommandInfo{ TEXT("get_actor"), TEXT("Get full actor details") }
@@ -216,6 +247,8 @@ TArray<FCortexCommandInfo> FCortexLevelCommandHandler::GetSupportedCommands() co
             .Required(TEXT("component"), TEXT("string"), TEXT("Component instance name"))
             .Required(TEXT("property"), TEXT("string"), TEXT("Property path")),
         FCortexCommandInfo{ TEXT("set_component_property"), TEXT("Set component property value") }
+            .OptionalBatchItems(TEXT("Batch items with target, component, property, value, expected_fingerprint"))
+            .OptionalExpectedFingerprint()
             .Required(TEXT("actor"), TEXT("string"), TEXT("Actor identifier"))
             .Required(TEXT("component"), TEXT("string"), TEXT("Component instance name"))
             .Required(TEXT("property"), TEXT("string"), TEXT("Property path"))
@@ -233,8 +266,9 @@ TArray<FCortexCommandInfo> FCortexLevelCommandHandler::GetSupportedCommands() co
             .Optional(TEXT("region"), TEXT("object"), TEXT("World-space region filter"))
             .Optional(TEXT("limit"), TEXT("number"), TEXT("Maximum actors to return"))
             .Optional(TEXT("offset"), TEXT("number"), TEXT("Pagination offset")),
-        FCortexCommandInfo{ TEXT("find_actors"), TEXT("Find actors by wildcard pattern") }
-            .Required(TEXT("pattern"), TEXT("string"), TEXT("Wildcard actor search pattern")),
+        FCortexCommandInfo{ TEXT("find_actors"), TEXT("Find actors by pattern (auto-wildcards plain keywords)") }
+            .Required(TEXT("pattern"), TEXT("string"), TEXT("Search pattern — plain keywords auto-wrapped as *keyword*"))
+            .Optional(TEXT("include_components"), TEXT("boolean"), TEXT("Include component list per match")),
         FCortexCommandInfo{ TEXT("get_bounds"), TEXT("Compute bounds for filtered actors") }
             .Optional(TEXT("class"), TEXT("string"), TEXT("Actor class filter"))
             .Optional(TEXT("tags"), TEXT("array"), TEXT("Required actor tags"))
@@ -245,15 +279,23 @@ TArray<FCortexCommandInfo> FCortexLevelCommandHandler::GetSupportedCommands() co
             .Optional(TEXT("add"), TEXT("boolean"), TEXT("Add to current selection")),
         FCortexCommandInfo{ TEXT("get_selection"), TEXT("Get current actor selection") },
         FCortexCommandInfo{ TEXT("attach_actor"), TEXT("Attach actor to parent actor") }
+            .OptionalBatchItems(TEXT("Batch items with target, parent, socket, expected_fingerprint"))
+            .OptionalExpectedFingerprint()
             .Required(TEXT("actor"), TEXT("string"), TEXT("Child actor"))
             .Required(TEXT("parent"), TEXT("string"), TEXT("Parent actor"))
             .Optional(TEXT("socket"), TEXT("string"), TEXT("Optional parent socket")),
         FCortexCommandInfo{ TEXT("detach_actor"), TEXT("Detach actor from parent") }
+            .OptionalBatchItems(TEXT("Batch items with target, expected_fingerprint"))
+            .OptionalExpectedFingerprint()
             .Required(TEXT("actor"), TEXT("string"), TEXT("Actor to detach")),
         FCortexCommandInfo{ TEXT("set_tags"), TEXT("Replace actor tags") }
+            .OptionalBatchItems(TEXT("Batch items with target, tags, expected_fingerprint"))
+            .OptionalExpectedFingerprint()
             .Required(TEXT("actor"), TEXT("string"), TEXT("Actor identifier"))
             .Required(TEXT("tags"), TEXT("array"), TEXT("Replacement actor tags")),
         FCortexCommandInfo{ TEXT("set_folder"), TEXT("Set actor outliner folder") }
+            .OptionalBatchItems(TEXT("Batch items with target, folder, expected_fingerprint"))
+            .OptionalExpectedFingerprint()
             .Required(TEXT("actor"), TEXT("string"), TEXT("Actor identifier"))
             .Optional(TEXT("folder"), TEXT("string"), TEXT("Destination folder path")),
         FCortexCommandInfo{ TEXT("group_actors"), TEXT("Group multiple actors") }
@@ -275,5 +317,23 @@ TArray<FCortexCommandInfo> FCortexLevelCommandHandler::GetSupportedCommands() co
             .Required(TEXT("data_layer"), TEXT("string"), TEXT("Target data layer")),
         FCortexCommandInfo{ TEXT("save_level"), TEXT("Save current level without prompt") },
         FCortexCommandInfo{ TEXT("save_all"), TEXT("Save all dirty map/content packages without prompt") },
+        FCortexCommandInfo{ TEXT("list_templates"), TEXT("List available level templates") },
+        FCortexCommandInfo{ TEXT("create_level"), TEXT("Create a new level asset") }
+            .Required(TEXT("path"), TEXT("string"), TEXT("Content path for the new level"))
+            .Optional(TEXT("template"), TEXT("string"), TEXT("Template name or path"))
+            .Optional(TEXT("open"), TEXT("boolean"), TEXT("Open the level after creation")),
+        FCortexCommandInfo{ TEXT("open_level"), TEXT("Open an existing level in the editor") }
+            .Required(TEXT("path"), TEXT("string"), TEXT("Content path of the level"))
+            .Optional(TEXT("save_current"), TEXT("boolean"), TEXT("Save current level before switching"))
+            .Optional(TEXT("force"), TEXT("boolean"), TEXT("Discard unsaved changes and open")),
+        FCortexCommandInfo{ TEXT("duplicate_level"), TEXT("Duplicate an existing level asset") }
+            .Required(TEXT("source_path"), TEXT("string"), TEXT("Source level content path"))
+            .Required(TEXT("dest_path"), TEXT("string"), TEXT("Destination content path")),
+        FCortexCommandInfo{ TEXT("rename_level"), TEXT("Rename or move a level asset") }
+            .Required(TEXT("path"), TEXT("string"), TEXT("Current content path"))
+            .Required(TEXT("new_path"), TEXT("string"), TEXT("New content path")),
+        FCortexCommandInfo{ TEXT("delete_level"), TEXT("Delete a level asset") }
+            .Required(TEXT("path"), TEXT("string"), TEXT("Content path of the level"))
+            .Optional(TEXT("force"), TEXT("boolean"), TEXT("Delete even if referenced by other assets")),
     };
 }

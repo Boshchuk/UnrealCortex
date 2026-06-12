@@ -1,6 +1,9 @@
 #include "CortexBPAssetOps.h"
 #include "Operations/CortexBPTypeUtils.h"
+#include "CortexAssetFingerprint.h"
+#include "CortexBatchMutation.h"
 #include "CortexBlueprintModule.h"
+#include "CortexEditorUtils.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Kismet2/KismetEditorUtilities.h"
@@ -26,17 +29,251 @@
 #include "UObject/UObjectGlobals.h"
 #include "ObjectTools.h"
 #include "Misc/TextBuffer.h"
+#include "Misc/Paths.h"
 #include "Editor.h"
 #include "Engine/World.h"
 #include "Engine/LevelScriptBlueprint.h"
+#include "UObject/ObjectRedirector.h"
+
+namespace CortexBPAssetOpsPrivate
+{
+FString NormalizeBlueprintContentPath(const FString& AssetPath)
+{
+	return FCortexEditorUtils::NormalizeMountedContentPath(AssetPath);
+}
+
+FString NormalizeBlueprintDirectoryPath(const FString& DirectoryPath)
+{
+	return FCortexEditorUtils::NormalizeMountedContentPath(DirectoryPath);
+}
+
+bool IsGeneratedClassPath(const FString& AssetPath)
+{
+	const FString ObjectPath = FPackageName::ExportTextPathToObjectPath(AssetPath);
+	const FString ObjectName = FPackageName::ObjectPathToObjectName(ObjectPath);
+	return ObjectPath.Contains(TEXT(".")) && ObjectName.EndsWith(TEXT("_C"));
+}
+
+bool TryResolveLevelBlueprintMapPackagePath(const FString& AssetPath, FString& OutMapPackagePath)
+{
+	static const FString LevelBPPrefix = TEXT("__level_bp__:");
+	if (!AssetPath.StartsWith(LevelBPPrefix))
+	{
+		return false;
+	}
+
+	OutMapPackagePath = FPackageName::ObjectPathToPackageName(
+		NormalizeBlueprintContentPath(AssetPath.Mid(LevelBPPrefix.Len())));
+	return true;
+}
+
+bool IsLevelBlueprintSyntheticPath(const FString& AssetPath)
+{
+	FString MapPackagePath;
+	return TryResolveLevelBlueprintMapPackagePath(AssetPath, MapPackagePath);
+}
+
+bool TryResolveBlueprintPackageFilename(const FString& PackagePath, FString& OutFilename)
+{
+	return FPackageName::TryConvertLongPackageNameToFilename(
+		PackagePath,
+		OutFilename,
+		FPackageName::GetAssetPackageExtension());
+}
+
+bool DoesBlueprintPackageExist(const FString& PackagePath)
+{
+	if (FindPackage(nullptr, *PackagePath) != nullptr)
+	{
+		return true;
+	}
+
+	FString PackageFilename;
+	return TryResolveBlueprintPackageFilename(PackagePath, PackageFilename)
+		&& FPackageName::DoesPackageExist(PackagePath);
+}
+
+bool ValidateRedirectorPackageSaveRequirements(const FString& SourcePackagePath, FString& OutError)
+{
+	FString RedirectorFilename;
+	if (!TryResolveBlueprintPackageFilename(SourcePackagePath, RedirectorFilename))
+	{
+		OutError = FString::Printf(TEXT("Failed to resolve redirector package filename: %s"), *SourcePackagePath);
+		return false;
+	}
+
+	const FString RedirectorDirectory = FPaths::GetPath(RedirectorFilename);
+	if (!FPaths::DirectoryExists(RedirectorDirectory))
+	{
+		OutError = FString::Printf(TEXT("Redirector package directory does not exist: %s"), *RedirectorDirectory);
+		return false;
+	}
+
+	return true;
+}
+
+bool EnsureRedirectorPackage(const FString& SourcePackagePath, UObject* DestinationObject, FString& OutError)
+{
+	if (!DestinationObject)
+	{
+		OutError = TEXT("Missing redirector destination object");
+		return false;
+	}
+
+	const FString RedirectorName = FPackageName::GetShortName(SourcePackagePath);
+	UPackage* RedirectorPackage = FindPackage(nullptr, *SourcePackagePath);
+	if (!RedirectorPackage)
+	{
+		RedirectorPackage = CreatePackage(*SourcePackagePath);
+	}
+
+	if (!RedirectorPackage)
+	{
+		OutError = FString::Printf(TEXT("Failed to create redirector package: %s"), *SourcePackagePath);
+		return false;
+	}
+
+	UObjectRedirector* Redirector = FindObject<UObjectRedirector>(RedirectorPackage, *RedirectorName);
+	if (!Redirector)
+	{
+		Redirector = NewObject<UObjectRedirector>(
+			RedirectorPackage,
+			UObjectRedirector::StaticClass(),
+			FName(*RedirectorName),
+			RF_Public | RF_Standalone);
+	}
+
+	if (!Redirector)
+	{
+		OutError = FString::Printf(TEXT("Failed to create redirector asset: %s"), *SourcePackagePath);
+		return false;
+	}
+
+	Redirector->DestinationObject = DestinationObject;
+	RedirectorPackage->MarkPackageDirty();
+	FAssetRegistryModule::AssetCreated(Redirector);
+
+	FString RedirectorFilename;
+	if (!TryResolveBlueprintPackageFilename(SourcePackagePath, RedirectorFilename))
+	{
+		OutError = FString::Printf(TEXT("Failed to resolve redirector package filename: %s"), *SourcePackagePath);
+		return false;
+	}
+
+	FSavePackageArgs SaveArgs;
+	SaveArgs.TopLevelFlags = RF_Standalone;
+	if (!UPackage::SavePackage(RedirectorPackage, Redirector, *RedirectorFilename, SaveArgs))
+	{
+		OutError = FString::Printf(TEXT("Failed to save redirector package: %s"), *SourcePackagePath);
+		return false;
+	}
+
+	return true;
+}
+
+bool ValidateReadableBlueprintPath(const FString& PackagePath, FString& OutError)
+{
+	if (PackagePath.IsEmpty())
+	{
+		OutError = TEXT("Blueprint list path is empty");
+		return false;
+	}
+
+	if (!FPackageName::IsValidLongPackageName(PackagePath, true))
+	{
+		OutError = FString::Printf(TEXT("Invalid Blueprint list path: %s"), *PackagePath);
+		return false;
+	}
+
+	FString PackageFilename;
+	if (!FPackageName::TryConvertLongPackageNameToFilename(PackagePath, PackageFilename))
+	{
+		OutError = FString::Printf(TEXT("Blueprint list path is not under a mounted content root: %s"), *PackagePath);
+		return false;
+	}
+
+	return true;
+}
+
+bool ValidateWritableBlueprintPath(const FString& PackagePath, FString& OutError)
+{
+	if (!FCortexEditorUtils::IsWritableMountedContentPath(PackagePath, OutError))
+	{
+		return false;
+	}
+
+	if (!FPackageName::IsValidLongPackageName(PackagePath))
+	{
+		OutError = FString::Printf(TEXT("Invalid Blueprint package path: %s"), *PackagePath);
+		return false;
+	}
+
+	FString PackageFilename;
+	if (!TryResolveBlueprintPackageFilename(PackagePath, PackageFilename))
+	{
+		OutError = FString::Printf(TEXT("Blueprint package path cannot be resolved to a writable filename: %s"), *PackagePath);
+		return false;
+	}
+
+	return true;
+}
+
+bool ValidateWritableLevelBlueprintPath(const FString& AssetPath, FString& OutError)
+{
+	FString MapPackagePath;
+	if (!TryResolveLevelBlueprintMapPackagePath(AssetPath, MapPackagePath))
+	{
+		return false;
+	}
+
+	if (MapPackagePath.IsEmpty())
+	{
+		OutError = TEXT("Level Blueprint map path is empty");
+		return false;
+	}
+
+	if (!FCortexEditorUtils::IsWritableMountedContentPath(MapPackagePath, OutError))
+	{
+		return false;
+	}
+
+	if (!FPackageName::IsValidLongPackageName(MapPackagePath))
+	{
+		OutError = FString::Printf(TEXT("Invalid Level Blueprint map package path: %s"), *MapPackagePath);
+		return false;
+	}
+
+	FString MapFilename;
+	if (!FPackageName::TryConvertLongPackageNameToFilename(MapPackagePath, MapFilename, FPackageName::GetMapPackageExtension()))
+	{
+		OutError = FString::Printf(TEXT("Level Blueprint map package path cannot be resolved to a writable filename: %s"), *MapPackagePath);
+		return false;
+	}
+
+	return true;
+}
+
+bool ValidateWritableCompileTargetPath(const FString& AssetPath, FString& OutError)
+{
+	if (IsLevelBlueprintSyntheticPath(AssetPath))
+	{
+		return ValidateWritableLevelBlueprintPath(AssetPath, OutError);
+	}
+
+	return FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(AssetPath, OutError);
+}
+}
 
 UBlueprint* FCortexBPAssetOps::LoadBlueprint(const FString& AssetPath, FString& OutError)
 {
+	OutError.Reset();
+
 	// Level Script Blueprint: synthetic path __level_bp__:/Game/Maps/MapName
 	static const FString LevelBPPrefix = TEXT("__level_bp__:");
 	if (AssetPath.StartsWith(LevelBPPrefix))
 	{
-		const FString MapPath = AssetPath.Mid(LevelBPPrefix.Len());
+		const FString MapPath = FPackageName::ObjectPathToPackageName(
+			CortexBPAssetOpsPrivate::NormalizeBlueprintContentPath(AssetPath.Mid(LevelBPPrefix.Len())));
 
 		// Use current editor world if it matches — avoids double-load
 		UWorld* World = nullptr;
@@ -76,14 +313,27 @@ UBlueprint* FCortexBPAssetOps::LoadBlueprint(const FString& AssetPath, FString& 
 		return LSB;
 	}
 
-	// Check if the asset is already in memory at the original path (e.g. transient BPs in tests)
-	// before applying /Game/ normalization, which would corrupt non-/Game/ paths.
-	if (AssetPath.StartsWith(TEXT("/")))
+	if (CortexBPAssetOpsPrivate::IsGeneratedClassPath(AssetPath))
 	{
-		const FString OrigPkgName = FPackageName::ObjectPathToPackageName(AssetPath);
+		OutError = FString::Printf(TEXT("Generated Blueprint class paths are not Blueprint asset paths: %s"), *AssetPath);
+		return nullptr;
+	}
+
+	const FString NormalizedPath = CortexBPAssetOpsPrivate::NormalizeBlueprintContentPath(AssetPath);
+	if (NormalizedPath.IsEmpty())
+	{
+		OutError = TEXT("Blueprint asset path is empty");
+		return nullptr;
+	}
+
+	// Check if the asset is already in memory at the original path (e.g. transient BPs in tests)
+	// before disk lookup, while preserving explicit mounted roots.
+	if (NormalizedPath.StartsWith(TEXT("/")))
+	{
+		const FString OrigPkgName = FPackageName::ObjectPathToPackageName(NormalizedPath);
 		if (FindPackage(nullptr, *OrigPkgName))
 		{
-			UBlueprint* InMemoryBP = FindObject<UBlueprint>(nullptr, *AssetPath);
+			UBlueprint* InMemoryBP = FindObject<UBlueprint>(nullptr, *NormalizedPath);
 			if (InMemoryBP)
 			{
 				return InMemoryBP;
@@ -91,20 +341,9 @@ UBlueprint* FCortexBPAssetOps::LoadBlueprint(const FString& AssetPath, FString& 
 		}
 	}
 
-	// Normalize path (ensure it starts with /Game/)
-	FString NormalizedPath = AssetPath;
-	if (!NormalizedPath.StartsWith(TEXT("/")))
-	{
-		NormalizedPath = TEXT("/Game/") + NormalizedPath;
-	}
-	else if (!NormalizedPath.StartsWith(TEXT("/Game/")))
-	{
-		NormalizedPath = TEXT("/Game") + NormalizedPath;
-	}
-
 	// Check if package exists before LoadObject to avoid SkipPackage warnings
-	FString PkgName = FPackageName::ObjectPathToPackageName(NormalizedPath);
-	if (!FindPackage(nullptr, *PkgName) && !FPackageName::DoesPackageExist(PkgName))
+	const FString PkgName = FPackageName::ObjectPathToPackageName(NormalizedPath);
+	if (!CortexBPAssetOpsPrivate::DoesBlueprintPackageExist(PkgName))
 	{
 		OutError = FString::Printf(TEXT("Blueprint not found at path: %s"), *NormalizedPath);
 		return nullptr;
@@ -125,6 +364,19 @@ UBlueprint* FCortexBPAssetOps::LoadBlueprint(const FString& AssetPath, FString& 
 	}
 
 	return BP;
+}
+
+bool FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(const FString& AssetPath, FString& OutError)
+{
+	if (CortexBPAssetOpsPrivate::IsGeneratedClassPath(AssetPath))
+	{
+		OutError = FString::Printf(TEXT("Generated Blueprint class paths are not Blueprint asset paths: %s"), *AssetPath);
+		return false;
+	}
+
+	const FString PackagePath = FPackageName::ObjectPathToPackageName(
+		CortexBPAssetOpsPrivate::NormalizeBlueprintContentPath(AssetPath));
+	return CortexBPAssetOpsPrivate::ValidateWritableBlueprintPath(PackagePath, OutError);
 }
 
 FString FCortexBPAssetOps::DetermineBlueprintType(const UBlueprint* BP)
@@ -404,6 +656,136 @@ namespace
 		AddReferencedMetadata(Node, Diagnostic);
 		return Diagnostic;
 	}
+
+	TSharedPtr<FJsonObject> CopyBlueprintAssetBatchJsonObject(const TSharedPtr<FJsonObject>& Source)
+	{
+		TSharedPtr<FJsonObject> Copy = MakeShared<FJsonObject>();
+		if (!Source.IsValid())
+		{
+			return Copy;
+		}
+
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Source->Values)
+		{
+			Copy->SetField(Pair.Key, Pair.Value);
+		}
+
+		return Copy;
+	}
+
+	TArray<TSharedPtr<FJsonValue>> ToBlueprintAssetBatchJsonStringArray(const TArray<FString>& Values)
+	{
+		TArray<TSharedPtr<FJsonValue>> Out;
+		Out.Reserve(Values.Num());
+		for (const FString& Value : Values)
+		{
+			Out.Add(MakeShared<FJsonValueString>(Value));
+		}
+		return Out;
+	}
+
+	FCortexAssetFingerprint MakeBlueprintAssetFingerprint(const UBlueprint* Blueprint)
+	{
+		if (!Blueprint)
+		{
+			return MakeObjectAssetFingerprint(nullptr);
+		}
+
+		return MakeObjectAssetFingerprint(Blueprint, GetTypeHash(static_cast<uint32>(Blueprint->Status)));
+	}
+
+	TSharedPtr<FJsonObject> BuildBlueprintAssetBatchResponseData(const FCortexBatchMutationResult& BatchResult)
+	{
+		TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+		Data->SetStringField(TEXT("status"), BatchResult.Status);
+		Data->SetArrayField(TEXT("written_targets"), ToBlueprintAssetBatchJsonStringArray(BatchResult.WrittenTargets));
+		Data->SetArrayField(TEXT("unwritten_targets"), ToBlueprintAssetBatchJsonStringArray(BatchResult.UnwrittenTargets));
+
+		TArray<TSharedPtr<FJsonValue>> PerItem;
+		PerItem.Reserve(BatchResult.PerItem.Num());
+		for (const FCortexBatchMutationItemResult& ItemResult : BatchResult.PerItem)
+		{
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetStringField(TEXT("target"), ItemResult.Target);
+			Entry->SetBoolField(TEXT("success"), ItemResult.Result.bSuccess);
+			if (ItemResult.Result.Data.IsValid())
+			{
+				Entry->SetObjectField(TEXT("data"), ItemResult.Result.Data);
+			}
+			if (!ItemResult.Result.ErrorCode.IsEmpty())
+			{
+				Entry->SetStringField(TEXT("error_code"), ItemResult.Result.ErrorCode);
+			}
+			if (!ItemResult.Result.ErrorMessage.IsEmpty())
+			{
+				Entry->SetStringField(TEXT("error_message"), ItemResult.Result.ErrorMessage);
+			}
+			PerItem.Add(MakeShared<FJsonValueObject>(Entry));
+		}
+		Data->SetArrayField(TEXT("per_item"), PerItem);
+		return Data;
+	}
+
+	FCortexCommandResult MakeBlueprintAssetBatchCommandResult(const FCortexBatchMutationResult& BatchResult)
+	{
+		TSharedPtr<FJsonObject> Data = BuildBlueprintAssetBatchResponseData(BatchResult);
+		if (BatchResult.Status == TEXT("committed"))
+		{
+			return FCortexCommandRouter::Success(Data);
+		}
+
+		return FCortexCommandRouter::Error(BatchResult.ErrorCode, BatchResult.ErrorMessage, Data);
+	}
+
+	FCortexBatchPreflightResult PreflightBatchCompileBlueprint(const FCortexBatchMutationItem& Item)
+	{
+		FString ValidationError;
+		if (!CortexBPAssetOpsPrivate::ValidateWritableCompileTargetPath(Item.Target, ValidationError))
+		{
+			return FCortexBatchPreflightResult::Error(CortexErrorCodes::InvalidField, ValidationError);
+		}
+
+		FString LoadError;
+		UBlueprint* Blueprint = FCortexBPAssetOps::LoadBlueprint(Item.Target, LoadError);
+		if (!Blueprint)
+		{
+			return FCortexBatchPreflightResult::Error(CortexErrorCodes::BlueprintNotFound, LoadError);
+		}
+
+		return FCortexBatchPreflightResult::Success(MakeBlueprintAssetFingerprint(Blueprint).ToJson());
+	}
+
+	FCortexCommandResult CommitBatchCompileBlueprint(const FCortexBatchMutationItem& Item)
+	{
+		TSharedPtr<FJsonObject> ItemParams = CopyBlueprintAssetBatchJsonObject(Item.Params);
+		ItemParams->SetStringField(TEXT("asset_path"), Item.Target);
+		return FCortexBPAssetOps::Compile(ItemParams);
+	}
+
+	FCortexBatchPreflightResult PreflightBatchSaveBlueprint(const FCortexBatchMutationItem& Item)
+	{
+		FString ValidationError;
+		if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(Item.Target, ValidationError))
+		{
+			return FCortexBatchPreflightResult::Error(CortexErrorCodes::InvalidField, ValidationError);
+		}
+
+		FString LoadError;
+		UBlueprint* Blueprint = FCortexBPAssetOps::LoadBlueprint(Item.Target, LoadError);
+		if (!Blueprint)
+		{
+			return FCortexBatchPreflightResult::Error(CortexErrorCodes::BlueprintNotFound, LoadError);
+		}
+
+		return FCortexBatchPreflightResult::Success(MakeBlueprintAssetFingerprint(Blueprint).ToJson());
+	}
+
+	FCortexCommandResult CommitBatchSaveBlueprint(const FCortexBatchMutationItem& Item)
+	{
+		TSharedPtr<FJsonObject> ItemParams = CopyBlueprintAssetBatchJsonObject(Item.Params);
+		ItemParams->SetStringField(TEXT("asset_path"), Item.Target);
+		return FCortexBPAssetOps::Save(ItemParams);
+	}
 }
 
 FCortexCommandResult FCortexBPAssetOps::Create(const TSharedPtr<FJsonObject>& Params)
@@ -499,27 +881,28 @@ FCortexCommandResult FCortexBPAssetOps::Create(const TSharedPtr<FJsonObject>& Pa
 		}
 	}
 
-	// Combine name and path to form package path (strip trailing slash to avoid double slashes)
-	FString NormalizedPath = Path.TrimEnd();
-	while (NormalizedPath.EndsWith(TEXT("/")))
+	const FString NormalizedDirectory = CortexBPAssetOpsPrivate::NormalizeBlueprintDirectoryPath(Path);
+	if (NormalizedDirectory.IsEmpty())
 	{
-		NormalizedPath.LeftChopInline(1);
+		Result.bSuccess = false;
+		Result.ErrorCode = CortexErrorCodes::InvalidField;
+		Result.ErrorMessage = TEXT("Blueprint destination path is empty");
+		return Result;
 	}
-	FString PackagePath = FString::Printf(TEXT("%s/%s"), *NormalizedPath, *Name);
 
-	// Normalize path (ensure it starts with /Game/)
-	if (!PackagePath.StartsWith(TEXT("/")))
+	const FString PackagePath = FString::Printf(TEXT("%s/%s"), *NormalizedDirectory, *Name);
+	FString ValidationError;
+	if (!CortexBPAssetOpsPrivate::ValidateWritableBlueprintPath(PackagePath, ValidationError))
 	{
-		PackagePath = TEXT("/Game/") + PackagePath;
-	}
-	else if (!PackagePath.StartsWith(TEXT("/Game/")))
-	{
-		PackagePath = TEXT("/Game") + PackagePath;
+		Result.bSuccess = false;
+		Result.ErrorCode = CortexErrorCodes::InvalidField;
+		Result.ErrorMessage = ValidationError;
+		return Result;
 	}
 
 	// Check if asset already exists (guard with FindPackage/DoesPackageExist to avoid warnings)
-	FString ExistingPkgName = FPackageName::ObjectPathToPackageName(PackagePath);
-	bool bPackageExists = FindPackage(nullptr, *ExistingPkgName) || FPackageName::DoesPackageExist(ExistingPkgName);
+	const FString ExistingPkgName = FPackageName::ObjectPathToPackageName(PackagePath);
+	const bool bPackageExists = CortexBPAssetOpsPrivate::DoesBlueprintPackageExist(ExistingPkgName);
 	UObject* ExistingAsset = bPackageExists ? LoadObject<UBlueprint>(nullptr, *PackagePath) : nullptr;
 	if (ExistingAsset)
 	{
@@ -591,8 +974,15 @@ FCortexCommandResult FCortexBPAssetOps::Create(const TSharedPtr<FJsonObject>& Pa
 	FAssetRegistryModule::AssetCreated(NewBP);
 
 	// Save the package
-	const FString PackageFilename =
-		FPackageName::LongPackageNameToFilename(PackagePath, FPackageName::GetAssetPackageExtension());
+	FString PackageFilename;
+	if (!CortexBPAssetOpsPrivate::TryResolveBlueprintPackageFilename(PackagePath, PackageFilename))
+	{
+		Result.bSuccess = false;
+		Result.ErrorCode = CortexErrorCodes::SerializationError;
+		Result.ErrorMessage = FString::Printf(TEXT("Failed to resolve Blueprint package filename: %s"), *PackagePath);
+		return Result;
+	}
+
 	FSavePackageArgs SaveArgs;
 	SaveArgs.TopLevelFlags = RF_Standalone;
 	if (!UPackage::SavePackage(Package, NewBP, *PackageFilename, SaveArgs))
@@ -643,18 +1033,22 @@ FCortexCommandResult FCortexBPAssetOps::List(const TSharedPtr<FJsonObject>& Para
 	// Apply path filter if provided
 	if (!PathFilter.IsEmpty())
 	{
-		// Normalize path (ensure it starts with /Game/)
-		if (!PathFilter.StartsWith(TEXT("/")))
+		PathFilter = CortexBPAssetOpsPrivate::NormalizeBlueprintDirectoryPath(PathFilter);
+		FString ValidationError;
+		if (!CortexBPAssetOpsPrivate::ValidateReadableBlueprintPath(PathFilter, ValidationError))
 		{
-			PathFilter = TEXT("/Game/") + PathFilter;
-		}
-		else if (!PathFilter.StartsWith(TEXT("/Game/")))
-		{
-			PathFilter = TEXT("/Game") + PathFilter;
+			Result.bSuccess = false;
+			Result.ErrorCode = CortexErrorCodes::InvalidField;
+			Result.ErrorMessage = ValidationError;
+			return Result;
 		}
 
 		Filter.PackagePaths.Add(FName(*PathFilter));
 		Filter.bRecursivePaths = true;
+
+		TArray<FString> PathsToScan;
+		PathsToScan.Add(PathFilter);
+		AssetRegistry.ScanPathsSynchronous(PathsToScan, true);
 	}
 
 	AssetRegistry.GetAssets(Filter, BlueprintAssets);
@@ -725,6 +1119,10 @@ FCortexCommandResult FCortexBPAssetOps::GetInfo(const TSharedPtr<FJsonObject>& P
 		Result.ErrorMessage = TEXT("Missing or empty 'asset_path' field");
 		return Result;
 	}
+
+	// Parse compact flag (default true — omit empty arrays and source field)
+	bool bCompact = true;
+	Params->TryGetBoolField(TEXT("compact"), bCompact);
 
 	// Load Blueprint
 	FString LoadError;
@@ -823,11 +1221,109 @@ FCortexCommandResult FCortexBPAssetOps::GetInfo(const TSharedPtr<FJsonObject>& P
 			}
 		}
 
-		FuncObj->SetArrayField(TEXT("inputs"), InputsArr);
-		FuncObj->SetArrayField(TEXT("outputs"), OutputsArr);
+		if (!bCompact || InputsArr.Num() > 0)
+		{
+			FuncObj->SetArrayField(TEXT("inputs"), InputsArr);
+		}
+		if (!bCompact || OutputsArr.Num() > 0)
+		{
+			FuncObj->SetArrayField(TEXT("outputs"), OutputsArr);
+		}
+		if (!bCompact)
+		{
+			FuncObj->SetStringField(TEXT("source"), TEXT("blueprint"));
+		}
 
 		FunctionsArray.Add(MakeShared<FJsonValueObject>(FuncObj));
 	}
+
+	// Inherited functions — included by default for AI agent discoverability
+	bool bIncludeInherited = true;
+	Params->TryGetBoolField(TEXT("include_inherited"), bIncludeInherited);
+
+	if (bIncludeInherited && BP->ParentClass)
+	{
+		// Collect names of Blueprint-defined functions to avoid duplicates
+		TSet<FName> BlueprintFunctionNames;
+		for (UEdGraph* Graph : BP->FunctionGraphs)
+		{
+			if (Graph)
+			{
+				BlueprintFunctionNames.Add(Graph->GetFName());
+			}
+		}
+
+		for (TFieldIterator<UFunction> It(BP->ParentClass, EFieldIteratorFlags::IncludeSuper); It; ++It)
+		{
+			UFunction* Func = *It;
+			if (!Func->HasAnyFunctionFlags(FUNC_BlueprintCallable | FUNC_BlueprintEvent | FUNC_BlueprintPure))
+			{
+				continue;
+			}
+			// Skip static functions — they are library utilities, not instance methods
+			if (Func->HasAnyFunctionFlags(FUNC_Static))
+			{
+				continue;
+			}
+			// Skip functions defined on UObject base class (engine internals)
+			if (Func->GetOuterUClass() == UObject::StaticClass())
+			{
+				continue;
+			}
+			if (BlueprintFunctionNames.Contains(Func->GetFName()))
+			{
+				continue; // Blueprint override already included
+			}
+
+			TSharedPtr<FJsonObject> FuncObj = MakeShared<FJsonObject>();
+			FuncObj->SetStringField(TEXT("name"), Func->GetName());
+
+			TArray<TSharedPtr<FJsonValue>> InputsArr;
+			TArray<TSharedPtr<FJsonValue>> OutputsArr;
+
+			for (TFieldIterator<FProperty> ParamIt(Func); ParamIt && (ParamIt->PropertyFlags & CPF_Parm); ++ParamIt)
+			{
+				FProperty* Param = *ParamIt;
+				TSharedPtr<FJsonObject> P = MakeShared<FJsonObject>();
+				P->SetStringField(TEXT("name"), Param->GetName());
+				FString TypeStr;
+				FEdGraphPinType PinType;
+				if (UEdGraphSchema_K2::StaticClass()->GetDefaultObject<UEdGraphSchema_K2>()->ConvertPropertyToPinType(Param, PinType))
+				{
+					TypeStr = CortexBPTypeUtils::FriendlyTypeName(PinType);
+				}
+				else
+				{
+					TypeStr = Param->GetCPPType();
+				}
+				P->SetStringField(TEXT("type"), TypeStr);
+
+				if (Param->HasAnyPropertyFlags(CPF_ReturnParm | CPF_OutParm))
+				{
+					OutputsArr.Add(MakeShared<FJsonValueObject>(P));
+				}
+				else
+				{
+					InputsArr.Add(MakeShared<FJsonValueObject>(P));
+				}
+			}
+
+			if (!bCompact || InputsArr.Num() > 0)
+			{
+				FuncObj->SetArrayField(TEXT("inputs"), InputsArr);
+			}
+			if (!bCompact || OutputsArr.Num() > 0)
+			{
+				FuncObj->SetArrayField(TEXT("outputs"), OutputsArr);
+			}
+			if (!bCompact)
+			{
+				FuncObj->SetStringField(TEXT("source"), TEXT("inherited"));
+			}
+			FunctionsArray.Add(MakeShared<FJsonValueObject>(FuncObj));
+		}
+	}
+
 	InfoObj->SetArrayField(TEXT("functions"), FunctionsArray);
 
 	// Graphs (all graphs with node counts)
@@ -867,6 +1363,12 @@ FCortexCommandResult FCortexBPAssetOps::Delete(const TSharedPtr<FJsonObject>& Pa
 
 	bool bForce = false;
 	Params->TryGetBoolField(TEXT("force"), bForce);
+
+	FString ValidationError;
+	if (!ValidateWritableBlueprintAssetPath(AssetPath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
+	}
 
 	// Load blueprint
 	FString LoadError;
@@ -1010,14 +1512,19 @@ FCortexCommandResult FCortexBPAssetOps::Duplicate(const TSharedPtr<FJsonObject>&
 		NewPath = FPackageName::GetLongPackagePath(SourceBP->GetOutermost()->GetName());
 	}
 
-	while (NewPath.EndsWith(TEXT("/"))) { NewPath.LeftChopInline(1); }
-	FString NewPackagePath = FString::Printf(TEXT("%s/%s"), *NewPath, *NewName);
+	NewPath = CortexBPAssetOpsPrivate::NormalizeBlueprintDirectoryPath(NewPath);
+	const FString NewPackagePath = FString::Printf(TEXT("%s/%s"), *NewPath, *NewName);
+
+	FString ValidationError;
+	if (!CortexBPAssetOpsPrivate::ValidateWritableBlueprintPath(NewPackagePath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
+	}
 
 	// Check if destination already exists
-	UPackage* ExistingPackage = FindPackage(nullptr, *NewPackagePath);
-	if (ExistingPackage != nullptr)
+	if (CortexBPAssetOpsPrivate::DoesBlueprintPackageExist(NewPackagePath))
 	{
-		UObject* ExistingAsset = StaticFindObject(UBlueprint::StaticClass(), ExistingPackage, *NewName);
+		UObject* ExistingAsset = LoadObject<UBlueprint>(nullptr, *NewPackagePath);
 		if (ExistingAsset != nullptr)
 		{
 			return FCortexCommandRouter::Error(
@@ -1062,6 +1569,21 @@ FCortexCommandResult FCortexBPAssetOps::Duplicate(const TSharedPtr<FJsonObject>&
 
 FCortexCommandResult FCortexBPAssetOps::Compile(const TSharedPtr<FJsonObject>& Params)
 {
+	if (Params.IsValid() && Params->HasField(TEXT("items")))
+	{
+		FCortexBatchMutationRequest Request;
+		FCortexCommandResult ParseError;
+		if (!FCortexBatchMutation::ParseRequest(Params, TEXT("asset_path"), Request, ParseError))
+		{
+			return ParseError;
+		}
+
+		return MakeBlueprintAssetBatchCommandResult(FCortexBatchMutation::Run(
+			Request,
+			PreflightBatchCompileBlueprint,
+			CommitBatchCompileBlueprint));
+	}
+
 	FString AssetPath;
 	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("asset_path"), AssetPath))
 	{
@@ -1069,6 +1591,12 @@ FCortexCommandResult FCortexBPAssetOps::Compile(const TSharedPtr<FJsonObject>& P
 			CortexErrorCodes::InvalidField,
 			TEXT("Missing required param: asset_path")
 		);
+	}
+
+	FString ValidationError;
+	if (!CortexBPAssetOpsPrivate::ValidateWritableCompileTargetPath(AssetPath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
 	}
 
 	// Load blueprint
@@ -1085,7 +1613,10 @@ FCortexCommandResult FCortexBPAssetOps::Compile(const TSharedPtr<FJsonObject>& P
 	FCompilerResultsLog CompilerResults;
 	CompilerResults.bSilentMode = true;
 	CompilerResults.bAnnotateMentionedNodes = true;
-	FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &CompilerResults);
+	const EBlueprintCompileOptions CompileOptions = Blueprint->IsA<ULevelScriptBlueprint>()
+		? EBlueprintCompileOptions::SkipGarbageCollection
+		: EBlueprintCompileOptions::None;
+	FKismetEditorUtilities::CompileBlueprint(Blueprint, CompileOptions, &CompilerResults);
 
 	const int32 ErrorCount = CompilerResults.NumErrors;
 	const int32 WarningCount = CompilerResults.NumWarnings;
@@ -1107,9 +1638,9 @@ FCortexCommandResult FCortexBPAssetOps::Compile(const TSharedPtr<FJsonObject>& P
 	{
 		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 		Payload->SetStringField(TEXT("asset_path"), AssetPath);
-		Payload->SetStringField(
-			TEXT("compile_status"),
-			ErrorCount > 0 ? TEXT("error") : (WarningCount > 0 ? TEXT("warning") : TEXT("success")));
+		const FString StatusStr = ErrorCount > 0 ? TEXT("error") : (WarningCount > 0 ? TEXT("warning") : TEXT("success"));
+		Payload->SetStringField(TEXT("compile_status"), StatusStr);
+		Payload->SetStringField(TEXT("status"), StatusStr);
 		Payload->SetNumberField(TEXT("error_count"), ErrorCount);
 		Payload->SetNumberField(TEXT("warning_count"), WarningCount);
 		Payload->SetArrayField(TEXT("diagnostics"), DiagnosticsArray);
@@ -1131,6 +1662,21 @@ FCortexCommandResult FCortexBPAssetOps::Compile(const TSharedPtr<FJsonObject>& P
 
 FCortexCommandResult FCortexBPAssetOps::Save(const TSharedPtr<FJsonObject>& Params)
 {
+	if (Params.IsValid() && Params->HasField(TEXT("items")))
+	{
+		FCortexBatchMutationRequest Request;
+		FCortexCommandResult ParseError;
+		if (!FCortexBatchMutation::ParseRequest(Params, TEXT("asset_path"), Request, ParseError))
+		{
+			return ParseError;
+		}
+
+		return MakeBlueprintAssetBatchCommandResult(FCortexBatchMutation::Run(
+			Request,
+			PreflightBatchSaveBlueprint,
+			CommitBatchSaveBlueprint));
+	}
+
 	FString AssetPath;
 	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("asset_path"), AssetPath))
 	{
@@ -1152,6 +1698,12 @@ FCortexCommandResult FCortexBPAssetOps::Save(const TSharedPtr<FJsonObject>& Para
 		);
 	}
 
+	FString ValidationError;
+	if (!ValidateWritableBlueprintAssetPath(AssetPath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
+	}
+
 	// Load blueprint
 	FString LoadError;
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath, LoadError);
@@ -1164,8 +1716,14 @@ FCortexCommandResult FCortexBPAssetOps::Save(const TSharedPtr<FJsonObject>& Para
 	}
 
 	UPackage* Package = Blueprint->GetOutermost();
-	FString PackageFilename = FPackageName::LongPackageNameToFilename(
-		Package->GetName(), FPackageName::GetAssetPackageExtension());
+	FString PackageFilename;
+	if (!CortexBPAssetOpsPrivate::TryResolveBlueprintPackageFilename(Package->GetName(), PackageFilename))
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::SerializationError,
+			FString::Printf(TEXT("Failed to resolve Blueprint package filename: %s"), *Package->GetName())
+		);
+	}
 
 	FSavePackageArgs SaveArgs;
 	SaveArgs.TopLevelFlags = RF_Standalone;
@@ -1215,16 +1773,8 @@ FCortexCommandResult FCortexBPAssetOps::Rename(const TSharedPtr<FJsonObject>& Pa
 		);
 	}
 
-	// Normalize destination to object path form (/Game/Path/AssetName)
-	FString NormalizedDestPath = DestPath;
-	if (!NormalizedDestPath.StartsWith(TEXT("/")))
-	{
-		NormalizedDestPath = TEXT("/Game/") + NormalizedDestPath;
-	}
-	else if (!NormalizedDestPath.StartsWith(TEXT("/Game/")))
-	{
-		NormalizedDestPath = TEXT("/Game") + NormalizedDestPath;
-	}
+	// Normalize destination to object path form while preserving explicit mounted roots.
+	const FString NormalizedDestPath = CortexBPAssetOpsPrivate::NormalizeBlueprintContentPath(DestPath);
 
 	if (SourcePath == NormalizedDestPath)
 	{
@@ -1234,6 +1784,26 @@ FCortexCommandResult FCortexBPAssetOps::Rename(const TSharedPtr<FJsonObject>& Pa
 		);
 	}
 
+	FString ValidationError;
+	if (!ValidateWritableBlueprintAssetPath(SourcePath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
+	}
+
+	const FString SourcePackagePath = FPackageName::ObjectPathToPackageName(
+		CortexBPAssetOpsPrivate::NormalizeBlueprintContentPath(SourcePath));
+	const FString DestPackagePath = FPackageName::ObjectPathToPackageName(NormalizedDestPath);
+	if (!CortexBPAssetOpsPrivate::ValidateWritableBlueprintPath(DestPackagePath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
+	}
+
+	FString RedirectorPreflightError;
+	if (!CortexBPAssetOpsPrivate::ValidateRedirectorPackageSaveRequirements(SourcePackagePath, RedirectorPreflightError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, RedirectorPreflightError);
+	}
+
 	FString LoadError;
 	UBlueprint* SourceBlueprint = LoadBlueprint(SourcePath, LoadError);
 	if (!SourceBlueprint)
@@ -1241,7 +1811,6 @@ FCortexCommandResult FCortexBPAssetOps::Rename(const TSharedPtr<FJsonObject>& Pa
 		return FCortexCommandRouter::Error(CortexErrorCodes::BlueprintNotFound, LoadError);
 	}
 
-	const FString DestPackagePath = FPackageName::ObjectPathToPackageName(NormalizedDestPath);
 	const FString DestAssetName = FPackageName::GetShortName(DestPackagePath);
 	const FString DestFolderPath = FPackageName::GetLongPackagePath(DestPackagePath);
 
@@ -1253,7 +1822,13 @@ FCortexCommandResult FCortexBPAssetOps::Rename(const TSharedPtr<FJsonObject>& Pa
 		);
 	}
 
-	if (FindPackage(nullptr, *DestPackagePath) || FPackageName::DoesPackageExist(DestPackagePath))
+	// Allow rename when the destination package only contains an in-memory redirector
+	// (created by a prior rename in the same session). Block only on real assets.
+	UPackage* ExistingDestPkg = FindPackage(nullptr, *DestPackagePath);
+	const bool bDestHasRealAsset = ExistingDestPkg
+		? (FindObject<UObjectRedirector>(ExistingDestPkg, *DestAssetName) == nullptr)
+		: CortexBPAssetOpsPrivate::DoesBlueprintPackageExist(DestPackagePath);
+	if (bDestHasRealAsset)
 	{
 		return FCortexCommandRouter::Error(
 			CortexErrorCodes::BlueprintAlreadyExists,
@@ -1323,10 +1898,35 @@ FCortexCommandResult FCortexBPAssetOps::Rename(const TSharedPtr<FJsonObject>& Pa
 		);
 	}
 
+	// Keep registry state current for callers that immediately fix up the in-memory
+	// redirector created by RenameAssets.
+	AssetRegistry.Tick(0.0f);
+
+	FString RedirectorError;
+	if (!CortexBPAssetOpsPrivate::EnsureRedirectorPackage(SourcePackagePath, SourceBlueprint, RedirectorError))
+	{
+		TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+		Data->SetStringField(TEXT("old_path"), SourcePath);
+		Data->SetStringField(TEXT("new_path"), NormalizedDestPath);
+		Data->SetBoolField(TEXT("renamed"), true);
+		Data->SetBoolField(TEXT("redirector_created"), false);
+		Data->SetBoolField(TEXT("partial_success"), true);
+		Data->SetStringField(TEXT("redirector_error"), RedirectorError);
+
+		FCortexCommandResult PartialResult = FCortexCommandRouter::Success(Data);
+		PartialResult.Warnings.Add(FString::Printf(
+			TEXT("Blueprint was renamed to %s, but redirector creation failed: %s"),
+			*NormalizedDestPath,
+			*RedirectorError));
+		return PartialResult;
+	}
+
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetStringField(TEXT("old_path"), SourcePath);
 	Data->SetStringField(TEXT("new_path"), NormalizedDestPath);
+	Data->SetBoolField(TEXT("renamed"), true);
 	Data->SetBoolField(TEXT("redirector_created"), true);
+	Data->SetBoolField(TEXT("partial_success"), false);
 
 	return FCortexCommandRouter::Success(Data);
 }
@@ -1357,6 +1957,12 @@ FCortexCommandResult FCortexBPAssetOps::Reparent(const TSharedPtr<FJsonObject>& 
 			CortexErrorCodes::InvalidField,
 			TEXT("Missing required param: new_parent")
 		);
+	}
+
+	FString ValidationError;
+	if (!ValidateWritableBlueprintAssetPath(AssetPath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
 	}
 
 	// Load the Blueprint to reparent

@@ -32,6 +32,7 @@ public:
     friend class FCortexChatPanelFailureCleanupTest;
     friend class FCortexChatPanelCodeBlockTest;
     friend class FCortexChatPanelRejectedSendDoesNotAppendEntriesTest;
+    friend class FCortexChatPanelProviderAuthCommandTest;
     friend class FCortexDisplayRowGroupingTest;
 
 private:
@@ -50,6 +51,14 @@ private:
 
     void ScrollToBottom();
 
+public:
+    static bool IsAuthError(const FString& ErrorText);
+
+private:
+    void HandleLoginClicked();
+    void HandleRetryClicked();
+
+    FString LastUserPrompt;
     FSimpleDelegate OnNewChatTab;
 
     TSharedPtr<SCortexChatToolbar> ChatToolbar;

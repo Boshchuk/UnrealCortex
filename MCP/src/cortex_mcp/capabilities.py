@@ -23,6 +23,7 @@ CORE_DOMAINS = (
     "qa",
     "reflect",
     "editor",
+    "statetree",
 )
 
 _OPTIONAL_DOMAINS = ("gen",)
@@ -73,10 +74,18 @@ if _missing:
 
 
 _COMPOSITE_HINTS: dict[str, str] = {
+    "data": (
+        "For large raw DataTable, StringTable, or DataAsset reads, use "
+        "export_datatable_json, export_string_table_json, export_data_assets_json, "
+        "export_schema_json, export_bulk_json, or compare_data_json through data_cmd. "
+        "Schema snapshots and raw exports write JSON files and return compact summaries; "
+        "do not read exported files back into MCP responses.\n"
+    ),
     "material": "For creating a full material graph from scratch, use material_compose instead of chaining material_cmd calls.\n",
     "blueprint": "For creating or updating a full Blueprint, use blueprint_compose instead of chaining blueprint_cmd calls.\n",
     "umg": "For creating a complete Widget Blueprint screen, use widget_compose instead of chaining umg_cmd calls.\n",
     "level": "For batch actor operations, use level_compose instead of chaining level_cmd calls.\n",
+    "statetree": "For creating or updating a full StateTree structure, use statetree_compose instead of chaining statetree_cmd calls.\n",
     "gen": "AI asset generation. Submit with start_mesh/start_image/start_texturing, then poll with job_status until status is 'imported' or 'failed'. Generation takes 30-180 seconds. On download_failed or import_failed, call retry_import.\n",
 }
 

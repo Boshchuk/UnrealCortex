@@ -1,14 +1,74 @@
 #include "Operations/CortexGraphConnectionOps.h"
 #include "Operations/CortexGraphNodeOps.h"
+#include "CortexEditorUtils.h"
 #include "CortexGraphModule.h"
 #include "Engine/Blueprint.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
+#include "K2Node_Composite.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Dom/JsonObject.h"
+#include "Misc/PackageName.h"
 #include "ScopedTransaction.h"
+
+namespace
+{
+FString GetGraphConnectionWritableValidationPath(const FString& AssetPath)
+{
+	static const FString LevelBPPrefix = TEXT("__level_bp__:");
+	const FString BlueprintPath = AssetPath.StartsWith(LevelBPPrefix)
+		? AssetPath.Mid(LevelBPPrefix.Len())
+		: AssetPath;
+	const FString NormalizedPath = FCortexEditorUtils::NormalizeMountedContentPath(BlueprintPath);
+	return FPackageName::ObjectPathToPackageName(NormalizedPath);
+}
+
+bool ValidateWritableGraphConnectionBlueprintAssetPath(const FString& AssetPath, FCortexCommandResult& OutError)
+{
+	FString ValidationError;
+	if (!FCortexEditorUtils::IsWritableMountedContentPath(GetGraphConnectionWritableValidationPath(AssetPath), ValidationError))
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
+		return false;
+	}
+
+	return true;
+}
+
+bool ResolveMutableConnectionGraph(
+	UBlueprint* Blueprint,
+	const FString& GraphName,
+	UEdGraph*& OutGraph,
+	FCortexCommandResult& OutError)
+{
+	FCortexGraphEntry Entry;
+	if (!FCortexGraphNodeOps::FindGraphEntry(Blueprint, GraphName, Entry))
+	{
+		const FString TargetName = GraphName.IsEmpty() ? TEXT("EventGraph") : GraphName;
+		OutError = FCortexCommandRouter::Error(
+			CortexErrorCodes::GraphNotFound,
+			FString::Printf(TEXT("Graph not found: %s"), *TargetName)
+		);
+		return false;
+	}
+
+	if (!FCortexGraphNodeOps::IsMutableGraphKind(Entry.Kind))
+	{
+		OutError = FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidOperation,
+			FString::Printf(
+				TEXT("Graph kind is not mutable through graph_cmd: %s"),
+				*FCortexGraphNodeOps::GraphKindToString(Entry.Kind))
+		);
+		return false;
+	}
+
+	OutGraph = Entry.Graph;
+	return true;
+}
+}
 
 FCortexCommandResult FCortexGraphConnectionOps::Connect(const TSharedPtr<FJsonObject>& Params)
 {
@@ -19,17 +79,31 @@ FCortexCommandResult FCortexGraphConnectionOps::Connect(const TSharedPtr<FJsonOb
 	FString TargetPinName;
 
 	bool bHasParams = Params.IsValid()
-		&& Params->TryGetStringField(TEXT("asset_path"), AssetPath)
-		&& Params->TryGetStringField(TEXT("source_node"), SourceNodeId)
-		&& Params->TryGetStringField(TEXT("source_pin"), SourcePinName)
-		&& Params->TryGetStringField(TEXT("target_node"), TargetNodeId)
-		&& Params->TryGetStringField(TEXT("target_pin"), TargetPinName);
+		&& Params->TryGetStringField(TEXT("asset_path"), AssetPath);
+
+	if (bHasParams)
+	{
+		// Accept aliases: from_node/to_node, source_node_id/target_node_id
+		if (!Params->TryGetStringField(TEXT("source_node"), SourceNodeId))
+			if (!Params->TryGetStringField(TEXT("from_node"), SourceNodeId))
+				Params->TryGetStringField(TEXT("source_node_id"), SourceNodeId);
+		if (!Params->TryGetStringField(TEXT("source_pin"), SourcePinName))
+			Params->TryGetStringField(TEXT("from_pin"), SourcePinName);
+		if (!Params->TryGetStringField(TEXT("target_node"), TargetNodeId))
+			if (!Params->TryGetStringField(TEXT("to_node"), TargetNodeId))
+				Params->TryGetStringField(TEXT("target_node_id"), TargetNodeId);
+		if (!Params->TryGetStringField(TEXT("target_pin"), TargetPinName))
+			Params->TryGetStringField(TEXT("to_pin"), TargetPinName);
+
+		bHasParams = !SourceNodeId.IsEmpty() && !SourcePinName.IsEmpty()
+			&& !TargetNodeId.IsEmpty() && !TargetPinName.IsEmpty();
+	}
 
 	if (!bHasParams)
 	{
 		return FCortexCommandRouter::Error(
 			CortexErrorCodes::InvalidField,
-			TEXT("Missing required params: asset_path, source_node, source_pin, target_node, target_pin")
+			TEXT("Missing required params: asset_path, source_node (or from_node), source_pin (or from_pin), target_node (or to_node), target_pin (or to_pin)")
 		);
 	}
 
@@ -38,17 +112,33 @@ FCortexCommandResult FCortexGraphConnectionOps::Connect(const TSharedPtr<FJsonOb
 
 	// Load blueprint using helper
 	FCortexCommandResult LoadError;
+	if (!ValidateWritableGraphConnectionBlueprintAssetPath(AssetPath, LoadError))
+	{
+		return LoadError;
+	}
+
 	UBlueprint* Blueprint = FCortexGraphNodeOps::LoadBlueprint(AssetPath, LoadError);
 	if (Blueprint == nullptr)
 	{
 		return LoadError;
 	}
 
-	// Find graph using helper
-	UEdGraph* Graph = FCortexGraphNodeOps::FindGraph(Blueprint, GraphName, LoadError);
-	if (Graph == nullptr)
+	UEdGraph* Graph = nullptr;
+	if (!ResolveMutableConnectionGraph(Blueprint, GraphName, Graph, LoadError))
 	{
 		return LoadError;
+	}
+
+	// Resolve subgraph path if provided
+	FString SubgraphPath;
+	Params->TryGetStringField(TEXT("subgraph_path"), SubgraphPath);
+	if (!SubgraphPath.IsEmpty())
+	{
+		Graph = FCortexGraphNodeOps::ResolveSubgraph(Graph, SubgraphPath, LoadError);
+		if (Graph == nullptr)
+		{
+			return LoadError;
+		}
 	}
 
 	// Find source node and pin
@@ -150,6 +240,11 @@ FCortexCommandResult FCortexGraphConnectionOps::Disconnect(const TSharedPtr<FJso
 
 	// Load blueprint using helper
 	FCortexCommandResult LoadError;
+	if (!ValidateWritableGraphConnectionBlueprintAssetPath(AssetPath, LoadError))
+	{
+		return LoadError;
+	}
+
 	UBlueprint* Blueprint = FCortexGraphNodeOps::LoadBlueprint(AssetPath, LoadError);
 	if (Blueprint == nullptr)
 	{
@@ -157,10 +252,22 @@ FCortexCommandResult FCortexGraphConnectionOps::Disconnect(const TSharedPtr<FJso
 	}
 
 	// Find graph using helper
-	UEdGraph* Graph = FCortexGraphNodeOps::FindGraph(Blueprint, GraphName, LoadError);
-	if (Graph == nullptr)
+	UEdGraph* Graph = nullptr;
+	if (!ResolveMutableConnectionGraph(Blueprint, GraphName, Graph, LoadError))
 	{
 		return LoadError;
+	}
+
+	// Resolve subgraph path if provided
+	FString SubgraphPath;
+	Params->TryGetStringField(TEXT("subgraph_path"), SubgraphPath);
+	if (!SubgraphPath.IsEmpty())
+	{
+		Graph = FCortexGraphNodeOps::ResolveSubgraph(Graph, SubgraphPath, LoadError);
+		if (Graph == nullptr)
+		{
+			return LoadError;
+		}
 	}
 
 	// Find node and pin

@@ -158,7 +158,7 @@ bool FCortexDeferredResponseE2ETest::RunTest(const FString& Parameters)
 {
 	auto DeferredHandler = MakeShared<FTestDeferredHandler>();
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("test"), TEXT("Test"), TEXT("1.0.0"), DeferredHandler);
+	Router.RegisterDomain(TEXT("test"), TEXT("Test"), TEXT("1.0.1"), DeferredHandler);
 
 	FCortexTcpServer Server;
 	const bool bStarted = Server.Start(
@@ -338,7 +338,7 @@ bool FCortexDeferredTimeoutTest::RunTest(const FString& Parameters)
 
 	auto Handler = MakeShared<FTestDeferredHandler>();
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("test"), TEXT("Test"), TEXT("1.0.0"), Handler);
+	Router.RegisterDomain(TEXT("test"), TEXT("Test"), TEXT("1.0.1"), Handler);
 
 	FCortexTcpServer Server;
 	const bool bStarted = Server.Start(

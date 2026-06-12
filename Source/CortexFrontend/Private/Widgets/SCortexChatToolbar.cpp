@@ -1,6 +1,9 @@
 #include "Widgets/SCortexChatToolbar.h"
 
+#include "CortexFrontendProviderSettings.h"
 #include "CortexFrontendSettings.h"
+#include "Providers/CortexProviderRegistry.h"
+#include "UObject/UObjectGlobals.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Input/SButton.h"
@@ -12,18 +15,17 @@
 // Context calculation helpers (moved from SCortexContextBar)
 namespace
 {
-    constexpr int64 DefaultContextLimit = 200000;
-
-    int64 GetContextLimit()
-    {
-        // All Claude models currently have 200K context (constant for now)
-        return DefaultContextLimit;
-    }
-
     float CalculatePercentage(int64 Used, int64 Max)
     {
         if (Max <= 0) return 0.0f;
         return static_cast<float>(Used) / static_cast<float>(Max) * 100.0f;
+    }
+
+    FString FormatTokenCount(int64 Tokens)
+    {
+        return (Tokens < 1000)
+            ? FString::Printf(TEXT("%lld"), Tokens)
+            : FString::Printf(TEXT("%lldk"), Tokens / 1000);
     }
 
     FLinearColor GetContextColor(float Percentage)
@@ -68,6 +70,17 @@ void SCortexChatToolbar::Construct(const FArguments& InArgs)
             .Text(FText::FromString(TEXT("")))
             .Font(FCoreStyle::GetDefaultFontStyle("Regular", 8))
             .ColorAndOpacity(FSlateColor(FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("6a9955")))))
+        ]
+        // Provider mismatch hint
+        + SHorizontalBox::Slot()
+        .AutoWidth()
+        .VAlign(VAlign_Center)
+        .Padding(4.0f, 4.0f)
+        [
+            SAssignNew(ProviderMismatchLabel, STextBlock)
+            .Text(FText::GetEmpty())
+            .Font(FCoreStyle::GetDefaultFontStyle("Regular", 8))
+            .ColorAndOpacity(FSlateColor(FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("d7ba7d")))))
         ]
         // Context indicator (right side)
         + SHorizontalBox::Slot()
@@ -134,7 +147,15 @@ void SCortexChatToolbar::Construct(const FArguments& InArgs)
                 Self->OnSessionStateChanged(Change);
             }
         });
+
+        RefreshModelLabel();
+        RefreshProviderDecorations();
+        RefreshContextIndicator();
     }
+
+    ProviderSettingsChangedHandle = FCoreUObjectDelegates::OnObjectPropertyChanged.AddSP(
+        this,
+        &SCortexChatToolbar::HandleProviderSettingsChanged);
 }
 
 SCortexChatToolbar::~SCortexChatToolbar()
@@ -143,6 +164,11 @@ SCortexChatToolbar::~SCortexChatToolbar()
     {
         Session->OnTokenUsageUpdated.Remove(TokenUsageHandle);
         Session->OnStateChanged.Remove(StateChangedHandle);
+    }
+
+    if (ProviderSettingsChangedHandle.IsValid())
+    {
+        FCoreUObjectDelegates::OnObjectPropertyChanged.Remove(ProviderSettingsChangedHandle);
     }
 }
 
@@ -162,13 +188,80 @@ void SCortexChatToolbar::SetModelLabel(const FString& ModelId)
     }
 }
 
-void SCortexChatToolbar::OnTokenUsageUpdated()
+void SCortexChatToolbar::RefreshModelLabel()
 {
     TSharedPtr<FCortexCliSession> Session = SessionWeak.Pin();
-    if (!Session.IsValid()) return;
+    if (!Session.IsValid() || !ModelLabel.IsValid())
+    {
+        return;
+    }
+
+    const FCortexProviderDefinition& ProviderDefinition =
+        FCortexProviderRegistry::ResolveDefinition(Session->GetProviderId().ToString());
+    const FString Label = FCortexFrontendSettings::FormatModelLabel(
+        Session->GetResolvedOptions().ProviderDisplayName,
+        Session->GetModelId(),
+        Session->GetResolvedOptions().EffortLevel,
+        ProviderDefinition.DefaultEffortLevel);
+    ModelLabel->SetText(FText::FromString(Label));
+}
+
+FText SCortexChatToolbar::GetProviderMismatchText() const
+{
+    TSharedPtr<FCortexCliSession> Session = SessionWeak.Pin();
+    if (!Session.IsValid())
+    {
+        return FText::GetEmpty();
+    }
+
+    const UCortexFrontendProviderSettings* ProviderSettings = UCortexFrontendProviderSettings::Get();
+    const FString ActiveProviderId = ProviderSettings != nullptr
+        ? ProviderSettings->GetEffectiveProviderId()
+        : FCortexProviderRegistry::GetDefaultProviderId();
+    const FCortexProviderDefinition& ActiveProvider = FCortexProviderRegistry::ResolveDefinition(ActiveProviderId);
+
+    if (ActiveProvider.ProviderId == Session->GetProviderId())
+    {
+        return FText::GetEmpty();
+    }
+
+    return FText::FromString(FString::Printf(
+        TEXT("Current session: %s | New sessions: %s"),
+        *Session->GetResolvedOptions().ProviderDisplayName,
+        *ActiveProvider.DisplayName));
+}
+
+void SCortexChatToolbar::RefreshProviderDecorations()
+{
+    RefreshModelLabel();
+
+    if (ProviderMismatchLabel.IsValid())
+    {
+        const FText MismatchText = GetProviderMismatchText();
+        ProviderMismatchLabel->SetText(MismatchText);
+        ProviderMismatchLabel->SetVisibility(MismatchText.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible);
+    }
+}
+
+void SCortexChatToolbar::HandleProviderSettingsChanged(UObject* Object, FPropertyChangedEvent& Event)
+{
+    if (Object == GetMutableDefault<UCortexFrontendProviderSettings>() &&
+        Event.GetPropertyName() == GET_MEMBER_NAME_CHECKED(UCortexFrontendProviderSettings, ActiveProviderId))
+    {
+        RefreshProviderDecorations();
+    }
+}
+
+void SCortexChatToolbar::RefreshContextIndicator()
+{
+    TSharedPtr<FCortexCliSession> Session = SessionWeak.Pin();
+    if (!Session.IsValid())
+    {
+        return;
+    }
 
     const int64 Used = Session->GetConversationContextTokens();
-    const int64 Max = GetContextLimit();
+    const int64 Max = Session->GetContextLimitTokens();
     const float Percentage = CalculatePercentage(Used, Max);
 
     if (ContextColorBox.IsValid())
@@ -178,28 +271,14 @@ void SCortexChatToolbar::OnTokenUsageUpdated()
 
     if (ContextLabel.IsValid())
     {
-        const FString UsedStr = (Used < 1000)
-            ? FString::Printf(TEXT("%lld"), Used)
-            : FString::Printf(TEXT("%lldk"), Used / 1000);
-        const FString MaxStr = (Max < 1000)
-            ? FString::Printf(TEXT("%lld"), Max)
-            : FString::Printf(TEXT("%lldk"), Max / 1000);
-        const FString Label = UsedStr + TEXT(" / ") + MaxStr;
-        ContextLabel->SetText(FText::FromString(Label));
+        ContextLabel->SetText(FText::FromString(
+            FormatTokenCount(Used) + TEXT(" / ") + FormatTokenCount(Max)));
     }
+}
 
-    const ECortexSessionState CurrentState = Session->GetState();
-    const bool bIsDisconnected = CurrentState == ECortexSessionState::Inactive
-        || CurrentState == ECortexSessionState::Terminated;
-    if (ModelLabel.IsValid() && !bIsDisconnected)
-    {
-        const FString& Model = Session->GetModelId();
-        if (!Model.IsEmpty())
-        {
-            ModelLabel->SetText(FText::FromString(
-                FCortexFrontendSettings::GetModelLabelWithEffort(Model)));
-        }
-    }
+void SCortexChatToolbar::OnTokenUsageUpdated()
+{
+    RefreshContextIndicator();
 }
 
 void SCortexChatToolbar::OnSessionStateChanged(const FCortexSessionStateChange& Change)
@@ -207,9 +286,12 @@ void SCortexChatToolbar::OnSessionStateChanged(const FCortexSessionStateChange& 
     const bool bDisconnected = Change.NewState == ECortexSessionState::Inactive
         || Change.NewState == ECortexSessionState::Terminated;
 
-    // Hide model label when disconnected — it shows stale data from the previous session
     if (bDisconnected && ModelLabel.IsValid())
     {
+        // Hide model label when disconnected — it shows stale data from the previous session
         ModelLabel->SetText(FText::FromString(TEXT("")));
+        return;
     }
+
+    RefreshProviderDecorations();
 }

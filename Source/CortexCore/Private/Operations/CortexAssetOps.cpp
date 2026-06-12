@@ -1,13 +1,128 @@
 #include "Operations/CortexAssetOps.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "CortexAssetFingerprint.h"
+#include "CortexBatchMutation.h"
 #include "CortexCommandRouter.h"
 #include "CortexLogCapture.h"
 #include "Editor.h"
 #include "FileHelpers.h"
+#include "Engine/Blueprint.h"
 #include "Misc/PackageName.h"
 #include "PackageTools.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "UObject/SavePackage.h"
+
+namespace
+{
+// When a batch result has exactly one entry, copy its fields to the top-level
+// Data object for convenient single-asset access (e.g. data.saved instead of data.results[0].saved).
+void PromoteSingleResult(TSharedPtr<FJsonObject>& Data, const TArray<TSharedPtr<FJsonValue>>& ResultsArray)
+{
+	if (ResultsArray.Num() == 1)
+	{
+		const TSharedPtr<FJsonObject>& Entry = ResultsArray[0]->AsObject();
+		if (Entry.IsValid())
+		{
+			for (const auto& Pair : Entry->Values)
+			{
+				// Don't overwrite the batch-level fields
+				if (Pair.Key == TEXT("results") || Pair.Key == TEXT("count"))
+				{
+					continue;
+				}
+				Data->SetField(Pair.Key, Pair.Value);
+			}
+		}
+	}
+}
+
+TSharedPtr<FJsonObject> CopyJsonObject(const TSharedPtr<FJsonObject>& Source)
+{
+	TSharedPtr<FJsonObject> Copy = MakeShared<FJsonObject>();
+	if (!Source.IsValid())
+	{
+		return Copy;
+	}
+
+	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Source->Values)
+	{
+		Copy->SetField(Pair.Key, Pair.Value);
+	}
+
+	return Copy;
+}
+
+TArray<TSharedPtr<FJsonValue>> ToJsonStringArray(const TArray<FString>& Values)
+{
+	TArray<TSharedPtr<FJsonValue>> Out;
+	Out.Reserve(Values.Num());
+	for (const FString& Value : Values)
+	{
+		Out.Add(MakeShared<FJsonValueString>(Value));
+	}
+	return Out;
+}
+
+FCortexAssetFingerprint MakeAssetFingerprint(const FAssetData& AssetData, UObject* Asset, UPackage* Package)
+{
+	(void)AssetData;
+	return Asset != nullptr
+		? MakeObjectAssetFingerprint(Asset)
+		: MakePackageAssetFingerprint(Package);
+}
+
+TSharedPtr<FJsonObject> BuildBatchResponseData(const FCortexBatchMutationResult& BatchResult)
+{
+	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+	Data->SetStringField(TEXT("status"), BatchResult.Status);
+	Data->SetArrayField(TEXT("written_targets"), ToJsonStringArray(BatchResult.WrittenTargets));
+	Data->SetArrayField(TEXT("unwritten_targets"), ToJsonStringArray(BatchResult.UnwrittenTargets));
+
+	TArray<TSharedPtr<FJsonValue>> PerItem;
+	PerItem.Reserve(BatchResult.PerItem.Num());
+	for (const FCortexBatchMutationItemResult& ItemResult : BatchResult.PerItem)
+	{
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("target"), ItemResult.Target);
+		Entry->SetBoolField(TEXT("success"), ItemResult.Result.bSuccess);
+		if (ItemResult.Result.Data.IsValid())
+		{
+			Entry->SetObjectField(TEXT("data"), ItemResult.Result.Data);
+		}
+		if (!ItemResult.Result.ErrorCode.IsEmpty())
+		{
+			Entry->SetStringField(TEXT("error_code"), ItemResult.Result.ErrorCode);
+		}
+		if (!ItemResult.Result.ErrorMessage.IsEmpty())
+		{
+			Entry->SetStringField(TEXT("error_message"), ItemResult.Result.ErrorMessage);
+		}
+		if (ItemResult.Result.ErrorDetails.IsValid())
+		{
+			Entry->SetObjectField(TEXT("error_details"), ItemResult.Result.ErrorDetails);
+		}
+		if (ItemResult.Result.Warnings.Num() > 0)
+		{
+			Entry->SetArrayField(TEXT("warnings"), ToJsonStringArray(ItemResult.Result.Warnings));
+		}
+		PerItem.Add(MakeShared<FJsonValueObject>(Entry));
+	}
+
+	Data->SetArrayField(TEXT("per_item"), PerItem);
+	return Data;
+}
+
+FCortexCommandResult MakeBatchCommandResult(const FCortexBatchMutationResult& BatchResult)
+{
+	TSharedPtr<FJsonObject> Data = BuildBatchResponseData(BatchResult);
+	if (BatchResult.Status == TEXT("committed"))
+	{
+		return FCortexCommandRouter::Success(Data);
+	}
+
+	return FCortexCommandRouter::Error(BatchResult.ErrorCode, BatchResult.ErrorMessage, Data);
+}
+}
 
 UObject* FCortexAssetOps::LoadAssetWithFallbacks(const FAssetData& AssetData, const FString& AssetPath)
 {
@@ -183,6 +298,54 @@ FCortexCommandResult FCortexAssetOps::SaveAsset(const TSharedPtr<FJsonObject>& P
 		return FCortexCommandRouter::Error(CortexErrorCodes::EditorNotAvailable, TEXT("Editor not available"));
 	}
 
+	if (Params.IsValid() && Params->HasField(TEXT("items")))
+	{
+		FCortexBatchMutationRequest Request;
+		FCortexCommandResult ParseError;
+		if (!FCortexBatchMutation::ParseRequest(Params, TEXT("asset_path"), Request, ParseError))
+		{
+			return ParseError;
+		}
+
+		auto PreflightSaveAsset = [](const FCortexBatchMutationItem& Item) -> FCortexBatchPreflightResult
+		{
+			const FAssetData AssetData = FCortexAssetOps::ResolveLiteralAssetPath(Item.Target);
+			if (!AssetData.IsValid())
+			{
+				return FCortexBatchPreflightResult::Error(
+					CortexErrorCodes::AssetNotFound,
+					FString::Printf(TEXT("Asset not found: %s"), *Item.Target));
+			}
+
+			UObject* Asset = FCortexAssetOps::LoadAssetWithFallbacks(AssetData, Item.Target);
+			UPackage* Package = FindPackage(nullptr, *AssetData.PackageName.ToString());
+			if (Package == nullptr)
+			{
+				Package = LoadPackage(nullptr, *AssetData.PackageName.ToString(), LOAD_None);
+			}
+			if (Package == nullptr)
+			{
+				return FCortexBatchPreflightResult::Error(
+					CortexErrorCodes::AssetNotFound,
+					FString::Printf(TEXT("Failed to load package: %s"), *Item.Target));
+			}
+
+			return FCortexBatchPreflightResult::Success(MakeAssetFingerprint(AssetData, Asset, Package).ToJson());
+		};
+
+		auto CommitSaveAsset = [](const FCortexBatchMutationItem& Item) -> FCortexCommandResult
+		{
+			TSharedPtr<FJsonObject> ItemParams = CopyJsonObject(Item.Params);
+			ItemParams->SetStringField(TEXT("asset_path"), Item.Target);
+			return FCortexAssetOps::SaveAsset(ItemParams);
+		};
+
+		return MakeBatchCommandResult(FCortexBatchMutation::Run(
+			Request,
+			PreflightSaveAsset,
+			CommitSaveAsset));
+	}
+
 	bool bDryRun = false;
 	bool bForce = false;
 	if (Params.IsValid())
@@ -274,6 +437,7 @@ FCortexCommandResult FCortexAssetOps::SaveAsset(const TSharedPtr<FJsonObject>& P
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetArrayField(TEXT("results"), ResultsArray);
 	Data->SetNumberField(TEXT("count"), ResultsArray.Num());
+	PromoteSingleResult(Data, ResultsArray);
 	if (bDryRun)
 	{
 		Data->SetBoolField(TEXT("dry_run"), true);
@@ -434,6 +598,7 @@ FCortexCommandResult FCortexAssetOps::OpenAsset(const TSharedPtr<FJsonObject>& P
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetArrayField(TEXT("results"), ResultsArray);
 	Data->SetNumberField(TEXT("count"), ResultsArray.Num());
+	PromoteSingleResult(Data, ResultsArray);
 	if (bDryRun)
 	{
 		Data->SetBoolField(TEXT("dry_run"), true);
@@ -541,6 +706,7 @@ FCortexCommandResult FCortexAssetOps::CloseAsset(const TSharedPtr<FJsonObject>& 
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetArrayField(TEXT("results"), ResultsArray);
 	Data->SetNumberField(TEXT("count"), ResultsArray.Num());
+	PromoteSingleResult(Data, ResultsArray);
 	if (bDryRun)
 	{
 		Data->SetBoolField(TEXT("dry_run"), true);
@@ -705,6 +871,7 @@ FCortexCommandResult FCortexAssetOps::ReloadAsset(const TSharedPtr<FJsonObject>&
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetArrayField(TEXT("results"), ResultsArray);
 	Data->SetNumberField(TEXT("count"), ResultsArray.Num());
+	PromoteSingleResult(Data, ResultsArray);
 	if (bDryRun)
 	{
 		Data->SetBoolField(TEXT("dry_run"), true);

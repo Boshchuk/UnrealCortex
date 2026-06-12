@@ -3,6 +3,7 @@
 
 #include "CoreMinimal.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 
 /** Error codes matching the PRD specification */
 namespace CortexErrorCodes
@@ -15,6 +16,12 @@ namespace CortexErrorCodes
 	static const FString InvalidValue = TEXT("INVALID_VALUE");
 	static const FString InvalidStructType = TEXT("INVALID_STRUCT_TYPE");
 	static const FString InvalidTag = TEXT("INVALID_TAG");
+	static const FString InvalidFilePath = TEXT("INVALID_FILE_PATH");
+	static const FString FileNotFound = TEXT("FILE_NOT_FOUND");
+	static const FString MalformedJson = TEXT("MALFORMED_JSON");
+	static const FString InvalidQueueShape = TEXT("INVALID_QUEUE_SHAPE");
+	static const FString UnsupportedCommand = TEXT("UNSUPPORTED_COMMAND");
+	static const FString QueryBackMismatch = TEXT("QUERY_BACK_MISMATCH");
 	static const FString SerializationError = TEXT("SERIALIZATION_ERROR");
 	static const FString EditorNotReady = TEXT("EDITOR_NOT_READY");
 	static const FString UnknownCommand = TEXT("UNKNOWN_COMMAND");
@@ -22,7 +29,10 @@ namespace CortexErrorCodes
 	static const FString BatchLimitExceeded = TEXT("BATCH_LIMIT_EXCEEDED");
 	static const FString BatchRecursionBlocked = TEXT("BATCH_RECURSION_BLOCKED");
 	static const FString BatchRefResolutionFailed = TEXT("BATCH_REF_RESOLUTION_FAILED");
+	static const FString StalePrecondition = TEXT("STALE_PRECONDITION");
 	static const FString GraphNotFound = TEXT("GRAPH_NOT_FOUND");
+	static const FString SubgraphNotFound = TEXT("SUBGRAPH_NOT_FOUND");
+	static const FString SubgraphDepthExceeded = TEXT("SUBGRAPH_DEPTH_EXCEEDED");
 	static const FString NodeNotFound = TEXT("NODE_NOT_FOUND");
 	static const FString PinNotFound = TEXT("PIN_NOT_FOUND");
 	static const FString PinTypeMismatch = TEXT("PIN_TYPE_MISMATCH");
@@ -67,6 +77,9 @@ namespace CortexErrorCodes
 	static const FString NotDynamicInstance = TEXT("NOT_DYNAMIC_INSTANCE");
 	static const FString AlreadyDynamicInstance = TEXT("ALREADY_DYNAMIC_INSTANCE");
 	static const FString AmbiguousComponent = TEXT("AMBIGUOUS_COMPONENT");
+	// Blueprint SCS migration safety
+	static const FString PotentialDataLoss = TEXT("POTENTIAL_DATA_LOSS");
+	static const FString AmbiguousComponentReference = TEXT("AMBIGUOUS_COMPONENT_REFERENCE");
 	// Level errors
 	static const FString ActorNotFound = TEXT("ACTOR_NOT_FOUND");
 	static const FString AmbiguousActor = TEXT("AMBIGUOUS_ACTOR");
@@ -77,6 +90,10 @@ namespace CortexErrorCodes
 	static const FString PropertyNotEditable = TEXT("PROPERTY_NOT_EDITABLE");
 	static const FString TypeMismatch = TEXT("TYPE_MISMATCH");
 	static const FString SublevelNotFound = TEXT("SUBLEVEL_NOT_FOUND");
+	static const FString LevelInUse = TEXT("LEVEL_IN_USE");
+	static const FString UnsavedChanges = TEXT("UNSAVED_CHANGES");
+	static const FString EditorBusy = TEXT("EDITOR_BUSY");
+	static const FString SourceControlError = TEXT("SOURCE_CONTROL_ERROR");
 	static const FString DataLayerNotFound = TEXT("DATA_LAYER_NOT_FOUND");
 	static const FString SpawnFailed = TEXT("SPAWN_FAILED");
 	// Editor / PIE errors
@@ -108,6 +125,13 @@ namespace CortexErrorCodes
 	static const FString ReplayCancelled = TEXT("REPLAY_CANCELLED");
 	// Reflect errors
 	static const FString SymbolNotFound = TEXT("SYMBOL_NOT_FOUND");
+	// StateTree errors
+	static const FString StateTreeNotFound = TEXT("STATETREE_NOT_FOUND");
+	static const FString StateTreeAlreadyExists = TEXT("STATETREE_ALREADY_EXISTS");
+	static const FString StateTreeStateNotFound = TEXT("STATETREE_STATE_NOT_FOUND");
+	static const FString StateTreeTransitionNotFound = TEXT("STATETREE_TRANSITION_NOT_FOUND");
+	static const FString AmbiguousStatePath = TEXT("AMBIGUOUS_STATE_PATH");
+	static const FString StateTreeSchemaInvalid = TEXT("STATETREE_SCHEMA_INVALID");
 	// Gen errors
 	static const FString ProviderNotFound = TEXT("PROVIDER_NOT_FOUND");
 	static const FString CapabilityNotSupported = TEXT("CAPABILITY_NOT_SUPPORTED");
@@ -129,6 +153,157 @@ struct CORTEXCORE_API FCortexCommandResult
 	FString ErrorMessage;
 	TSharedPtr<FJsonObject> ErrorDetails;
 	TArray<FString> Warnings;
+
+	static constexpr int32 MaxContextArrayEntries = 20;
+
+	void AddContext(const FString& Key, const FString& Value)
+	{
+		if (!ErrorDetails.IsValid())
+		{
+			ErrorDetails = MakeShared<FJsonObject>();
+		}
+		ErrorDetails->SetStringField(Key, Value);
+	}
+
+	void AddContext(const FString& Key, const TArray<FString>& Values)
+	{
+		if (!ErrorDetails.IsValid())
+		{
+			ErrorDetails = MakeShared<FJsonObject>();
+		}
+
+		const int32 Count = FMath::Min(Values.Num(), MaxContextArrayEntries);
+		const FString TruncatedKey = Key + TEXT("_truncated");
+		const FString TotalKey = Key + TEXT("_total");
+
+		ErrorDetails->RemoveField(TruncatedKey);
+		ErrorDetails->RemoveField(TotalKey);
+
+		TArray<TSharedPtr<FJsonValue>> JsonValues;
+		JsonValues.Reserve(Count);
+
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			JsonValues.Add(MakeShared<FJsonValueString>(Values[Index]));
+		}
+
+		ErrorDetails->SetArrayField(Key, JsonValues);
+
+		if (Values.Num() > MaxContextArrayEntries)
+		{
+			ErrorDetails->SetBoolField(TruncatedKey, true);
+			ErrorDetails->SetNumberField(TotalKey, Values.Num());
+		}
+	}
+
+	void AddContext(const FString& Key, const TSharedPtr<FJsonObject>& Value)
+	{
+		if (!Value.IsValid())
+		{
+			return;
+		}
+
+		if (!ErrorDetails.IsValid())
+		{
+			ErrorDetails = MakeShared<FJsonObject>();
+		}
+
+		ErrorDetails->SetObjectField(Key, Value);
+	}
+
+	void AddContext(const FString& Key, double Value)
+	{
+		if (!ErrorDetails.IsValid())
+		{
+			ErrorDetails = MakeShared<FJsonObject>();
+		}
+
+		ErrorDetails->SetNumberField(Key, Value);
+	}
+
+	void AddContext(const FString& Key, int32 Value)
+	{
+		AddContext(Key, static_cast<double>(Value));
+	}
 };
 
 using FDeferredResponseCallback = TFunction<void(FCortexCommandResult)>;
+
+struct CORTEXCORE_API FCortexBatchMutationItem
+{
+	FString Target;
+	TSharedPtr<FJsonObject> Params;
+	TSharedPtr<FJsonObject> ExpectedFingerprint;
+};
+
+struct CORTEXCORE_API FCortexBatchMutationRequest
+{
+	TArray<FCortexBatchMutationItem> Items;
+};
+
+struct CORTEXCORE_API FCortexBatchPreflightResult
+{
+	bool bSuccess = true;
+	FString ErrorCode;
+	FString ErrorMessage;
+	TSharedPtr<FJsonObject> ErrorDetails;
+	TSharedPtr<FJsonObject> CurrentFingerprint;
+
+	static FCortexBatchPreflightResult Success()
+	{
+		return FCortexBatchPreflightResult{};
+	}
+
+	static FCortexBatchPreflightResult Success(const TSharedPtr<FJsonObject>& InCurrentFingerprint)
+	{
+		FCortexBatchPreflightResult Result;
+		Result.CurrentFingerprint = InCurrentFingerprint;
+		return Result;
+	}
+
+	static FCortexBatchPreflightResult Error(
+		const FString& InErrorCode,
+		const FString& InErrorMessage,
+		TSharedPtr<FJsonObject> InErrorDetails = nullptr)
+	{
+		FCortexBatchPreflightResult Result;
+		Result.bSuccess = false;
+		Result.ErrorCode = InErrorCode;
+		Result.ErrorMessage = InErrorMessage;
+		Result.ErrorDetails = MoveTemp(InErrorDetails);
+		return Result;
+	}
+
+	static FCortexBatchPreflightResult Stale(const TSharedPtr<FJsonObject>& CurrentFingerprint)
+	{
+		TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+		if (CurrentFingerprint.IsValid())
+		{
+			Details->SetObjectField(TEXT("current_fingerprint"), CurrentFingerprint);
+		}
+
+		FCortexBatchPreflightResult Result = Error(
+			CortexErrorCodes::StalePrecondition,
+			TEXT("Expected fingerprint does not match current asset fingerprint"),
+			Details);
+		Result.CurrentFingerprint = CurrentFingerprint;
+		return Result;
+	}
+};
+
+struct CORTEXCORE_API FCortexBatchMutationItemResult
+{
+	FString Target;
+	bool bOk = false;
+	FCortexCommandResult Result;
+};
+
+struct CORTEXCORE_API FCortexBatchMutationResult
+{
+	FString Status;
+	TArray<FCortexBatchMutationItemResult> PerItem;
+	TArray<FString> WrittenTargets;
+	TArray<FString> UnwrittenTargets;
+	FString ErrorCode;
+	FString ErrorMessage;
+};

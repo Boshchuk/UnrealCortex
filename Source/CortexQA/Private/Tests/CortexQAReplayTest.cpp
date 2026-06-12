@@ -29,7 +29,7 @@ bool FCortexQAReplaySequencerEmptyStepsTest::RunTest(const FString& Parameters)
 {
     // Replaying empty session should complete immediately with success
     FCortexCommandRouter Router;
-    Router.RegisterDomain(TEXT("qa"), TEXT("Cortex QA"), TEXT("1.0.0"),
+    Router.RegisterDomain(TEXT("qa"), TEXT("Cortex QA"), TEXT("1.0.1"),
         MakeShared<FCortexQACommandHandler>());
 
     TArray<FCortexQAStep> EmptySteps;
@@ -60,7 +60,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCortexQAReplayUnknownStepTypeTest::RunTest(const FString& Parameters)
 {
     FCortexCommandRouter Router;
-    Router.RegisterDomain(TEXT("qa"), TEXT("Cortex QA"), TEXT("1.0.0"),
+    Router.RegisterDomain(TEXT("qa"), TEXT("Cortex QA"), TEXT("1.0.1"),
         MakeShared<FCortexQACommandHandler>());
 
     FCortexQAStep BadStep;

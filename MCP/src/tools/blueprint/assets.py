@@ -80,11 +80,13 @@ def register_blueprint_asset_tools(mcp, connection: UEConnection):
             return f"Error: {e}"
 
     @mcp.tool()
-    def get_blueprint_info(asset_path: str) -> str:
+    def get_blueprint_info(asset_path: str, compact: bool = True) -> str:
         """Get detailed information about a Blueprint.
 
         Args:
             asset_path: Full path to the Blueprint (e.g., '/Game/Blueprints/BP_Character')
+            compact: Omit empty inputs/outputs arrays and source field on functions
+                (default: true). Set false for full verbose output.
 
         Returns:
             JSON with:
@@ -93,11 +95,11 @@ def register_blueprint_asset_tools(mcp, connection: UEConnection):
             - type: Blueprint type
             - parent_class: Parent class name
             - variables: Array of variables, each with name and type
-            - functions: Array of functions, each with name
+            - functions: Array of functions, each with name (and inputs/outputs when non-empty)
             - graphs: Array of all graphs
         """
         try:
-            params = {"asset_path": asset_path}
+            params = {"asset_path": asset_path, "compact": compact}
             response = connection.send_command("blueprint.get_info", params)
             return format_response(response.get("data", {}), "get_blueprint_info")
         except ConnectionError as e:
@@ -153,11 +155,13 @@ def register_blueprint_asset_tools(mcp, connection: UEConnection):
             return f"Error: {e}"
 
     @mcp.tool()
-    def compile_blueprint(asset_path: str) -> str:
+    def compile_blueprint(asset_path: str = "", items: list[dict] | None = None) -> str:
         """Compile a Blueprint.
 
         Args:
             asset_path: Full path to the Blueprint
+            items: Optional batch item list. Each item must include target and may
+                include expected_fingerprint.
 
         Returns:
             JSON with:
@@ -169,18 +173,27 @@ def register_blueprint_asset_tools(mcp, connection: UEConnection):
               (non-node compiler messages are counted but may not appear here)
         """
         try:
-            params = {"asset_path": asset_path}
+            if items is not None:
+                if len(items) == 0:
+                    return "Error: Missing or empty required parameter: items"
+                params = {"items": items}
+            else:
+                if not asset_path:
+                    return "Error: Missing required parameter: asset_path"
+                params = {"asset_path": asset_path}
             response = connection.send_command("blueprint.compile", params)
             return format_response(response.get("data", {}), "compile_blueprint")
         except ConnectionError as e:
             return f"Error: {e}"
 
     @mcp.tool()
-    def save_blueprint(asset_path: str) -> str:
+    def save_blueprint(asset_path: str = "", items: list[dict] | None = None) -> str:
         """Save a Blueprint asset to disk.
 
         Args:
             asset_path: Full path to the Blueprint
+            items: Optional batch item list. Each item must include target and may
+                include expected_fingerprint.
 
         Returns:
             JSON with:
@@ -188,7 +201,14 @@ def register_blueprint_asset_tools(mcp, connection: UEConnection):
             - asset_path: Path of saved Blueprint
         """
         try:
-            params = {"asset_path": asset_path}
+            if items is not None:
+                if len(items) == 0:
+                    return "Error: Missing or empty required parameter: items"
+                params = {"items": items}
+            else:
+                if not asset_path:
+                    return "Error: Missing required parameter: asset_path"
+                params = {"asset_path": asset_path}
             response = connection.send_command("blueprint.save", params)
             return format_response(response.get("data", {}), "save_blueprint")
         except ConnectionError as e:

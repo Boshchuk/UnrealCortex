@@ -9,6 +9,8 @@ public class CortexFrontend : ModuleRules
         PublicDependencyModuleNames.AddRange(new string[]
         {
             "Core",
+            "Engine",
+            "DeveloperSettings",
         });
 
         PrivateDependencyModuleNames.AddRange(new string[]
@@ -24,6 +26,7 @@ public class CortexFrontend : ModuleRules
             "Json",
             "JsonUtilities",
             "ToolMenus",
+            "Settings",
             "Projects",
             "CortexCore",
             "CortexGen",
@@ -34,6 +37,9 @@ public class CortexFrontend : ModuleRules
             "BlueprintGraph",
             "LiveCoding",
             "AssetRegistry",
+            "MessageLog",
+            "Kismet",
+            "ContentBrowser",
         });
     }
 }

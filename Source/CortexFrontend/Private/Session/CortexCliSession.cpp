@@ -3,6 +3,10 @@
 #include "Async/Async.h"
 #include "CortexFrontendModule.h"
 #include "CortexFrontendSettings.h"
+#include "CortexFrontendProviderSettings.h"
+#include "Providers/CortexClaudeCliProvider.h"
+#include "Providers/CortexCodexCliProvider.h"
+#include "Providers/CortexProviderRegistry.h"
 #include "Misc/Guid.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
@@ -13,12 +17,109 @@ namespace
 {
 	constexpr uint8 MaxRespawnAttempts = 2;
 	constexpr float GracePeriodSeconds = 2.0f;
+
+#if WITH_DEV_AUTOMATION_TESTS
+	TFunction<bool(FCortexCliSession&, ECortexAccessMode, bool)> GSpawnProcessOverrideForTests;
+#endif
+
+	const ICortexCliProvider& GetPinnedProvider(const FName& ProviderId)
+	{
+		static FCortexClaudeCliProvider ClaudeProvider;
+		static FCortexCodexCliProvider CodexProvider;
+
+		if (ProviderId == FName(TEXT("codex")))
+		{
+			return CodexProvider;
+		}
+
+		return ClaudeProvider;
+	}
+
+	FCortexResolvedLaunchOptions SnapshotLaunchOptions()
+	{
+		FCortexResolvedLaunchOptions LaunchOptions;
+		LaunchOptions.AccessMode = FCortexFrontendSettings::Get().GetAccessMode();
+		LaunchOptions.bSkipPermissions = FCortexFrontendSettings::Get().GetSkipPermissions();
+		LaunchOptions.WorkflowMode = FCortexFrontendSettings::Get().GetWorkflowMode();
+		LaunchOptions.bProjectContext = FCortexFrontendSettings::Get().GetProjectContext();
+		LaunchOptions.bAutoContext = FCortexFrontendSettings::Get().GetAutoContext();
+		LaunchOptions.CustomDirective = FCortexFrontendSettings::Get().GetCustomDirective();
+		return LaunchOptions;
+	}
+
+	FCortexResolvedSessionOptions SnapshotResolvedOptions(const FName& ProviderId, const FCortexSessionConfig& Config)
+	{
+		const FCortexProviderDefinition& ProviderDefinition = FCortexProviderRegistry::ResolveDefinition(ProviderId.ToString());
+		const FString EffectiveModelId = !Config.ModelId.IsEmpty() ? Config.ModelId : FCortexFrontendSettings::Get().GetSelectedModel();
+		const FCortexProviderModelDefinition& ModelDefinition = FCortexProviderRegistry::ValidateOrGetDefaultModel(
+			ProviderDefinition,
+			EffectiveModelId);
+
+		FCortexResolvedSessionOptions ResolvedOptions;
+		ResolvedOptions.ProviderId = ProviderDefinition.ProviderId;
+		ResolvedOptions.ProviderDisplayName = ProviderDefinition.DisplayName;
+		ResolvedOptions.ModelId = ModelDefinition.ModelId;
+		ResolvedOptions.EffortLevel = FCortexProviderRegistry::ValidateOrGetDefaultEffort(
+			ProviderDefinition,
+			ModelDefinition,
+			Config.EffortLevel);
+		ResolvedOptions.ContextLimitTokens = FCortexProviderRegistry::GetContextLimit(ProviderDefinition, ResolvedOptions.ModelId);
+		return ResolvedOptions;
+	}
 }
 
 FCortexCliSession::FCortexCliSession(const FCortexSessionConfig& InConfig)
 	: Config(InConfig)
 	, State(ECortexSessionState::Inactive)
 {
+	ResolvedLifetimePolicy = Config.LifetimePolicy;
+	if (ResolvedLifetimePolicy == ECortexSessionLifetimePolicy::Default)
+	{
+		ResolvedLifetimePolicy = Config.bConversionMode
+			? ECortexSessionLifetimePolicy::TurnBound
+			: ECortexSessionLifetimePolicy::Persistent;
+	}
+	Config.LifetimePolicy = ResolvedLifetimePolicy;
+
+	if (Config.ProviderId.IsNone())
+	{
+		const UCortexFrontendProviderSettings* ProviderSettings = UCortexFrontendProviderSettings::Get();
+		const FString ProviderIdString = ProviderSettings != nullptr
+			? ProviderSettings->GetEffectiveProviderId()
+			: FCortexProviderRegistry::GetDefaultProviderId();
+		Config.ProviderId = FName(*ProviderIdString);
+		if (!Config.bHasLaunchOptions)
+		{
+			Config.LaunchOptions = SnapshotLaunchOptions();
+		}
+		Config.ResolvedOptions = SnapshotResolvedOptions(Config.ProviderId, Config);
+	}
+	else
+	{
+		Config.ProviderId = FCortexProviderRegistry::ResolveDefinition(Config.ProviderId.ToString()).ProviderId;
+		if (Config.ResolvedOptions.ProviderId.IsNone())
+		{
+			Config.ResolvedOptions = SnapshotResolvedOptions(Config.ProviderId, Config);
+		}
+	}
+
+	if (Config.ResolvedOptions.ProviderId.IsNone())
+	{
+		Config.ResolvedOptions = SnapshotResolvedOptions(Config.ProviderId, Config);
+	}
+
+	if (!Config.bHasLaunchOptions)
+	{
+		Config.LaunchOptions = SnapshotLaunchOptions();
+		if (Config.bSkipPermissions)
+		{
+			Config.LaunchOptions.bSkipPermissions = true;
+		}
+	}
+
+	PinnedProvider = &GetPinnedProvider(Config.ProviderId);
+	ModelId = Config.ResolvedOptions.ModelId;
+	Provider = Config.ResolvedOptions.ProviderDisplayName;
 }
 
 FCortexCliSession::~FCortexCliSession() = default;
@@ -33,7 +134,7 @@ bool FCortexCliSession::Connect()
 		return false;
 	}
 
-	if (!SpawnProcess(FCortexFrontendSettings::Get().GetAccessMode(), false))
+	if (!SpawnProcess(Config.LaunchOptions.AccessMode, false))
 	{
 		UE_LOG(LogCortexFrontend, Warning, TEXT("Connect() failed: SpawnProcess returned false"));
 		TransitionState(ECortexSessionState::Spawning, ECortexSessionState::Inactive, TEXT("Failed to spawn on connect"));
@@ -56,14 +157,14 @@ bool FCortexCliSession::SendPrompt(const FCortexPromptRequest& Request)
 	ECortexSessionState CurrentState = State.load();
 	if (CurrentState == ECortexSessionState::Inactive)
 	{
-		if (!TransitionState(ECortexSessionState::Inactive, ECortexSessionState::Spawning, TEXT("Spawning persistent Claude CLI session")))
+		if (!TransitionState(ECortexSessionState::Inactive, ECortexSessionState::Spawning, TEXT("Spawning persistent provider session")))
 		{
 			UE_LOG(LogCortexFrontend, Warning, TEXT("SendPrompt: failed to transition Inactive -> Spawning (state race)"));
 			return false;
 		}
 		if (!SpawnProcess(Request.AccessMode, false))
 		{
-			TransitionState(ECortexSessionState::Spawning, ECortexSessionState::Inactive, TEXT("Failed to spawn Claude CLI"));
+			TransitionState(ECortexSessionState::Spawning, ECortexSessionState::Inactive, TEXT("Failed to spawn provider"));
 			return false;
 		}
 
@@ -84,23 +185,41 @@ bool FCortexCliSession::SendPrompt(const FCortexPromptRequest& Request)
 		return true;
 	}
 
+	if (CurrentState == ECortexSessionState::AwaitingTurnExit)
+	{
+		UE_LOG(LogCortexFrontend, Log, TEXT("Prompt queued while waiting for turn-bound provider exit"));
+		return true;
+	}
+
 	if (CurrentState != ECortexSessionState::Idle)
 	{
 		UE_LOG(LogCortexFrontend, Log, TEXT("SendPrompt rejected: session in state %d"), static_cast<int32>(CurrentState));
 		return false;
 	}
 
-	// Access mode changed since last spawn — reconnect to apply new --allowedTools
-	if (LastSpawnedAccessMode.IsSet() && LastSpawnedAccessMode.GetValue() != Request.AccessMode)
+	const bool bIsPerTurnExec =
+		PinnedProvider != nullptr &&
+		PinnedProvider->GetTransportMode() == ECortexCliTransportMode::PerTurnExec;
+
+	if (PinnedProvider != nullptr &&
+		bIsPerTurnExec &&
+		UsesTurnBoundLifetimePolicy() &&
+		(!ProcessHandle.IsValid() || !FPlatformProcess::IsProcRunning(ProcessHandle)))
 	{
-		UE_LOG(LogCortexFrontend, Log, TEXT("Access mode changed (%d -> %d), reconnecting to apply new permissions"),
-			static_cast<int32>(LastSpawnedAccessMode.GetValue()), static_cast<int32>(Request.AccessMode));
-		if (!Reconnect())
+		const bool bResumeProviderConversation = bHasProviderConversationId || bHasResumableProviderConversation;
+		UE_LOG(LogCortexFrontend, Log, TEXT("Per-turn exec provider idle without a running process, launching session (resume=%s)"),
+			bResumeProviderConversation ? TEXT("true") : TEXT("false"));
+		if (!TransitionState(ECortexSessionState::Idle, ECortexSessionState::Spawning, TEXT("Resuming per-turn exec conversation")))
 		{
-			UE_LOG(LogCortexFrontend, Warning, TEXT("SendPrompt: reconnect for mode change failed"));
+			UE_LOG(LogCortexFrontend, Warning, TEXT("SendPrompt: failed to transition Idle -> Spawning for per-turn exec resume"));
 			return false;
 		}
-		// After reconnect, state is Idle again — prompt is still pending, will be drained by worker
+		if (!SpawnProcess(Request.AccessMode, bResumeProviderConversation))
+		{
+			TransitionState(ECortexSessionState::Spawning, ECortexSessionState::Inactive, TEXT("Failed to resume provider"));
+			return false;
+		}
+
 		return true;
 	}
 
@@ -171,7 +290,15 @@ bool FCortexCliSession::Reconnect()
 	// Uses --resume to fork from existing conversation context.
 	// TODO: Verify empirically whether --resume alone re-applies --append-system-prompt
 	// and --setting-sources. If not, add --fork-session flag to BuildLaunchCommandLine.
-	const ECortexAccessMode AccessMode = FCortexFrontendSettings::Get().GetAccessMode();
+	if (PinnedProvider != nullptr && !PinnedProvider->SupportsResume())
+	{
+		UE_LOG(LogCortexFrontend, Warning, TEXT("Reconnect() failed: provider does not support resume"));
+		State.store(ECortexSessionState::Inactive);
+		BroadcastStateChange(ECortexSessionState::Respawning, ECortexSessionState::Inactive, TEXT("Provider does not support resume"));
+		return false;
+	}
+
+	const ECortexAccessMode AccessMode = Config.LaunchOptions.AccessMode;
 	if (!SpawnProcess(AccessMode, true))
 	{
 		UE_LOG(LogCortexFrontend, Warning, TEXT("Reconnect() failed: SpawnProcess returned false"));
@@ -192,6 +319,8 @@ void FCortexCliSession::NewChat()
 	CleanupProcess();
 	ClearConversation();
 	Config.SessionId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
+	bHasProviderConversationId = false;
+	bHasResumableProviderConversation = false;
 	ConsecutiveSpawnFailures = 0;
 	CurrentTurnIndex = 0;
 	ConversationContextTokens.store(0);
@@ -223,11 +352,24 @@ void FCortexCliSession::HandleWorkerEvent(const FCortexStreamEvent& Event)
 		OnTokenUsageUpdated.Broadcast();
 	}
 
-	// Extract model info from init event
-	if (Event.Type == ECortexStreamEventType::SessionInit && !Event.Model.IsEmpty())
+	// Extract model / session info from init event.
+	if (Event.Type == ECortexStreamEventType::SessionInit)
 	{
-		ModelId = Event.Model;
-		Provider = TEXT("Claude Code");
+		if (!Event.SessionId.IsEmpty())
+		{
+			Config.SessionId = Event.SessionId;
+			bHasProviderConversationId = true;
+		}
+
+		if (!Event.Model.IsEmpty())
+		{
+			ModelId = Event.Model;
+		}
+
+		if (Provider.IsEmpty())
+		{
+			Provider = Config.ResolvedOptions.ProviderDisplayName;
+		}
 	}
 
 	const ECortexSessionState CurrentState = State.load();
@@ -288,6 +430,19 @@ void FCortexCliSession::HandleWorkerEvent(const FCortexStreamEvent& Event)
 		Result.NumTurns = Event.NumTurns;
 		Result.TotalCostUsd = Event.TotalCostUsd;
 		Result.SessionId = Event.SessionId;
+		if (!Event.SessionId.IsEmpty())
+		{
+			Config.SessionId = Event.SessionId;
+			bHasProviderConversationId = true;
+		}
+
+		if (PinnedProvider != nullptr &&
+			PinnedProvider->GetTransportMode() == ECortexCliTransportMode::PerTurnExec &&
+			UsesTurnBoundLifetimePolicy() &&
+			bHasProviderConversationId)
+		{
+			bHasResumableProviderConversation = true;
+		}
 
 		ConsecutiveSpawnFailures = 0;
 
@@ -302,8 +457,18 @@ void FCortexCliSession::HandleWorkerEvent(const FCortexStreamEvent& Event)
 		}
 		else
 		{
-			const ECortexSessionState PreviousState = State.exchange(ECortexSessionState::Idle);
-			BroadcastStateChange(PreviousState, ECortexSessionState::Idle, TEXT("Turn complete"));
+			const bool bAwaitingTurnBoundExit =
+				PinnedProvider != nullptr &&
+				PinnedProvider->GetTransportMode() == ECortexCliTransportMode::PerTurnExec &&
+				UsesTurnBoundLifetimePolicy();
+			const ECortexSessionState CompletedState = bAwaitingTurnBoundExit
+				? ECortexSessionState::AwaitingTurnExit
+				: ECortexSessionState::Idle;
+			const TCHAR* CompletionReason = bAwaitingTurnBoundExit
+				? TEXT("Turn complete, awaiting provider exit")
+				: TEXT("Turn complete");
+			const ECortexSessionState PreviousState = State.exchange(CompletedState);
+			BroadcastStateChange(PreviousState, CompletedState, CompletionReason);
 			UE_LOG(LogCortexFrontend, Log, TEXT("Turn complete: %d turns, $%.4f"), Result.NumTurns, Result.TotalCostUsd);
 			OnTurnComplete.Broadcast(Result);
 		}
@@ -338,6 +503,8 @@ void FCortexCliSession::HandleProcessExited(const FString& Reason)
 		{
 			ConsecutiveSpawnFailures = 0;
 			Config.SessionId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
+			bHasProviderConversationId = false;
+			bHasResumableProviderConversation = false;
 			UE_LOG(LogCortexFrontend, Warning, TEXT("Max respawn attempts exceeded, starting fresh session %s"), *Config.SessionId);
 			State.store(ECortexSessionState::Inactive);
 			BroadcastStateChange(CurrentState, ECortexSessionState::Inactive, TEXT("Session could not be resumed. Started fresh."));
@@ -349,9 +516,9 @@ void FCortexCliSession::HandleProcessExited(const FString& Reason)
 
 		if (!CachedCliInfo.bIsValid)
 		{
-			UE_LOG(LogCortexFrontend, Log, TEXT("Cannot respawn: Claude CLI not found"));
+			UE_LOG(LogCortexFrontend, Log, TEXT("Cannot respawn: provider CLI not found"));
 			State.store(ECortexSessionState::Inactive);
-			BroadcastStateChange(ECortexSessionState::Respawning, ECortexSessionState::Inactive, TEXT("Claude CLI not found"));
+			BroadcastStateChange(ECortexSessionState::Respawning, ECortexSessionState::Inactive, TEXT("Provider CLI not found"));
 			return;
 		}
 
@@ -360,147 +527,84 @@ void FCortexCliSession::HandleProcessExited(const FString& Reason)
 		{
 			UE_LOG(LogCortexFrontend, Warning, TEXT("Respawn failed"));
 			State.store(ECortexSessionState::Inactive);
-			BroadcastStateChange(ECortexSessionState::Respawning, ECortexSessionState::Inactive, TEXT("Failed to respawn Claude CLI"));
+			BroadcastStateChange(ECortexSessionState::Respawning, ECortexSessionState::Inactive, TEXT("Failed to respawn provider"));
 			return;
 		}
 		return;
 	}
 
 	// Non-cancel process exit (unexpected crash)
+	bool bHasPendingPrompt = false;
+	{
+		FScopeLock Lock(&PromptMutex);
+		bHasPendingPrompt = PendingPrompt.IsSet();
+	}
+
+	const bool bKeepResumableConversation =
+		(CurrentState == ECortexSessionState::Idle || CurrentState == ECortexSessionState::AwaitingTurnExit) &&
+		PinnedProvider != nullptr &&
+		PinnedProvider->GetTransportMode() == ECortexCliTransportMode::PerTurnExec &&
+		UsesTurnBoundLifetimePolicy() &&
+		bHasResumableProviderConversation;
+	const bool bHadActivePrompt =
+		CurrentState == ECortexSessionState::Processing ||
+		CurrentState == ECortexSessionState::AwaitingTurnExit ||
+		bHasPendingPrompt;
+
 	CleanupProcess();
-	BroadcastStateChange(CurrentState, ECortexSessionState::Inactive, Reason);
+
+	if (bKeepResumableConversation)
+	{
+		if (bHasPendingPrompt)
+		{
+			const ECortexAccessMode PendingPromptAccessMode = GetPendingAccessMode();
+			State.store(ECortexSessionState::Spawning);
+			BroadcastStateChange(CurrentState, ECortexSessionState::Spawning, TEXT("Resuming per-turn exec conversation"));
+			if (!SpawnProcess(PendingPromptAccessMode, true))
+			{
+				{
+					FScopeLock Lock(&PromptMutex);
+					PendingPrompt.Reset();
+					PendingAccessMode.Reset();
+				}
+
+				State.store(ECortexSessionState::Inactive);
+				BroadcastStateChange(ECortexSessionState::Spawning, ECortexSessionState::Inactive, TEXT("Failed to resume provider"));
+
+				FCortexTurnResult Result;
+				Result.bIsError = true;
+				Result.ResultText = TEXT("Failed to resume provider before the queued follow-up prompt could be processed.");
+				Result.SessionId = Config.SessionId;
+				OnTurnComplete.Broadcast(Result);
+			}
+			return;
+		}
+
+		State.store(ECortexSessionState::Idle);
+		BroadcastStateChange(CurrentState, ECortexSessionState::Idle, Reason);
+		UE_LOG(LogCortexFrontend, Log, TEXT("Provider CLI exited after a resumable turn; preserving idle state"));
+		return;
+	}
+
 	State.store(ECortexSessionState::Inactive);
+	BroadcastStateChange(CurrentState, ECortexSessionState::Inactive, Reason);
+
+	if (bHadActivePrompt)
+	{
+		FCortexTurnResult Result;
+		Result.bIsError = true;
+		Result.ResultText = FString::Printf(TEXT("%s before the provider returned a result."), *Reason);
+		Result.SessionId = Config.SessionId;
+		OnTurnComplete.Broadcast(Result);
+	}
 }
 
 FString FCortexCliSession::BuildLaunchCommandLine(bool bResumeSession, ECortexAccessMode AccessMode) const
 {
-	FString CommandLine = TEXT("-p --input-format stream-json --output-format stream-json --verbose --include-partial-messages ");
-
-	if (Config.bSkipPermissions)
-	{
-		CommandLine += TEXT("--dangerously-skip-permissions ");
-	}
-
-	if (bResumeSession)
-	{
-		CommandLine += FString::Printf(TEXT("--resume \"%s\" "), *Config.SessionId);
-	}
-	else
-	{
-		CommandLine += FString::Printf(TEXT("--session-id \"%s\" "), *Config.SessionId);
-	}
-
-	const FString& SelectedModel = FCortexFrontendSettings::Get().GetSelectedModel();
-	if (!SelectedModel.IsEmpty() && SelectedModel != TEXT("Default"))
-	{
-		CommandLine += FString::Printf(TEXT("--model \"%s\" "), *SelectedModel);
-	}
-
-	// Conversion mode: minimal CLI footprint for pure LLM translation.
-	// - --strict-mcp-config: no external MCP servers (Notion, Gmail, etc. can hang 30s+)
-	// - --setting-sources "user,local": excludes "project" source, preventing CLAUDE.md
-	//   injection (project CLAUDE.md adds thousands of tokens to every conversion request)
-	// - --effort "low": disables extended thinking, which can fire automatically on large
-	//   blueprint JSON inputs and add 10-30k thinking tokens (~minutes of extra latency)
-	if (Config.bConversionMode)
-	{
-		CommandLine += TEXT("--strict-mcp-config ");
-		CommandLine += TEXT("--setting-sources \"user,local\" ");
-		CommandLine += TEXT("--effort \"low\" ");
-	}
-	else
-	{
-		// Effort flag (omitted when Default)
-		const ECortexEffortLevel Effort = FCortexFrontendSettings::Get().GetEffortLevel();
-		if (Effort != ECortexEffortLevel::Default)
-		{
-			CommandLine += FString::Printf(TEXT("--effort \"%s\" "),
-				*FCortexFrontendSettings::Get().GetEffortLevelString());
-		}
-
-		// Workflow: Direct mode disables slash commands
-		const ECortexWorkflowMode Workflow = FCortexFrontendSettings::Get().GetWorkflowMode();
-		if (Workflow == ECortexWorkflowMode::Direct)
-		{
-			CommandLine += TEXT("--disable-slash-commands ");
-		}
-
-		// Project context off: restrict setting sources
-		if (!FCortexFrontendSettings::Get().GetProjectContext())
-		{
-			CommandLine += TEXT("--setting-sources \"user,local\" ");
-		}
-
-		const FString AllowedTools = BuildAllowedToolsArg(AccessMode);
-		if (!AllowedTools.IsEmpty())
-		{
-			CommandLine += FString::Printf(TEXT("--allowedTools \"%s\" "), *AllowedTools);
-		}
-
-		if (!Config.McpConfigPath.IsEmpty())
-		{
-			CommandLine += FString::Printf(TEXT("--mcp-config \"%s\" "), *Config.McpConfigPath.Replace(TEXT("\\"), TEXT("/")));
-		}
-	}
-
-	// Config.SystemPrompt takes precedence (used by conversion tabs); otherwise build default.
-	FString SystemPrompt;
-	if (!Config.SystemPrompt.IsEmpty())
-	{
-		SystemPrompt = Config.SystemPrompt;
-	}
-	else
-	{
-		FString ModeString;
-		switch (AccessMode)
-		{
-		case ECortexAccessMode::ReadOnly:
-			ModeString = TEXT("Read-Only");
-			break;
-		case ECortexAccessMode::Guided:
-			ModeString = TEXT("Guided");
-			break;
-		case ECortexAccessMode::FullAccess:
-			ModeString = TEXT("Full Access");
-			break;
-		}
-
-		SystemPrompt = FString::Printf(
-			TEXT("You are running inside the Unreal Editor's Cortex AI Chat panel. "
-				 "You have access to Cortex MCP tools for querying and manipulating the editor. "
-				 "Current access mode: %s."), *ModeString);
-
-		const ECortexWorkflowMode Workflow = FCortexFrontendSettings::Get().GetWorkflowMode();
-		if (Workflow == ECortexWorkflowMode::Direct)
-		{
-			SystemPrompt += TEXT(" Workflow mode: Direct. Act immediately on requests using MCP tools. "
-				"Do not create planning documents, design docs, spec files, or brainstorming files. "
-				"Do not follow documentation-first workflows. Be concise. Prefer action over ceremony.");
-		}
-
-		const FString Directive = FCortexFrontendSettings::Get().GetCustomDirective();
-		if (!Directive.IsEmpty())
-		{
-			FString Sanitized = Directive;
-			Sanitized.ReplaceInline(TEXT("\n"), TEXT(" "));
-			Sanitized.ReplaceInline(TEXT("\r"), TEXT(" "));
-			Sanitized.ReplaceInline(TEXT("\t"), TEXT(" "));
-			Sanitized.ReplaceInline(TEXT("$("), TEXT(""));
-			Sanitized.ReplaceInline(TEXT("`"), TEXT(""));
-			Sanitized.ReplaceInline(TEXT("%"), TEXT(""));
-			Sanitized.ReplaceInline(TEXT("^"), TEXT(""));
-			Sanitized.ReplaceInline(TEXT("|"), TEXT(""));
-			Sanitized.ReplaceInline(TEXT("&"), TEXT(""));
-			Sanitized.ReplaceInline(TEXT(">"), TEXT(""));
-			Sanitized.ReplaceInline(TEXT("<"), TEXT(""));
-			SystemPrompt += TEXT(" ") + Sanitized;
-		}
-	}
-
-	CommandLine += FString::Printf(TEXT("--append-system-prompt \"%s\" "),
-		*SystemPrompt.Replace(TEXT("\""), TEXT("\\\"")));
-
-	return CommandLine;
+	const ICortexCliProvider* PinnedProviderToUse = PinnedProvider != nullptr ? PinnedProvider : &GetPinnedProvider(Config.ProviderId);
+	return PinnedProviderToUse != nullptr
+		? PinnedProviderToUse->BuildLaunchCommandLine(bResumeSession, AccessMode, Config)
+		: FString();
 }
 
 FString FCortexCliSession::BuildAllowedToolsArg(ECortexAccessMode AccessMode) const
@@ -532,25 +636,35 @@ FString FCortexCliSession::BuildAllowedToolsArg(ECortexAccessMode AccessMode) co
 	return FString();
 }
 
-FString FCortexCliSession::BuildPromptEnvelope(const FString& Prompt) const
+FString FCortexCliSession::BuildPromptEnvelope(const FString& Prompt, ECortexAccessMode AccessMode) const
 {
-	FString EscapedPrompt = Prompt;
-	EscapedPrompt.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
-	EscapedPrompt.ReplaceInline(TEXT("\""), TEXT("\\\""));
-	EscapedPrompt.ReplaceInline(TEXT("\n"), TEXT("\\n"));
-	EscapedPrompt.ReplaceInline(TEXT("\r"), TEXT("\\r"));
-	EscapedPrompt.ReplaceInline(TEXT("\t"), TEXT("\\t"));
-	return FString::Printf(TEXT("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"%s\"}}\n"), *EscapedPrompt);
+	const ICortexCliProvider* PinnedProviderToUse = PinnedProvider != nullptr ? PinnedProvider : &GetPinnedProvider(Config.ProviderId);
+	return PinnedProviderToUse != nullptr
+		? PinnedProviderToUse->BuildPromptEnvelope(Prompt, AccessMode, Config)
+		: FString();
 }
 
 bool FCortexCliSession::SpawnProcess(ECortexAccessMode AccessMode, bool bResumeSession)
 {
+#if WITH_DEV_AUTOMATION_TESTS
+	if (GSpawnProcessOverrideForTests)
+	{
+		return GSpawnProcessOverrideForTests(*this, AccessMode, bResumeSession);
+	}
+#endif
+
 	CleanupProcess();
 
-	CachedCliInfo = FCortexCliDiscovery::FindClaude();
+	if (bResumeSession && PinnedProvider != nullptr && !PinnedProvider->SupportsResume())
+	{
+		UE_LOG(LogCortexFrontend, Warning, TEXT("SpawnProcess: provider does not support resume"));
+		return false;
+	}
+
+	CachedCliInfo = PinnedProvider != nullptr ? PinnedProvider->FindCli() : FCortexCliDiscovery::FindClaude();
 	if (!CachedCliInfo.bIsValid)
 	{
-		UE_LOG(LogCortexFrontend, Error, TEXT("Claude CLI not found"));
+		UE_LOG(LogCortexFrontend, Error, TEXT("%s CLI not found"), PinnedProvider != nullptr ? *PinnedProvider->GetDefinition().ExecutableDisplayName : TEXT("Provider"));
 		return false;
 	}
 
@@ -572,9 +686,13 @@ bool FCortexCliSession::SpawnProcess(ECortexAccessMode AccessMode, bool bResumeS
 	const FString WorkingDirectory = !Config.WorkingDirectory.IsEmpty()
 		? Config.WorkingDirectory
 		: FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+	bHasResumableProviderConversation = false;
 	const FString CommandLine = BuildLaunchCommandLine(bResumeSession, AccessMode);
 
-	UE_LOG(LogCortexFrontend, Log, TEXT("Launching Claude CLI: %s %s"), *CachedCliInfo.Path, *CommandLine);
+	UE_LOG(LogCortexFrontend, Log, TEXT("Launching %s: %s %s"),
+		PinnedProvider != nullptr ? *PinnedProvider->GetDefinition().ExecutableDisplayName : TEXT("provider"),
+		*CachedCliInfo.Path,
+		*CommandLine);
 
 	ProcessHandle = FPlatformProcess::CreateProc(
 		*CachedCliInfo.Path,
@@ -590,7 +708,7 @@ bool FCortexCliSession::SpawnProcess(ECortexAccessMode AccessMode, bool bResumeS
 
 	if (!ProcessHandle.IsValid())
 	{
-		UE_LOG(LogCortexFrontend, Error, TEXT("Failed to create Claude CLI process"));
+		UE_LOG(LogCortexFrontend, Error, TEXT("Failed to create provider process"));
 		CleanupProcess();
 		return false;
 	}
@@ -600,9 +718,10 @@ bool FCortexCliSession::SpawnProcess(ECortexAccessMode AccessMode, bool bResumeS
 		PromptReadyEvent = FPlatformProcess::GetSynchEventFromPool(false);
 	}
 
-	// Pass handle copies to Worker — Worker uses its own copies, not Session's
+	// Pass handle copies and pinned provider to Worker — Worker uses its own copies, not Session's
 	Worker = MakeUnique<FCortexCliWorker>(
 		AsShared(),
+		PinnedProvider,
 		StdoutReadPipe,
 		StdinWritePipe,
 		ProcessHandle,
@@ -626,8 +745,8 @@ bool FCortexCliSession::SpawnProcess(ECortexAccessMode AccessMode, bool bResumeS
 		return false;
 	}
 	LastSpawnedAccessMode = AccessMode;
-	BroadcastStateChange(ExpectedState, ECortexSessionState::Idle, TEXT("Claude CLI session ready"));
-	UE_LOG(LogCortexFrontend, Log, TEXT("Claude CLI session ready (resume=%s)"), bResumeSession ? TEXT("true") : TEXT("false"));
+	BroadcastStateChange(ExpectedState, ECortexSessionState::Idle, TEXT("Provider session ready"));
+	UE_LOG(LogCortexFrontend, Log, TEXT("Provider session ready (resume=%s)"), bResumeSession ? TEXT("true") : TEXT("false"));
 
 	// Drain any prompt queued during Spawning. Uses TransitionState (CAS) so a concurrent
 	// Cancel() between here and the CAS is handled safely.
@@ -732,9 +851,33 @@ FString FCortexCliSession::ConsumePendingPromptEnvelope()
 		return FString();
 	}
 
-	const FString Envelope = BuildPromptEnvelope(PendingPrompt.GetValue());
+	const ECortexAccessMode AccessMode = PendingAccessMode.Get(Config.LaunchOptions.AccessMode);
+	const FString Envelope = BuildPromptEnvelope(PendingPrompt.GetValue(), AccessMode);
 	PendingPrompt.Reset();
+	PendingAccessMode.Reset();
 	return Envelope;
+}
+
+void FCortexCliSession::HandlePromptWriteCompleted()
+{
+	if (ShouldCloseStdinAfterPromptWrite())
+	{
+		UE_LOG(LogCortexFrontend, Log, TEXT("Prompt write completed; closing stdin for per-turn provider"));
+		CloseStdinPipe();
+	}
+}
+
+bool FCortexCliSession::ShouldCloseStdinAfterPromptWrite() const
+{
+	return PinnedProvider != nullptr &&
+		PinnedProvider->GetTransportMode() == ECortexCliTransportMode::PerTurnExec &&
+		UsesTurnBoundLifetimePolicy();
+}
+
+bool FCortexCliSession::UsesTurnBoundLifetimePolicy() const
+{
+	return ResolvedLifetimePolicy == ECortexSessionLifetimePolicy::TurnBound ||
+		(PinnedProvider != nullptr && PinnedProvider->GetTransportMode() == ECortexCliTransportMode::PerTurnExec);
 }
 
 ECortexAccessMode FCortexCliSession::GetPendingAccessMode() const
@@ -751,6 +894,26 @@ const TArray<TSharedPtr<FCortexChatEntry>>& FCortexCliSession::GetChatEntries() 
 FString FCortexCliSession::GetSessionId() const
 {
 	return Config.SessionId;
+}
+
+FString FCortexCliSession::GetAuthCommandText() const
+{
+	return PinnedProvider != nullptr ? PinnedProvider->BuildAuthCommand() : FString();
+}
+
+FName FCortexCliSession::GetProviderId() const
+{
+	return Config.ProviderId;
+}
+
+const FCortexResolvedSessionOptions& FCortexCliSession::GetResolvedOptions() const
+{
+	return Config.ResolvedOptions;
+}
+
+int64 FCortexCliSession::GetContextLimitTokens() const
+{
+	return Config.ResolvedOptions.ContextLimitTokens;
 }
 
 ECortexSessionState FCortexCliSession::GetState() const
@@ -903,6 +1066,34 @@ void FCortexCliSession::SetStateForTest(ECortexSessionState NewState)
 {
 	State.store(NewState);
 }
+
+#if WITH_DEV_AUTOMATION_TESTS
+void FCortexCliSession::SetSpawnProcessOverrideForTests(TFunction<bool(FCortexCliSession&, ECortexAccessMode, bool)> InOverride)
+{
+	GSpawnProcessOverrideForTests = MoveTemp(InOverride);
+}
+
+void FCortexCliSession::ClearSpawnProcessOverrideForTests()
+{
+	GSpawnProcessOverrideForTests.Reset();
+}
+
+void FCortexCliSession::CompleteSpawnForTests(ECortexAccessMode AccessMode)
+{
+	LastSpawnedAccessMode = AccessMode;
+	State.store(ECortexSessionState::Idle);
+
+	bool bHasPendingPrompt = false;
+	{
+		FScopeLock Lock(&PromptMutex);
+		bHasPendingPrompt = PendingPrompt.IsSet();
+	}
+	if (bHasPendingPrompt)
+	{
+		TransitionState(ECortexSessionState::Idle, ECortexSessionState::Processing, TEXT("Draining queued prompt (test spawn)"));
+	}
+}
+#endif
 
 FString FCortexCliSession::GetPendingPromptForTest() const
 {

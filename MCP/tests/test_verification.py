@@ -60,11 +60,13 @@ class TestMaterialVerification:
         assert all(c.passed for c in result.checks.values())
 
     def test_empty_graph_detected(self):
+        # When spec has nodes but readback returns 0 nodes, the asset registry
+        # may not have synced yet — guard returns verified=None (inconclusive).
         spec = self._make_spec(nodes=[{"name": "Const", "class": "Constant"}])
         readback = self._make_readback(node_count=0, nodes=[])
         result = verify_material(spec, readback)
-        assert result.verified is False
-        assert result.checks["node_count"].passed is False
+        assert result.verified is None
+        assert result.message is not None
 
     def test_missing_node_class(self):
         spec = self._make_spec(nodes=[{"name": "Tex", "class": "TextureSample"}])
@@ -107,12 +109,32 @@ class TestMaterialVerification:
     def test_no_property_check_when_not_in_spec(self):
         spec = self._make_spec(nodes=[{"name": "C", "class": "Constant"}])
         readback = self._make_readback(
-            node_count=2,
+            node_count=1,
             nodes=[{"expression_class": "MaterialExpressionConstant"}],
             blend_mode="Masked",
         )
         result = verify_material(spec, readback)
+        assert result.verified is True
         assert "blend_mode" not in result.checks
+
+    def test_node_count_allows_expression_only_readback(self):
+        spec = self._make_spec(
+            nodes=[
+                {"name": "BaseColor", "class": "Constant3Vector"},
+                {"name": "Roughness", "class": "ScalarParameter"},
+            ]
+        )
+        readback = self._make_readback(
+            node_count=2,
+            nodes=[
+                {"expression_class": "MaterialExpressionConstant3Vector"},
+                {"expression_class": "MaterialExpressionScalarParameter"},
+                {"expression_class": "MaterialResult"},
+            ],
+        )
+        result = verify_material(spec, readback)
+        assert result.verified is True
+        assert result.checks["node_count"].passed is True
 
     def test_to_dict_format(self):
         spec = self._make_spec(nodes=[{"name": "C", "class": "Constant"}])

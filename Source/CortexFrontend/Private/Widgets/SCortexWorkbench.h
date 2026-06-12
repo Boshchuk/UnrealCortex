@@ -24,6 +24,8 @@ public:
 	void SpawnNewChatTab();
 
 private:
+	bool CanSpawnNewChatTab() const;
+	FSimpleDelegate MakeNewChatTabDelegate();
 	void SwitchToMultiTabMode();
 	TSharedRef<SDockTab> SpawnChatTab(const FSpawnTabArgs& Args);
 	void CleanupChatTab(FName TabId);

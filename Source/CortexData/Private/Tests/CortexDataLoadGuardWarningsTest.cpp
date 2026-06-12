@@ -33,7 +33,7 @@ namespace
 		Router.RegisterDomain(
 			TEXT("data"),
 			TEXT("Cortex Data"),
-			TEXT("1.0.0"),
+			TEXT("1.0.1"),
 			MakeShared<FCortexDataCommandHandler>());
 		return Router;
 	}

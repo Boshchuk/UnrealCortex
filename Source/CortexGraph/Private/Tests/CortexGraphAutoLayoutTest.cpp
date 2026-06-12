@@ -16,7 +16,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCortexGraphAutoLayoutTest::RunTest(const FString& Parameters)
 {
 	// Create transient Blueprint with nodes
-	UPackage* TestPackage = NewObject<UPackage>(nullptr, TEXT("/Temp/CortexGraphAutoLayoutTest"), RF_Transient);
+	UPackage* TestPackage = CreatePackage(TEXT("/Game/Temp/CortexGraphAutoLayoutTest"));
 	TestPackage->SetPackageFlags(PKG_PlayInEditor);
 	UBlueprint* TestBP = FKismetEditorUtilities::CreateBlueprint(
 		AActor::StaticClass(), TestPackage, TEXT("BP_GraphAutoLayoutTest"),
@@ -27,7 +27,7 @@ bool FCortexGraphAutoLayoutTest::RunTest(const FString& Parameters)
 
 	FString AssetPath = TestBP->GetPathName();
 	FCortexCommandRouter Router;
-	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"),
 		MakeShared<FCortexGraphCommandHandler>());
 
 	// Add two PrintString nodes at (0,0)
@@ -61,7 +61,7 @@ bool FCortexGraphAutoLayoutTest::RunTest(const FString& Parameters)
 	}
 
 	// Test empty graph (only default event nodes)
-	UPackage* EmptyPkg = NewObject<UPackage>(nullptr, TEXT("/Temp/CortexGraphAutoLayoutEmptyTest"), RF_Transient);
+	UPackage* EmptyPkg = CreatePackage(TEXT("/Game/Temp/CortexGraphAutoLayoutEmptyTest"));
 	EmptyPkg->SetPackageFlags(PKG_PlayInEditor);
 	UBlueprint* EmptyBP = FKismetEditorUtilities::CreateBlueprint(
 		AActor::StaticClass(), EmptyPkg, TEXT("BP_GraphAutoLayoutEmpty"),

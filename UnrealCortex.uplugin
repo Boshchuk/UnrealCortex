@@ -1,7 +1,7 @@
 {
   "FileVersion": 3,
-  "Version": 2,
-  "VersionName": "0.1.5",
+  "Version": 5,
+  "VersionName": "0.1.12",
   "FriendlyName": "Unreal Cortex",
   "Description": "Modular MCP plugin for AI-powered Unreal Engine development",
   "Category": "Developer Tools",
@@ -23,6 +23,14 @@
       "Name": "StructUtils",
       "Enabled": true,
       "Optional": true
+    },
+    {
+      "Name": "StateTree",
+      "Enabled": true
+    },
+    {
+      "Name": "GameplayStateTree",
+      "Enabled": true
     }
   ],
   "Modules": [
@@ -73,6 +81,11 @@
     },
     {
       "Name": "CortexReflect",
+      "Type": "Editor",
+      "LoadingPhase": "PostEngineInit"
+    },
+    {
+      "Name": "CortexStateTree",
       "Type": "Editor",
       "LoadingPhase": "PostEngineInit"
     },
