@@ -1,5 +1,6 @@
 #include "Misc/AutomationTest.h"
 #include "CortexCoreModule.h"
+#include "CortexCommandRouter.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"

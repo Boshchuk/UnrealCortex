@@ -1,5 +1,6 @@
 #include "CortexEditorUtils.h"
 #include "CortexCoreModule.h"
+#include "CortexCommandRouter.h"
 
 void FCortexEditorUtils::NotifyAssetModified(UObject* Asset)
 {

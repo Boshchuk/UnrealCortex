@@ -1,10 +1,12 @@
 #include "Misc/AutomationTest.h"
+#include "Misc/Guid.h"
 #include "CortexCommandRouter.h"
 #include "CortexGraphCommandHandler.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Engine/Blueprint.h"
 #include "EdGraph/EdGraph.h"
+#include "K2Node_Composite.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "GameFramework/Actor.h"
 
@@ -162,5 +164,147 @@ bool FCortexGraphRemoveNodeTest::RunTest(const FString& Parameters)
     // Cleanup
     TestBP->MarkAsGarbage();
 
+    return true;
+}
+
+// ── Remove composite node cleans up BoundGraph ──────────────────────────
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexGraphRemoveCompositeNodeTest,
+    "Cortex.Graph.RemoveNode.CompositeCleanup",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexGraphRemoveCompositeNodeTest::RunTest(const FString& Parameters)
+{
+    UBlueprint* TestBP = FKismetEditorUtilities::CreateBlueprint(
+        AActor::StaticClass(),
+        GetTransientPackage(),
+        FName(*FString::Printf(TEXT("BP_CortexGraphTest_RemoveComposite_%s"), *FGuid::NewGuid().ToString())),
+        BPTYPE_Normal,
+        UBlueprint::StaticClass(),
+        UBlueprintGeneratedClass::StaticClass()
+    );
+    TestNotNull(TEXT("Test Blueprint should be created"), TestBP);
+    if (TestBP == nullptr)
+    {
+        return true;
+    }
+
+    FString AssetPath = TestBP->GetPathName();
+    UEdGraph* EventGraph = TestBP->UbergraphPages.Num() > 0 ? TestBP->UbergraphPages[0] : nullptr;
+    TestNotNull(TEXT("EventGraph should exist"), EventGraph);
+
+    // Create a composite node with a BoundGraph
+    UK2Node_Composite* CompositeNode = NewObject<UK2Node_Composite>(EventGraph);
+    CompositeNode->CreateNewGuid();
+    EventGraph->AddNode(CompositeNode, true, false);
+    CompositeNode->PostPlacedNewNode();
+    CompositeNode->AllocateDefaultPins();
+
+    FString CompositeNodeId = CompositeNode->GetName();
+    UEdGraph* BoundGraph = CompositeNode->BoundGraph;
+    TestNotNull(TEXT("Composite should have a BoundGraph"), BoundGraph);
+
+    // Verify the BoundGraph is in SubGraphs
+    bool bInSubGraphs = EventGraph->SubGraphs.Contains(BoundGraph);
+    TestTrue(TEXT("BoundGraph should be in SubGraphs"), bInSubGraphs);
+
+    int32 NodeCountBefore = EventGraph->Nodes.Num();
+    int32 SubGraphCountBefore = EventGraph->SubGraphs.Num();
+
+    // Remove the composite node via the command router
+    FCortexCommandRouter Router;
+    Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+        MakeShared<FCortexGraphCommandHandler>());
+
+    TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+    Params->SetStringField(TEXT("asset_path"), AssetPath);
+    Params->SetStringField(TEXT("node_id"), CompositeNodeId);
+
+    FCortexCommandResult Result = Router.Execute(TEXT("graph.remove_node"), Params);
+    TestTrue(TEXT("remove_node on composite should succeed"), Result.bSuccess);
+
+    // Verify the composite node was removed
+    TestEqual(TEXT("EventGraph should have one fewer node"), EventGraph->Nodes.Num(), NodeCountBefore - 1);
+
+    // Verify the BoundGraph was cleaned up from SubGraphs
+    TestEqual(TEXT("SubGraphs should have one fewer entry"), EventGraph->SubGraphs.Num(), SubGraphCountBefore - 1);
+    TestFalse(TEXT("BoundGraph should no longer be in SubGraphs"), EventGraph->SubGraphs.Contains(BoundGraph));
+
+    // Verify the BoundGraph is garbage
+    TestTrue(TEXT("BoundGraph should be marked as garbage"), !IsValid(BoundGraph));
+
+    TestBP->MarkAsGarbage();
+    return true;
+}
+
+// ── Remove nested composite cleans up recursively ───────────────────────
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexGraphRemoveNestedCompositeTest,
+    "Cortex.Graph.RemoveNode.NestedCompositeCleanup",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexGraphRemoveNestedCompositeTest::RunTest(const FString& Parameters)
+{
+    UBlueprint* TestBP = FKismetEditorUtilities::CreateBlueprint(
+        AActor::StaticClass(),
+        GetTransientPackage(),
+        FName(*FString::Printf(TEXT("BP_CortexGraphTest_RemoveNestedComposite_%s"), *FGuid::NewGuid().ToString())),
+        BPTYPE_Normal,
+        UBlueprint::StaticClass(),
+        UBlueprintGeneratedClass::StaticClass()
+    );
+    TestNotNull(TEXT("Test Blueprint should be created"), TestBP);
+    if (TestBP == nullptr)
+    {
+        return true;
+    }
+
+    FString AssetPath = TestBP->GetPathName();
+    UEdGraph* EventGraph = TestBP->UbergraphPages.Num() > 0 ? TestBP->UbergraphPages[0] : nullptr;
+    TestNotNull(TEXT("EventGraph should exist"), EventGraph);
+
+    // Create outer composite
+    UK2Node_Composite* OuterComposite = NewObject<UK2Node_Composite>(EventGraph);
+    OuterComposite->CreateNewGuid();
+    EventGraph->AddNode(OuterComposite, true, false);
+    OuterComposite->PostPlacedNewNode();
+    OuterComposite->AllocateDefaultPins();
+
+    UEdGraph* OuterBound = OuterComposite->BoundGraph;
+    TestNotNull(TEXT("Outer composite should have BoundGraph"), OuterBound);
+
+    // Create inner composite nested inside the outer one
+    UK2Node_Composite* InnerComposite = NewObject<UK2Node_Composite>(OuterBound);
+    InnerComposite->CreateNewGuid();
+    OuterBound->AddNode(InnerComposite, true, false);
+    InnerComposite->PostPlacedNewNode();
+    InnerComposite->AllocateDefaultPins();
+
+    UEdGraph* InnerBound = InnerComposite->BoundGraph;
+    TestNotNull(TEXT("Inner composite should have BoundGraph"), InnerBound);
+
+    FString OuterNodeId = OuterComposite->GetName();
+
+    // Remove the outer composite — should recursively clean up inner too
+    FCortexCommandRouter Router;
+    Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.0"),
+        MakeShared<FCortexGraphCommandHandler>());
+
+    TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+    Params->SetStringField(TEXT("asset_path"), AssetPath);
+    Params->SetStringField(TEXT("node_id"), OuterNodeId);
+
+    FCortexCommandResult Result = Router.Execute(TEXT("graph.remove_node"), Params);
+    TestTrue(TEXT("remove_node on outer composite should succeed"), Result.bSuccess);
+
+    // Both BoundGraphs should be garbage
+    TestTrue(TEXT("Outer BoundGraph should be garbage"), !IsValid(OuterBound));
+    TestTrue(TEXT("Inner BoundGraph should be garbage"), !IsValid(InnerBound));
+
+    TestBP->MarkAsGarbage();
     return true;
 }

@@ -5,6 +5,7 @@
 #include "DataLayer/DataLayerEditorSubsystem.h"
 #include "Dom/JsonValue.h"
 #include "Engine/LevelStreaming.h"
+#include "EngineUtils.h"
 #include "FileHelpers.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/GameModeBase.h"

@@ -276,6 +276,35 @@ void FCortexGraphNodeOps::CollectSubgraphsRecursive(
 	}
 }
 
+void FCortexGraphNodeOps::DestroyCompositeSubgraphs(UEdGraphNode* Node)
+{
+	UK2Node_Composite* CompositeNode = Cast<UK2Node_Composite>(Node);
+	if (!CompositeNode || !CompositeNode->BoundGraph)
+	{
+		return;
+	}
+
+	UEdGraph* InnerGraph = CompositeNode->BoundGraph;
+
+	// Recurse into any nested composites first
+	for (UEdGraphNode* InnerNode : InnerGraph->Nodes)
+	{
+		if (IsValid(InnerNode))
+		{
+			DestroyCompositeSubgraphs(InnerNode);
+		}
+	}
+
+	// BoundGraph is registered in the composite's parent graph SubGraphs list
+	// (GetOuter() returns the composite node, not the parent graph)
+	if (UEdGraph* ParentGraph = CompositeNode->GetGraph())
+	{
+		ParentGraph->SubGraphs.Remove(InnerGraph);
+	}
+	InnerGraph->MarkAsGarbage();
+	CompositeNode->BoundGraph = nullptr;
+}
+
 FCortexCommandResult FCortexGraphNodeOps::ListGraphs(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
@@ -1276,6 +1305,10 @@ FCortexCommandResult FCortexGraphNodeOps::RemoveNode(const TSharedPtr<FJsonObjec
 		FString::Printf(TEXT("Cortex:Remove node %s"), *NodeId)
 	));
 	Graph->Modify();
+
+	// If this is a composite node, recursively destroy inner BoundGraphs
+	// before removal to prevent orphaned UEdGraph subobjects
+	DestroyCompositeSubgraphs(FoundNode);
 
 	// Break all connections then remove the node
 	FoundNode->BreakAllNodeLinks();

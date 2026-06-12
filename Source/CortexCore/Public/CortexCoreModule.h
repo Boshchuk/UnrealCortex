@@ -3,14 +3,13 @@
 #include "Modules/ModuleInterface.h"
 #include "Modules/ModuleManager.h"
 #include "ICortexCommandRegistry.h"
+#include "CortexCommandRouter.h"
 #include "CortexTcpServer.h"
 #include "CortexConversionTypes.h"
 #include "CortexAnalysisTypes.h"
 #include "CortexCoreDelegates.h"
 
 CORTEXCORE_API DECLARE_LOG_CATEGORY_EXTERN(LogCortex, Log, All);
-
-class FCortexCommandRouter;
 
 class CORTEXCORE_API FCortexCoreModule : public IModuleInterface
 {

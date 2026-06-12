@@ -39,6 +39,8 @@ public:
 
 private:
 	static constexpr int32 MaxSubgraphDepth = 5;
+	/** Recursively destroy BoundGraph subobjects owned by composite nodes. */
+	static void DestroyCompositeSubgraphs(UEdGraphNode* Node);
 	/** Recursively collect composite subgraph entries for ListGraphs. */
 	static void CollectSubgraphsRecursive(
 		UEdGraph* Graph,
