@@ -14,6 +14,7 @@
 #include "IAssetTools.h"
 #include "Misc/PackageName.h"
 #include "Misc/TextBuffer.h"
+#include "Modules/ModuleManager.h"
 #include "ObjectTools.h"
 #include "ScopedTransaction.h"
 #include "StateTree.h"
@@ -62,6 +63,21 @@ UClass* ResolveSchemaClass(const FString& SchemaClassPath)
 		return nullptr;
 	}
 
+	const FString ObjectPath = FPackageName::ExportTextPathToObjectPath(SchemaClassPath);
+	const FString CanonicalPath = !ObjectPath.IsEmpty() ? ObjectPath : SchemaClassPath;
+	if (CanonicalPath.Contains(TEXT(".")))
+	{
+		const FString CandidatePackageName = FPackageName::ObjectPathToPackageName(CanonicalPath);
+		if (CandidatePackageName.StartsWith(TEXT("/Script/")))
+		{
+			const FString ModuleName = CandidatePackageName.RightChop(8);
+			if (ModuleName.IsEmpty() || !FModuleManager::Get().ModuleExists(*ModuleName))
+			{
+				return nullptr;
+			}
+		}
+	}
+
 	if (UClass* FoundClass = FindObject<UClass>(nullptr, *SchemaClassPath))
 	{
 		return FoundClass;
@@ -72,15 +88,25 @@ UClass* ResolveSchemaClass(const FString& SchemaClassPath)
 		return LooseMatch;
 	}
 
-	if (UClass* LoadedClass = StaticLoadClass(UStateTreeSchema::StaticClass(), nullptr, *SchemaClassPath))
-	{
-		return LoadedClass;
-	}
-
-	const FString ObjectPath = FPackageName::ExportTextPathToObjectPath(SchemaClassPath);
 	if (ObjectPath.IsEmpty() || !ObjectPath.Contains(TEXT(".")))
 	{
 		return nullptr;
+	}
+
+	const FString PackageName = FPackageName::ObjectPathToPackageName(ObjectPath);
+	const UPackage* ExistingPackage = FindPackage(nullptr, *PackageName);
+	const bool bPackageExists = ExistingPackage != nullptr
+		|| (!PackageName.IsEmpty()
+			&& FPackageName::IsValidLongPackageName(PackageName, true)
+			&& FPackageName::DoesPackageExist(PackageName));
+	if (!bPackageExists)
+	{
+		return nullptr;
+	}
+
+	if (UClass* LoadedClass = StaticLoadClass(UStateTreeSchema::StaticClass(), nullptr, *SchemaClassPath))
+	{
+		return LoadedClass;
 	}
 
 	if (UClass* FoundObjectPathClass = FindObject<UClass>(nullptr, *ObjectPath))
@@ -91,19 +117,6 @@ UClass* ResolveSchemaClass(const FString& SchemaClassPath)
 	if (UClass* LoadedObjectPathClass = StaticLoadClass(UStateTreeSchema::StaticClass(), nullptr, *ObjectPath))
 	{
 		return LoadedObjectPathClass;
-	}
-
-	const FString PackageName = FPackageName::ObjectPathToPackageName(ObjectPath);
-	if (PackageName.StartsWith(TEXT("/Script/")))
-	{
-		return LoadObject<UClass>(nullptr, *ObjectPath);
-	}
-
-	if (PackageName.IsEmpty()
-		|| !FPackageName::IsValidLongPackageName(PackageName, true)
-		|| (!FindPackage(nullptr, *PackageName) && !FPackageName::DoesPackageExist(PackageName)))
-	{
-		return nullptr;
 	}
 
 	return LoadObject<UClass>(nullptr, *ObjectPath);
