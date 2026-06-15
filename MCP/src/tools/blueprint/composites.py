@@ -327,6 +327,35 @@ def _build_batch_commands(
     return commands
 
 
+def _extract_single_asset_fingerprint(response: dict[str, Any], asset_path: str) -> dict[str, Any]:
+    data = response.get("data", {})
+    fingerprints = data.get("fingerprints")
+    if not isinstance(fingerprints, list) or not fingerprints:
+        raise ValueError("core.asset_fingerprint did not return a fingerprint entry")
+
+    for entry in fingerprints:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("asset_path") == asset_path:
+            fingerprint = entry.get("fingerprint")
+            if isinstance(fingerprint, dict):
+                return fingerprint
+
+    raise ValueError(f"core.asset_fingerprint did not return a fingerprint for {asset_path}")
+
+
+def _preflight_update_fingerprint(
+    connection: UEConnection,
+    asset_path: str,
+    expected_fingerprint: dict[str, Any],
+) -> dict[str, Any]:
+    response = connection.send_command("core.asset_fingerprint", {"paths": [asset_path]})
+    current_fingerprint = _extract_single_asset_fingerprint(response, asset_path)
+    if current_fingerprint != expected_fingerprint:
+        raise ValueError("Expected fingerprint does not match current Blueprint fingerprint")
+    return current_fingerprint
+
+
 def register_blueprint_composite_tools(mcp, connection: UEConnection):
     """Register Blueprint composite MCP tools."""
 
@@ -346,6 +375,7 @@ def register_blueprint_composite_tools(mcp, connection: UEConnection):
         subgraph_path: str = "",
         graph_kind: str = "",
         owning_interface: str = "",
+        expected_fingerprint: dict | None = None,
     ) -> str:
         """Create a Blueprint with variables, functions, and graph logic in a single operation.
 
@@ -399,6 +429,9 @@ def register_blueprint_composite_tools(mcp, connection: UEConnection):
             mode: Operation mode. "create" (default) creates a new Blueprint.
                   "update" appends to an existing Blueprint (requires asset_path).
             asset_path: Required in update mode. Path to existing Blueprint asset.
+            expected_fingerprint: Optional stale-write guard for update mode. When
+                supplied, the composite checks the Blueprint fingerprint before
+                running the generated batch.
             subgraph_path: Dot-separated path into nested composite subgraphs.
                 When set, all graph operations target the resolved subgraph instead
                 of the top-level graph.
@@ -463,6 +496,14 @@ def register_blueprint_composite_tools(mcp, connection: UEConnection):
                           mode=mode, asset_path=asset_path)
         except ValueError as e:
             return json.dumps({"success": False, "error": f"Invalid spec: {e}"})
+
+        if mode == "update" and expected_fingerprint is not None:
+            try:
+                _preflight_update_fingerprint(connection, asset_path, expected_fingerprint)
+            except ValueError as e:
+                return json.dumps({"success": False, "error": str(e)})
+            except (RuntimeError, ConnectionError, TimeoutError, OSError) as e:
+                return json.dumps({"success": False, "error": f"Connection error: {e}"})
 
         # 2. Build batch commands
         commands = _build_batch_commands(

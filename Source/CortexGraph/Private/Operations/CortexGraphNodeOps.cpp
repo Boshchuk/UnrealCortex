@@ -1815,6 +1815,23 @@ FCortexCommandResult FCortexGraphNodeOps::SetPinValue(const TSharedPtr<FJsonObje
 			FString::Printf(TEXT("Cannot set value on connected pin: %s"), *PinName)
 		);
 	}
+
+	TSharedPtr<FJsonObject> FingerprintBefore = MakeObjectAssetFingerprint(
+		Blueprint,
+		GetTypeHash(static_cast<uint32>(Blueprint->Status))).ToJson();
+	if (Params->HasTypedField<EJson::Object>(TEXT("expected_fingerprint")))
+	{
+		const TSharedPtr<FJsonObject> ExpectedFingerprint = Params->GetObjectField(TEXT("expected_fingerprint"));
+		if (!FCortexBatchMutation::FingerprintsMatch(FingerprintBefore, ExpectedFingerprint))
+		{
+			TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+			Details->SetObjectField(TEXT("current_fingerprint"), FingerprintBefore);
+			return FCortexCommandRouter::Error(
+				CortexErrorCodes::StalePrecondition,
+				FString::Printf(TEXT("Expected fingerprint does not match current asset fingerprint for %s"), *AssetPath),
+				Details);
+		}
+	}
 	if (bHasText)
 	{
 		if (Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Text)
@@ -1822,23 +1839,6 @@ FCortexCommandResult FCortexGraphNodeOps::SetPinValue(const TSharedPtr<FJsonObje
 			return FCortexCommandRouter::Error(
 				CortexErrorCodes::TypeMismatch,
 				FString::Printf(TEXT("Structured text can only be applied to FText pins: %s"), *PinName));
-		}
-
-		TSharedPtr<FJsonObject> FingerprintBefore = MakeObjectAssetFingerprint(
-			Blueprint,
-			GetTypeHash(static_cast<uint32>(Blueprint->Status))).ToJson();
-		if (Params->HasTypedField<EJson::Object>(TEXT("expected_fingerprint")))
-		{
-			const TSharedPtr<FJsonObject> ExpectedFingerprint = Params->GetObjectField(TEXT("expected_fingerprint"));
-			if (!FCortexBatchMutation::FingerprintsMatch(FingerprintBefore, ExpectedFingerprint))
-			{
-				TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
-				Details->SetObjectField(TEXT("current_fingerprint"), FingerprintBefore);
-				return FCortexCommandRouter::Error(
-					CortexErrorCodes::StalePrecondition,
-					FString::Printf(TEXT("Expected fingerprint does not match current asset fingerprint for %s"), *AssetPath),
-					Details);
-			}
 		}
 
 		return ApplyTextPinValue(
@@ -1849,6 +1849,8 @@ FCortexCommandResult FCortexGraphNodeOps::SetPinValue(const TSharedPtr<FJsonObje
 			Params->GetObjectField(TEXT("text")),
 			AssetPath,
 			GraphName,
+			GraphKind,
+			OwningInterface,
 			SubgraphPath,
 			NodeId,
 			PinName,
@@ -1910,6 +1912,8 @@ TSharedPtr<FJsonObject> FCortexGraphNodeOps::BuildPinLocator(
 	UEdGraph* Graph,
 	UEdGraphNode* Node,
 	const FString& GraphName,
+	const FString& GraphKind,
+	const FString& OwningInterface,
 	const FString& SubgraphPath,
 	const FString& NodeId,
 	const FString& PinName)
@@ -1917,6 +1921,14 @@ TSharedPtr<FJsonObject> FCortexGraphNodeOps::BuildPinLocator(
 	TSharedPtr<FJsonObject> Locator = MakeShared<FJsonObject>();
 	Locator->SetStringField(TEXT("asset_path"), AssetPath);
 	Locator->SetStringField(TEXT("graph_name"), GraphName.IsEmpty() && Graph != nullptr ? Graph->GetName() : GraphName);
+	if (!GraphKind.IsEmpty())
+	{
+		Locator->SetStringField(TEXT("graph_kind"), GraphKind);
+	}
+	if (!OwningInterface.IsEmpty())
+	{
+		Locator->SetStringField(TEXT("owning_interface"), OwningInterface);
+	}
 	if (!SubgraphPath.IsEmpty())
 	{
 		Locator->SetStringField(TEXT("subgraph_path"), SubgraphPath);
@@ -1938,6 +1950,8 @@ FCortexCommandResult FCortexGraphNodeOps::ApplyTextPinValue(
 	const TSharedPtr<FJsonObject>& TextObject,
 	const FString& AssetPath,
 	const FString& GraphName,
+	const FString& GraphKind,
+	const FString& OwningInterface,
 	const FString& SubgraphPath,
 	const FString& NodeId,
 	const FString& PinName,
@@ -2019,8 +2033,8 @@ FCortexCommandResult FCortexGraphNodeOps::ApplyTextPinValue(
 	if (!ResolveMutableNodeGraphForSetPinValue(
 			ReloadedBlueprint,
 			EffectiveGraphName,
-			TEXT(""),
-			TEXT(""),
+			GraphKind,
+			OwningInterface,
 			true,
 			ReloadedGraph,
 			ReloadError))
@@ -2077,6 +2091,8 @@ FCortexCommandResult FCortexGraphNodeOps::ApplyTextPinValue(
 		ReloadedGraph,
 		ReloadedNode,
 		EffectiveGraphName,
+		GraphKind,
+		OwningInterface,
 		SubgraphPath,
 		NodeId,
 		PinName));

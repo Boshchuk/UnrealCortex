@@ -267,6 +267,14 @@ class TestFallbackDrift:
             + "\n\nFix: cd MCP && uv run python scripts/sync_fallback.py --from-fixture"
         )
 
+    def test_fallback_domains_subset_of_cache(self, cache_domains):
+        """Generated fallback should not contain domains absent from cache."""
+        extra = set(_FALLBACK_STRUCTURED) - set(cache_domains)
+        assert not extra, (
+            f"Fallback has domains not in cache: {extra}. "
+            f"Regenerate from current cache."
+        )
+
 def test_blueprint_set_class_defaults_exposes_batch_items():
     """The AI-facing fallback must advertise set_class_defaults batch mode."""
     capabilities = json.loads((FIXTURES_DIR / "capabilities_cache_full.json").read_text(encoding="utf-8"))
@@ -293,14 +301,6 @@ def test_graph_set_pin_value_capability_includes_typed_text():
     assert params["expected_fingerprint"]["type"] == "object"
     assert params["graph_kind"]["required"] is False
     assert params["owning_interface"]["required"] is False
-
-    def test_fallback_domains_subset_of_cache(self, cache_domains):
-        """Generated fallback should not contain domains absent from cache."""
-        extra = set(_FALLBACK_STRUCTURED) - set(cache_domains)
-        assert not extra, (
-            f"Fallback has domains not in cache: {extra}. "
-            f"Regenerate from current cache."
-        )
 
 
 class TestCompositeHints:

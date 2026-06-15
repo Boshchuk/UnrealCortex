@@ -89,6 +89,8 @@ private:
 		const TSharedPtr<FJsonObject>& TextObject,
 		const FString& AssetPath,
 		const FString& GraphName,
+		const FString& GraphKind,
+		const FString& OwningInterface,
 		const FString& SubgraphPath,
 		const FString& NodeId,
 		const FString& PinName,
@@ -99,6 +101,8 @@ private:
 		UEdGraph* Graph,
 		UEdGraphNode* Node,
 		const FString& GraphName,
+		const FString& GraphKind,
+		const FString& OwningInterface,
 		const FString& SubgraphPath,
 		const FString& NodeId,
 		const FString& PinName);

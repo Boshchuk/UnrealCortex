@@ -331,10 +331,12 @@ def register_graph_tools(mcp, connection: UEConnection):
                 "pin_name": pin_name,
                 "graph_name": graph_name,
             }
-            if value:
-                request["value"] = value
             if text:
+                if value:
+                    request["value"] = value
                 request["text"] = json.loads(text)
+            else:
+                request["value"] = value
             if graph_kind:
                 request["graph_kind"] = graph_kind
             if owning_interface:
