@@ -151,6 +151,18 @@ def _validate_spec(
                     f"Node '{node.get('name')}' pin_value '{key}' contains '$steps[' "
                     f"which conflicts with batch $ref syntax"
                 )
+        for key, value in (node.get("pin_text_values") or {}).items():
+            if _contains_ref_syntax(value):
+                raise ValueError(
+                    f"Node '{node.get('name')}' pin_text_value '{key}' contains '$steps[' "
+                    f"which conflicts with batch $ref syntax"
+                )
+        duplicate_text_pins = set((node.get("pin_values") or {}).keys()) & set((node.get("pin_text_values") or {}).keys())
+        if duplicate_text_pins:
+            raise ValueError(
+                f"Node '{node.get('name')}' sets both pin_values and pin_text_values for: "
+                f"{', '.join(sorted(duplicate_text_pins))}"
+            )
 
 
 def _build_batch_commands(
@@ -166,10 +178,14 @@ def _build_batch_commands(
     mode: str = "create",
     asset_path: str = "",
     subgraph_path: str = "",
+    graph_kind: str = "",
+    owning_interface: str = "",
 ) -> list[dict]:
     """Translate Blueprint spec into batch commands with $ref wiring."""
     path = path.rstrip("/")
     subgraph_path = subgraph_path.strip()
+    graph_kind = graph_kind.strip()
+    owning_interface = owning_interface.strip()
     commands: list[dict] = []
 
     if mode == "create":
@@ -255,6 +271,31 @@ def _build_batch_commands(
                 "params": pin_params,
             })
 
+    for i, node in enumerate(nodes):
+        node_name = (node.get("name") or "").strip() or f"Node_{i}"
+        pin_text_values = node.get("pin_text_values")
+        if not pin_text_values:
+            continue
+        step_index = node_name_to_step[node_name]
+        for pin_name, text in pin_text_values.items():
+            pin_params: dict[str, Any] = {
+                "asset_path": asset_path_ref,
+                "node_id": f"$steps[{step_index}].data.node_id",
+                "graph_name": graph_name,
+                "pin_name": pin_name,
+                "text": text,
+            }
+            if graph_kind:
+                pin_params["graph_kind"] = graph_kind
+            if owning_interface:
+                pin_params["owning_interface"] = owning_interface
+            if subgraph_path:
+                pin_params["subgraph_path"] = subgraph_path
+            commands.append({
+                "command": "graph.set_pin_value",
+                "params": pin_params,
+            })
+
     # Steps: connections
     for conn in connections:
         src_parts = conn["from"].split(".", 1)
@@ -303,6 +344,8 @@ def register_blueprint_composite_tools(mcp, connection: UEConnection):
         mode: str = "create",
         asset_path: str = "",
         subgraph_path: str = "",
+        graph_kind: str = "",
+        owning_interface: str = "",
     ) -> str:
         """Create a Blueprint with variables, functions, and graph logic in a single operation.
 
@@ -346,6 +389,10 @@ def register_blueprint_composite_tools(mcp, connection: UEConnection):
                     function_name: "KismetArrayLibrary.Array_ForEach"
                 - params: Optional dict of node-specific params (e.g., {"function_name": "KismetSystemLibrary.PrintString"})
                 - pin_values: Optional dict of pin default values (e.g., {"InString": "Hello!"})
+                - pin_text_values: Optional dict of FText pin descriptors.
+                  Use {"InText": {"type": "FText", "source_kind": "string_table",
+                  "value": "Pay", "string_table": {"table_id": "/Game/UI/ST_UI.ST_UI",
+                  "key": "Mail.Button.Pay"}}} for StringTable-backed text.
             connections: Array of connection specs using "NodeName.PinName" format:
                 - from: Source "NodeName.PinName" (e.g., "BeginPlay.then")
                 - to: Target "NodeName.PinName" (e.g., "PrintString.execute")
@@ -421,7 +468,8 @@ def register_blueprint_composite_tools(mcp, connection: UEConnection):
         commands = _build_batch_commands(
             name, path, type, variables, functions, nodes, connections,
             graph_name, parent_class, mode=mode, asset_path=asset_path,
-            subgraph_path=subgraph_path,
+            subgraph_path=subgraph_path, graph_kind=graph_kind,
+            owning_interface=owning_interface,
         )
         total_steps = len(commands)
 

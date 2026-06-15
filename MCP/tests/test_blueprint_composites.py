@@ -157,6 +157,19 @@ class TestValidation:
         with pytest.raises(ValueError, match=r"\$steps\["):
             _validate_spec("BP_Test", "/Game/", nodes=nodes, connections=[])
 
+    def test_pin_values_and_pin_text_values_same_pin_rejected(self):
+        nodes = [
+            {
+                "name": "PrintText",
+                "class": "CallFunction",
+                "params": {"function_name": "KismetSystemLibrary.PrintText"},
+                "pin_values": {"InText": "Pay"},
+                "pin_text_values": {"InText": {"type": "FText", "source_kind": "literal", "value": "Pay"}},
+            },
+        ]
+        with pytest.raises(ValueError, match="sets both pin_values and pin_text_values"):
+            _validate_spec("BP_Test", "/Game/", nodes=nodes, connections=[])
+
     def test_empty_nodes_and_connections_valid(self):
         """Variables-only BP with no nodes/connections should pass."""
         _validate_spec(
@@ -266,6 +279,33 @@ class TestBatchCommandGeneration:
         assert set_pin_cmds[0]["params"]["node_id"] == "$steps[1].data.node_id"
         pin_names = {c["params"]["pin_name"] for c in set_pin_cmds}
         assert pin_names == {"InString", "bPrintToScreen"}
+
+    def test_pin_text_values_emit_structured_text_command(self):
+        nodes = [
+            {
+                "name": "PrintText",
+                "class": "CallFunction",
+                "params": {"function_name": "KismetSystemLibrary.PrintText"},
+                "pin_text_values": {
+                    "InText": {
+                        "type": "FText",
+                        "source_kind": "string_table",
+                        "value": "Pay",
+                        "string_table": {
+                            "table_id": "/Game/UI/ST_UI.ST_UI",
+                            "key": "Mail.Button.Pay",
+                        },
+                    },
+                },
+            },
+        ]
+        commands = _build_batch_commands("BP_Test", "/Game/", "Actor", [], [], nodes, [], "EventGraph")
+
+        set_pin_cmds = [c for c in commands if c["command"] == "graph.set_pin_value"]
+        assert len(set_pin_cmds) == 1
+        assert set_pin_cmds[0]["params"]["pin_name"] == "InText"
+        assert "value" not in set_pin_cmds[0]["params"]
+        assert set_pin_cmds[0]["params"]["text"]["source_kind"] == "string_table"
 
     def test_command_order_create_vars_funcs_nodes_pins_connects(self):
         """Commands ordered: create, variables, functions, nodes, pin_values, connections."""
