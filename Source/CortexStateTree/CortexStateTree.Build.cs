@@ -26,5 +26,14 @@ public class CortexStateTree : ModuleRules
 			"StateTreeModule",
 			"StateTreeEditorModule",
 		});
+
+		// UE 5.4: FStateTreeCompilerLog has no ToTokenizedMessages(); messages are
+		// extracted through a MessageLog listing instead (see CortexSTCompat.h).
+		// StructUtils owns FInstancedStruct before its 5.5 move into CoreUObject.
+		if (Target.Version.MajorVersion == 5 && Target.Version.MinorVersion < 5)
+		{
+			PrivateDependencyModuleNames.Add("MessageLog");
+			PrivateDependencyModuleNames.Add("StructUtils");
+		}
 	}
 }
