@@ -26,7 +26,7 @@ CORE_DOMAINS = (
     "statetree",
 )
 
-_OPTIONAL_DOMAINS = ("gen",)
+_OPTIONAL_DOMAINS = ("gen", "anim")
 
 
 def get_registered_domains(capabilities: dict | None = None) -> tuple[str, ...]:
