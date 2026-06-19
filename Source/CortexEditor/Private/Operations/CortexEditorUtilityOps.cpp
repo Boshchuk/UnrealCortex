@@ -2,11 +2,42 @@
 #include "CortexEditorPIEState.h"
 #include "CortexEditorLogCapture.h"
 #include "CortexCommandRouter.h"
+#include "CortexDeferredExec.h"
 #include "Misc/App.h"
 #include "Editor.h"
 #include "Engine/World.h"
 #include "GameFramework/WorldSettings.h"
 #include "GameFramework/GameModeBase.h"
+#include "HAL/IConsoleManager.h"
+#include "IPythonScriptPlugin.h"
+
+namespace
+{
+	/** Write a console variable's typed value + type tag into a JSON object. */
+	void WriteCVarValue(IConsoleVariable* CVar, const TSharedPtr<FJsonObject>& Data)
+	{
+		Data->SetStringField(TEXT("value"), CVar->GetString());
+		if (CVar->IsVariableInt())
+		{
+			Data->SetNumberField(TEXT("int_value"), CVar->GetInt());
+			Data->SetStringField(TEXT("type"), TEXT("int"));
+		}
+		else if (CVar->IsVariableFloat())
+		{
+			Data->SetNumberField(TEXT("float_value"), CVar->GetFloat());
+			Data->SetStringField(TEXT("type"), TEXT("float"));
+		}
+		else if (CVar->IsVariableBool())
+		{
+			Data->SetBoolField(TEXT("bool_value"), CVar->GetBool());
+			Data->SetStringField(TEXT("type"), TEXT("bool"));
+		}
+		else
+		{
+			Data->SetStringField(TEXT("type"), TEXT("string"));
+		}
+	}
+}
 
 FCortexCommandResult FCortexEditorUtilityOps::GetEditorState(const FCortexEditorPIEState& PIEState)
 {
@@ -172,4 +203,187 @@ FCortexCommandResult FCortexEditorUtilityOps::GetWorldInfo(const FCortexEditorPI
 	}
 
 	return FCortexCommandRouter::Success(Data);
+}
+
+FCortexCommandResult FCortexEditorUtilityOps::GetCVar(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Name;
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("name"), Name) || Name.IsEmpty())
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidField,
+			TEXT("Missing required param: name"));
+	}
+
+	IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(*Name);
+	if (CVar == nullptr)
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::SymbolNotFound,
+			FString::Printf(TEXT("Console variable not found: %s"), *Name));
+	}
+
+	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+	Data->SetStringField(TEXT("name"), Name);
+	WriteCVarValue(CVar, Data);
+	Data->SetStringField(TEXT("help"), CVar->GetHelp());
+	return FCortexCommandRouter::Success(Data);
+}
+
+FCortexCommandResult FCortexEditorUtilityOps::SetCVar(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Name;
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("name"), Name) || Name.IsEmpty())
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidField,
+			TEXT("Missing required param: name"));
+	}
+
+	// TryGetStringField coerces JSON numbers/bools to string, so callers may pass any of them.
+	FString Value;
+	if (!Params->TryGetStringField(TEXT("value"), Value))
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidField,
+			TEXT("Missing required param: value"));
+	}
+
+	IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(*Name);
+	if (CVar == nullptr)
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::SymbolNotFound,
+			FString::Printf(TEXT("Console variable not found: %s"), *Name));
+	}
+
+	const FString OldValue = CVar->GetString();
+	CVar->Set(*Value, ECVF_SetByConsole);
+
+	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+	Data->SetStringField(TEXT("name"), Name);
+	Data->SetStringField(TEXT("old_value"), OldValue);
+	WriteCVarValue(CVar, Data);
+	return FCortexCommandRouter::Success(Data);
+}
+
+FCortexCommandResult FCortexEditorUtilityOps::ListCVars(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Pattern;
+	double LimitIn = 100.0;
+	if (Params.IsValid())
+	{
+		Params->TryGetStringField(TEXT("pattern"), Pattern);
+		Params->TryGetNumberField(TEXT("limit"), LimitIn);
+	}
+	const int32 MaxItems = FMath::Clamp(static_cast<int32>(LimitIn), 1, 500);
+
+	TArray<TSharedPtr<FJsonValue>> Items;
+	int32 Count = 0;
+	// FConsoleObjectVisitor is a delegate (DECLARE_DELEGATE_TwoParams), not a TFunctionRef,
+	// so a raw lambda does not implicitly convert — wrap it with CreateLambda.
+	IConsoleManager::Get().ForEachConsoleObjectThatContains(
+		FConsoleObjectVisitor::CreateLambda(
+			[&Items, &Count, MaxItems](const TCHAR* ObjName, IConsoleObject* Obj)
+			{
+				if (Count >= MaxItems || Obj == nullptr)
+				{
+					return;
+				}
+				TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+				Item->SetStringField(TEXT("name"), ObjName);
+				IConsoleVariable* CVar = Obj->AsVariable();
+				if (CVar != nullptr)
+				{
+					Item->SetBoolField(TEXT("is_variable"), true);
+					Item->SetStringField(TEXT("value"), CVar->GetString());
+				}
+				else
+				{
+					Item->SetBoolField(TEXT("is_variable"), false);
+				}
+				Item->SetStringField(TEXT("help"), Obj->GetHelp());
+				Items.Add(MakeShared<FJsonValueObject>(Item));
+				++Count;
+			}),
+		*Pattern);
+
+	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+	Data->SetStringField(TEXT("pattern"), Pattern);
+	Data->SetArrayField(TEXT("cvars"), Items);
+	Data->SetNumberField(TEXT("count"), Items.Num());
+	Data->SetBoolField(TEXT("truncated"), Count >= MaxItems);
+	return FCortexCommandRouter::Success(Data);
+}
+
+FCortexCommandResult FCortexEditorUtilityOps::RunPython(
+	const TSharedPtr<FJsonObject>& Params,
+	FDeferredResponseCallback DeferredCallback)
+{
+	FString Code;
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("code"), Code) || Code.IsEmpty())
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidField,
+			TEXT("Missing required param: code"));
+	}
+
+	bool bDefer = false;
+	if (Params.IsValid())
+	{
+		Params->TryGetBoolField(TEXT("defer"), bDefer);
+	}
+
+	auto DoRun = [Code]() -> FCortexCommandResult
+	{
+		IPythonScriptPlugin* Python = IPythonScriptPlugin::Get();
+		if (Python == nullptr || !Python->IsPythonAvailable())
+		{
+			return FCortexCommandRouter::Error(
+				CortexErrorCodes::UnsupportedCommand,
+				TEXT("Python scripting is not available. Enable the PythonScriptPlugin."));
+		}
+
+		FPythonCommandEx Cmd;
+		Cmd.Command = Code;
+		Cmd.ExecutionMode = EPythonCommandExecutionMode::ExecuteFile;
+		Cmd.Flags |= EPythonCommandFlags::Unattended;
+
+		const bool bOk = Python->ExecPythonCommandEx(Cmd);
+
+		TArray<TSharedPtr<FJsonValue>> OutputArr;
+		for (const FPythonLogOutputEntry& Entry : Cmd.LogOutput)
+		{
+			TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+			const TCHAR* TypeStr =
+				Entry.Type == EPythonLogOutputType::Error ? TEXT("error") :
+				Entry.Type == EPythonLogOutputType::Warning ? TEXT("warning") : TEXT("info");
+			Item->SetStringField(TEXT("type"), TypeStr);
+			Item->SetStringField(TEXT("text"), Entry.Output);
+			OutputArr.Add(MakeShared<FJsonValueObject>(Item));
+		}
+
+		if (!bOk)
+		{
+			TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+			Details->SetArrayField(TEXT("output"), OutputArr);
+			Details->SetStringField(TEXT("result"), Cmd.CommandResult);
+			return FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidOperation,
+				TEXT("Python execution reported an error. See details.output."),
+				Details);
+		}
+
+		TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+		Data->SetBoolField(TEXT("ok"), true);
+		Data->SetStringField(TEXT("result"), Cmd.CommandResult);
+		Data->SetArrayField(TEXT("output"), OutputArr);
+		return FCortexCommandRouter::Success(Data);
+	};
+
+	if (bDefer)
+	{
+		return FCortexDeferredExec::RunNextTick(MoveTemp(DoRun), MoveTemp(DeferredCallback));
+	}
+	return DoRun();
 }
