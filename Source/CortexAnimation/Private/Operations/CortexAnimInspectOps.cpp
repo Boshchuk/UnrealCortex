@@ -1,4 +1,5 @@
 #include "Operations/CortexAnimInspectOps.h"
+#include "Operations/CortexAnimOpsUtils.h"
 #include "CortexAnimationModule.h"
 
 #include "AssetRegistry/IAssetRegistry.h"
@@ -33,14 +34,8 @@ namespace
 		}
 		return true;
 	}
-
-	/** Load an asset of type T by object path, or null. */
-	template <typename T>
-	T* LoadTyped(const FString& Path)
-	{
-		return LoadObject<T>(nullptr, *Path);
-	}
 }
+using CortexAnim::LoadTyped;
 
 FCortexCommandResult FCortexAnimInspectOps::ListAssets(const TSharedPtr<FJsonObject>& Params)
 {
