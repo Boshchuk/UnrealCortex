@@ -93,6 +93,22 @@ FCortexCommandResult FCortexEditorCommandHandler::Execute(
 		LogCapture->EnsureCapturing();
 		return FCortexEditorUtilityOps::GetRecentLogs(*LogCapture, Params);
 	}
+	if (Command == TEXT("get_cvar"))
+	{
+		return FCortexEditorUtilityOps::GetCVar(Params);
+	}
+	if (Command == TEXT("set_cvar"))
+	{
+		return FCortexEditorUtilityOps::SetCVar(Params);
+	}
+	if (Command == TEXT("list_cvars"))
+	{
+		return FCortexEditorUtilityOps::ListCVars(Params);
+	}
+	if (Command == TEXT("run_python"))
+	{
+		return FCortexEditorUtilityOps::RunPython(Params, MoveTemp(DeferredCallback));
+	}
 	if (Command == TEXT("get_viewport_info"))
 	{
 		return FCortexEditorViewportOps::GetViewportInfo();
@@ -178,6 +194,17 @@ TArray<FCortexCommandInfo> FCortexEditorCommandHandler::GetSupportedCommands() c
 			.Required(TEXT("factor"), TEXT("number"), TEXT("Global time dilation factor")),
 		FCortexCommandInfo{ TEXT("get_editor_state"), TEXT("Get general editor state") },
 		FCortexCommandInfo{ TEXT("get_world_info"), TEXT("Get PIE world metadata") },
+		FCortexCommandInfo{ TEXT("get_cvar"), TEXT("Read a console variable (editor-wide, no PIE needed)") }
+			.Required(TEXT("name"), TEXT("string"), TEXT("Console variable name, e.g. r.ScreenPercentage")),
+		FCortexCommandInfo{ TEXT("set_cvar"), TEXT("Set a console variable (editor-wide, no PIE needed)") }
+			.Required(TEXT("name"), TEXT("string"), TEXT("Console variable name"))
+			.Required(TEXT("value"), TEXT("string"), TEXT("New value (string/number/bool accepted)")),
+		FCortexCommandInfo{ TEXT("list_cvars"), TEXT("List console variables/commands whose name contains a substring") }
+			.Optional(TEXT("pattern"), TEXT("string"), TEXT("Substring to match in the name (empty matches all)"))
+			.Optional(TEXT("limit"), TEXT("number"), TEXT("Max results (default 100, cap 500)")),
+		FCortexCommandInfo{ TEXT("run_python"), TEXT("Execute Python in the editor interpreter. Set defer=true for heavy task-graph ops (FBX import, bulk resave) to avoid re-entrancy crashes.") }
+			.Required(TEXT("code"), TEXT("string"), TEXT("Python source (multiline supported)"))
+			.Optional(TEXT("defer"), TEXT("boolean"), TEXT("Run on the next editor tick to avoid task-graph re-entrancy (default false)")),
 	};
 }
 
