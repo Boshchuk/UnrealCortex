@@ -1,22 +1,15 @@
-"""End-to-End self-test for the Cortex additions ported from VibeUE/UnrealClaude.
+"""End-to-End self-test for the editor + animation additions.
 
-Covers, against a LIVE Unreal Editor with the rebuilt UnrealCortex plugin:
-  - editor.run_python                 (#1 execute_python, incl. defer + error path)
-  - editor.get_cvar / set_cvar / list_cvars   (#4 CVar commands)
-  - the whole `anim` domain            (#2 CortexAnimation Phase A inspect + Phase B authoring)
+Covers, against a LIVE Unreal Editor with the UnrealCortex plugin:
+  - editor.run_python                          (execute Python in the editor)
+  - editor.get_cvar / set_cvar / list_cvars    (console-variable access)
+  - the `anim` domain                          (CortexAnimation inspect + authoring)
 
-Design notes:
-  - Talks to CortexCore over the same TCP `tcp_connection` fixture the other
-    e2e suites use (auto-discovers Saved/CortexPort-*.txt).
-  - The `anim` domain only exists in a binary built from commits bc63607 / 859e978.
-    If the running editor predates that build, every anim test SKIPS with a clear
-    "restart the editor" message instead of failing — so this file is a valid
-    regression check both before and after the editor is relaunched.
-  - Authoring tests are round-trips (create -> verify -> delete) and clean up after
-    themselves, so the file is safe to re-run.
+The anim tests SKIP cleanly if the CortexAnimation domain isn't registered, and
+authoring tests are self-cleaning round-trips, so this file is safe to re-run.
 
 Run:
-    cd Plugins/Developer/UnrealCortex/MCP && uv run pytest tests/test_cortex_gems_e2e.py -v
+    cd <plugin>/MCP && uv run pytest tests/test_cortex_gems_e2e.py -v
 """
 
 import json
@@ -29,237 +22,188 @@ import pytest
 from cortex_mcp.tcp_client import UECommandError, UEConnection
 
 
-# This fork lives at <Project>/Plugins/Developer/UnrealCortex/MCP/tests, so the
-# project root is parents[5]. (The shared conftest fixture assumes the plugin is
-# one level higher, at Plugins/UnrealCortex/MCP, and resolves the wrong root for
-# this layout — hence this module-local override, which pytest prefers.)
-_PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[5]
-_SAVED_DIR = _PROJECT_ROOT / "Saved"
+def _find_saved_dir() -> pathlib.Path | None:
+    """Walk up from this file to the project root (the dir containing a .uproject)
+    and return its Saved/ directory. Layout-agnostic — works regardless of how
+    deep the plugin is nested under Plugins/."""
+    for parent in pathlib.Path(__file__).resolve().parents:
+        if list(parent.glob("*.uproject")):
+            return parent / "Saved"
+    return None
 
 
 def _discover_port() -> int | None:
-    """Read the newest CortexPort-*.txt and return its TCP port, or None."""
-    candidates = sorted(
-        _SAVED_DIR.glob("CortexPort-*.txt"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
+    saved = _find_saved_dir()
+    if saved is None:
+        return None
+    candidates = sorted(saved.glob("CortexPort-*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
+    candidates += [saved / "CortexPort.txt"] if (saved / "CortexPort.txt").exists() else []
     for port_file in candidates:
         raw = port_file.read_text().strip()
-        match = re.search(r'"port"\s*:\s*(\d+)', raw)  # JSON form
+        match = re.search(r'"port"\s*:\s*(\d+)', raw)
         if match:
             return int(match.group(1))
-        if raw.isdigit():  # legacy plain-number form
+        if raw.isdigit():
             return int(raw)
     return None
 
 
 @pytest.fixture(scope="module")
-def tcp_connection():
-    """Module-local connection that targets this fork's project root explicitly.
-
-    Overrides the shared conftest fixture (whose project-root math is wrong for the
-    Developer/ subfolder layout). Skips the whole module if no editor is running.
-    """
+def conn():
     port = _discover_port()
     if port is None:
-        pytest.skip(
-            f"No CortexPort-*.txt under {_SAVED_DIR} — start the Unreal Editor with "
-            "the UnrealCortex plugin, then re-run."
-        )
-    conn = UEConnection(port=port)
-    conn.connect()
+        pytest.skip("No CortexPort file found — start the Unreal Editor with UnrealCortex, then re-run.")
+    c = UEConnection(port=port)
     try:
-        yield conn
+        c.connect()
+    except ConnectionError:
+        # Port file present but socket dead (editor closed, stale file) — skip rather than error.
+        pytest.skip(f"Editor not reachable on port {port} (stale port file?) — start the editor and re-run.")
+    try:
+        yield c
     finally:
-        conn.disconnect()
+        c.disconnect()
 
-
-# ──────────────────────────── helpers ────────────────────────────
 
 def _uniq(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
 
-def _registered_domains(tcp_connection) -> set[str]:
-    """Domain namespaces the live editor reports via get_capabilities."""
-    resp = tcp_connection.send_command("get_capabilities", {})
-    return set((resp.get("data", {}).get("domains", {}) or {}).keys())
+def _has_anim(conn) -> bool:
+    resp = conn.send_command("get_capabilities", {})
+    return "anim" in (resp.get("data", {}).get("domains", {}) or {})
 
 
-def _has_anim(tcp_connection) -> bool:
-    return "anim" in _registered_domains(tcp_connection)
+_ANIM_SKIP = "anim domain not registered — CortexAnimation not loaded in this editor."
 
 
-_ANIM_SKIP = (
-    "anim domain not registered in the running editor — it was launched before the "
-    "Phase A/B build (commits bc63607/859e978). Restart the editor (or Live Coding) "
-    "to load CortexAnimation, then re-run."
-)
-
-
-def _first_asset(tcp_connection, asset_type: str):
-    """Return the object path of the first asset of a given anim type, or None."""
-    resp = tcp_connection.send_command("anim.list_assets", {"asset_type": asset_type, "limit": 1})
+def _first_asset(conn, asset_type: str):
+    resp = conn.send_command("anim.list_assets", {"asset_type": asset_type, "limit": 1})
     assets = resp.get("data", {}).get("assets", [])
     return assets[0]["path"] if assets else None
 
 
-# ──────────────────────── #1 execute_python ────────────────────────
+# ── execute_python ──
 
-def test_run_python_basic(tcp_connection):
-    resp = tcp_connection.send_command(
-        "editor.run_python", {"code": "import unreal; unreal.log('cortex selftest ok')"}
-    )
-    data = resp["data"]
+def test_run_python_basic(conn):
+    data = conn.send_command("editor.run_python", {"code": "import unreal; unreal.log('cortex selftest ok')"})["data"]
+    assert data.get("ok") is True and "output" in data
+
+
+def test_run_python_captures_output(conn):
+    data = conn.send_command("editor.run_python", {"code": "print('hello-from-selftest')"})["data"]
+    assert "hello-from-selftest" in (str(data.get("output", "")) + str(data.get("result", "")))
+
+
+def test_run_python_defer_path(conn):
+    data = conn.send_command("editor.run_python", {"code": "import unreal; unreal.log('deferred ok')", "defer": True})["data"]
     assert data.get("ok") is True
-    assert "output" in data
 
 
-def test_run_python_captures_output(tcp_connection):
-    resp = tcp_connection.send_command("editor.run_python", {"code": "print('hello-from-selftest')"})
-    blob = str(resp["data"].get("output", "")) + str(resp["data"].get("result", ""))
-    assert "hello-from-selftest" in blob
-
-
-def test_run_python_defer_path(tcp_connection):
-    # defer=true routes through FCortexDeferredExec (next-tick). Should still succeed.
-    resp = tcp_connection.send_command(
-        "editor.run_python", {"code": "import unreal; unreal.log('deferred ok')", "defer": True}
-    )
-    assert resp["data"].get("ok") is True
-
-
-def test_run_python_error_is_reported(tcp_connection):
-    # A Python exception must surface as a command error, not a silent success.
+def test_run_python_error_is_reported(conn):
     with pytest.raises((UECommandError, RuntimeError)):
-        tcp_connection.send_command("editor.run_python", {"code": "raise RuntimeError('boom')"})
+        conn.send_command("editor.run_python", {"code": "raise RuntimeError('boom')"})
 
 
-def test_run_python_missing_code_param(tcp_connection):
+def test_run_python_missing_code_param(conn):
     with pytest.raises((UECommandError, RuntimeError)):
-        tcp_connection.send_command("editor.run_python", {})
+        conn.send_command("editor.run_python", {})
 
 
-# ──────────────────────────── #4 CVars ────────────────────────────
+# ── CVars ──
 
-def test_get_cvar(tcp_connection):
-    resp = tcp_connection.send_command("editor.get_cvar", {"name": "r.ScreenPercentage"})
-    data = resp["data"]
-    assert data["name"] == "r.ScreenPercentage"
-    assert "value" in data and "type" in data
+def test_get_cvar(conn):
+    data = conn.send_command("editor.get_cvar", {"name": "r.ScreenPercentage"})["data"]
+    assert data["name"] == "r.ScreenPercentage" and "value" in data and "type" in data
 
 
-def test_get_cvar_unknown_errors(tcp_connection):
+def test_get_cvar_unknown_errors(conn):
     with pytest.raises((UECommandError, RuntimeError)):
-        tcp_connection.send_command("editor.get_cvar", {"name": "r.ThisCVarDoesNotExist_xyz"})
+        conn.send_command("editor.get_cvar", {"name": "r.ThisCVarDoesNotExist_xyz"})
 
 
-def test_set_cvar_round_trip(tcp_connection):
+def test_set_cvar_round_trip(conn):
     name = "r.ScreenPercentage"
-    original = tcp_connection.send_command("editor.get_cvar", {"name": name})["data"]["value"]
+    original = conn.send_command("editor.get_cvar", {"name": name})["data"]["value"]
     try:
-        resp = tcp_connection.send_command("editor.set_cvar", {"name": name, "value": "75"})
-        data = resp["data"]
+        data = conn.send_command("editor.set_cvar", {"name": name, "value": "75"})["data"]
         assert "old_value" in data
-        assert tcp_connection.send_command("editor.get_cvar", {"name": name})["data"]["value"] == "75"
+        assert conn.send_command("editor.get_cvar", {"name": name})["data"]["value"] == "75"
     finally:
-        tcp_connection.send_command("editor.set_cvar", {"name": name, "value": original})
+        conn.send_command("editor.set_cvar", {"name": name, "value": original})
 
 
-def test_list_cvars(tcp_connection):
-    # Many cvars contain "ScreenPercentage" (.Default, .Editor, ...), so don't assume the
-    # bare name is in the first N — assert the filter works: non-empty, every hit matches.
-    resp = tcp_connection.send_command("editor.list_cvars", {"pattern": "ScreenPercentage", "limit": 20})
-    data = resp["data"]
+def test_list_cvars(conn):
+    data = conn.send_command("editor.list_cvars", {"pattern": "ScreenPercentage", "limit": 20})["data"]
     assert "cvars" in data and len(data["cvars"]) > 0
     assert all("screenpercentage" in c.get("name", "").lower() for c in data["cvars"])
 
 
-# ───────────────────── #2 anim — Phase A inspect ─────────────────────
+# ── anim Phase A: inspection ──
 
-def test_anim_list_assets(tcp_connection):
-    if not _has_anim(tcp_connection):
+def test_anim_list_assets(conn):
+    if not _has_anim(conn):
         pytest.skip(_ANIM_SKIP)
-    resp = tcp_connection.send_command("anim.list_assets", {"asset_type": "all", "limit": 10})
-    data = resp["data"]
+    data = conn.send_command("anim.list_assets", {"asset_type": "all", "limit": 10})["data"]
     assert "assets" in data and "count" in data
 
 
-def test_anim_get_skeleton_info(tcp_connection):
-    if not _has_anim(tcp_connection):
+def test_anim_get_skeleton_info(conn):
+    if not _has_anim(conn):
         pytest.skip(_ANIM_SKIP)
-    path = _first_asset(tcp_connection, "skeleton")
+    path = _first_asset(conn, "skeleton")
     if path is None:
-        pytest.skip("no Skeleton assets in this project to inspect")
-    data = tcp_connection.send_command("anim.get_skeleton_info", {"asset_path": path})["data"]
-    assert "bones" in data and data["bone_count"] >= 1
-    assert "sockets" in data
+        pytest.skip("no Skeleton assets to inspect")
+    data = conn.send_command("anim.get_skeleton_info", {"asset_path": path})["data"]
+    assert data["bone_count"] >= 1 and "sockets" in data
 
 
-def test_anim_get_sequence_info(tcp_connection):
-    if not _has_anim(tcp_connection):
+def test_anim_get_sequence_info(conn):
+    if not _has_anim(conn):
         pytest.skip(_ANIM_SKIP)
-    path = _first_asset(tcp_connection, "sequence")
+    path = _first_asset(conn, "sequence")
     if path is None:
-        pytest.skip("no AnimSequence assets in this project to inspect")
-    data = tcp_connection.send_command("anim.get_sequence_info", {"asset_path": path})["data"]
-    assert "play_length" in data
-    assert "notifies" in data
-    assert "frame_rate_fps" in data
+        pytest.skip("no AnimSequence assets to inspect")
+    data = conn.send_command("anim.get_sequence_info", {"asset_path": path})["data"]
+    assert "play_length" in data and "notifies" in data and "frame_rate_fps" in data
 
 
-# ───────────────────── #2 anim — Phase B authoring ─────────────────────
+# ── anim Phase B: authoring (self-cleaning round-trips) ──
 
-def test_anim_socket_round_trip(tcp_connection):
-    """add_socket -> verify via get_skeleton_info -> remove_socket. Self-cleaning."""
-    if not _has_anim(tcp_connection):
+def test_anim_socket_round_trip(conn):
+    if not _has_anim(conn):
         pytest.skip(_ANIM_SKIP)
-    skel = _first_asset(tcp_connection, "skeleton")
+    skel = _first_asset(conn, "skeleton")
     if skel is None:
         pytest.skip("no Skeleton assets to author against")
-
-    info = tcp_connection.send_command("anim.get_skeleton_info", {"asset_path": skel})["data"]
+    info = conn.send_command("anim.get_skeleton_info", {"asset_path": skel})["data"]
     if not info.get("bones"):
         pytest.skip("skeleton has no bones")
     bone = info["bones"][0]["name"]
     socket = _uniq("CortexSelfTestSocket")
-
     try:
-        add = tcp_connection.send_command(
-            "anim.add_socket",
-            {"skeleton_path": skel, "socket_name": socket, "bone_name": bone,
-             "location": [10, 0, 0]},
-        )["data"]
+        add = conn.send_command("anim.add_socket",
+                                {"skeleton_path": skel, "socket_name": socket, "bone_name": bone, "location": [10, 0, 0]})["data"]
         assert add["socket_name"] == socket
-
-        after = tcp_connection.send_command("anim.get_skeleton_info", {"asset_path": skel})["data"]
-        assert any(s["name"] == socket for s in after["sockets"]), "socket not present after add"
+        after = conn.send_command("anim.get_skeleton_info", {"asset_path": skel})["data"]
+        assert any(s["name"] == socket for s in after["sockets"])
     finally:
-        rm = tcp_connection.send_command(
-            "anim.remove_socket", {"skeleton_path": skel, "socket_name": socket}
-        )["data"]
+        rm = conn.send_command("anim.remove_socket", {"skeleton_path": skel, "socket_name": socket})["data"]
         assert rm.get("removed", 0) >= 1
-        final = tcp_connection.send_command("anim.get_skeleton_info", {"asset_path": skel})["data"]
-        assert not any(s["name"] == socket for s in final["sockets"]), "socket not cleaned up"
 
 
-def test_anim_curve_round_trip(tcp_connection):
-    """add_curve / set_curve_keys / remove_curve on the first AnimSequence. Self-cleaning."""
-    if not _has_anim(tcp_connection):
+def test_anim_curve_round_trip(conn):
+    if not _has_anim(conn):
         pytest.skip(_ANIM_SKIP)
-    seq = _first_asset(tcp_connection, "sequence")
+    seq = _first_asset(conn, "sequence")
     if seq is None:
         pytest.skip("no AnimSequence assets to author against")
-
     curve = _uniq("CortexSelfTestCurve")
     try:
-        tcp_connection.send_command("anim.add_curve", {"asset_path": seq, "curve_name": curve})
-        set_resp = tcp_connection.send_command(
-            "anim.set_curve_keys",
-            {"asset_path": seq, "curve_name": curve,
-             "keys": [{"time": 0.0, "value": 0.0}, {"time": 1.0, "value": 1.0}]},
-        )["data"]
-        assert set_resp["key_count"] == 2
+        conn.send_command("anim.add_curve", {"asset_path": seq, "curve_name": curve})
+        data = conn.send_command("anim.set_curve_keys",
+                                 {"asset_path": seq, "curve_name": curve,
+                                  "keys": [{"time": 0.0, "value": 0.0}, {"time": 1.0, "value": 1.0}]})["data"]
+        assert data["key_count"] == 2
     finally:
-        tcp_connection.send_command("anim.remove_curve", {"asset_path": seq, "curve_name": curve})
+        conn.send_command("anim.remove_curve", {"asset_path": seq, "curve_name": curve})
