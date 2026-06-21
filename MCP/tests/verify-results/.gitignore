@@ -1,0 +1,2 @@
+# Keep result reports (*.md) in git so they sync; ignore bulky raw logs.
+*.log

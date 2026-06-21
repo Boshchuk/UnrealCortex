@@ -5,6 +5,33 @@ This branch adds three things (PR: editor `run_python` + CVar commands + the new
 run 14/14 against a live 5.4.4 editor. This doc is the repeatable procedure to
 confirm the same on **UE 5.6** — a clean compile + a live functional pass.
 
+---
+
+## ⚡ Quick run (one command, auto-syncs results)
+
+On the 5.6 machine: clone this branch into a 5.6 project's `Plugins/Developer/`,
+then run the bundled task script. It builds the editor target, launches+waits for
+the editor, runs the e2e suite, writes a report under `verify-results/`, and
+commits+pushes that report back to this branch so the result **syncs to you with
+no manual reporting**:
+
+```powershell
+cd Plugins/Developer/UnrealCortex/MCP/tests
+./verify_ue56.ps1 -Engine "C:\EpicGames\UE_5.6" -Project "C:\dev\<HostProj>\<HostProj>.uproject" -LaunchEditor
+```
+
+- Add `-SafeDDC` if the editor hangs on launch (ZenServer DDC); `-SkipBuild` if
+  already built; `-NoPush` to keep the report local.
+- Outcome lands in `verify-results/UE-<host>-<stamp>.md` with a one-line **Verdict**
+  (`PASS` / `BUILD FAILED` / `TESTS FAILED` / `EDITOR NOT REACHABLE`). Raw build/pytest
+  logs stay local (gitignored); only the report syncs.
+- After it pushes, the result is on this branch — `git pull` elsewhere to read it.
+
+The manual steps below are the same thing unrolled, for when you want to drive it
+by hand or the script can't launch the editor on your setup.
+
+---
+
 ## Prerequisites
 
 - A UE **5.6** engine (source or launcher).
