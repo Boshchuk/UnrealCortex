@@ -44,9 +44,11 @@ chain.
 - **`Mcp-Session-Id` / session lifecycle** — stateless; validated with curl, not a full MCP client
   (Claude Code may require session headers from `initialize`).
 - **Auth / origin checks** — none (loopback only); native MCP rejects non-loopback origins.
-- **5.4.4 port** — `IHttpRouter` exists in 5.4.4 with the same API surface used here; expected to
-  port directly, but not yet built on 5.4.4.
-- Built/tested on the Lyra host only; not wired as the Paradox transport.
+- **5.4.4 build** — ✅ VERIFIED. Built `CortexHostEditor` (minimal blank C++ host) against
+  `C:\EpicGames\UnrealEngine-5.4.4`: Succeeded, all Cortex modules incl. CortexHttpServer compiled +
+  linked, **0 errors, no version shim** — the `IHttpRouter`/`HttpServer` API is identical enough 5.4↔5.6.
+- Real-client connect (Claude Code streamable-http) verified on the 5.6.1 host; not yet wired as the
+  Paradox transport (still TCP there).
 
 ## Bottom line
 The "editor speaks MCP over HTTP directly" approach is **feasible and working** — the Python bridge
