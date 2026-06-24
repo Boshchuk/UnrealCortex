@@ -52,6 +52,7 @@ private:
 	FCortexCommandRouter* Router = nullptr;
 	TSharedPtr<IHttpRouter> HttpRouter;
 	TSharedPtr<const FHttpRouteHandleInternal> RouteHandle;
+	FString SessionId;   // issued on init; returned as Mcp-Session-Id (lenient — not enforced)
 	int32 BoundPort = 0;
 	bool bRunning = false;
 };
