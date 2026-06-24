@@ -15,6 +15,8 @@
 #include "HttpServerResponse.h"
 #include "HttpServerConstants.h"
 
+#include "Misc/Guid.h"
+
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Serialization/JsonReader.h"
@@ -56,6 +58,7 @@ FCortexHttpServer::~FCortexHttpServer()
 bool FCortexHttpServer::Start(int32 Port, FCortexCommandRouter& InRouter)
 {
 	Router = &InRouter;
+	SessionId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
 
 	FHttpServerModule& Module = FHttpServerModule::Get();
 	HttpRouter = Module.GetHttpRouter(Port, /*bFailOnBindFailure*/ true);
@@ -67,10 +70,22 @@ bool FCortexHttpServer::Start(int32 Port, FCortexCommandRouter& InRouter)
 
 	RouteHandle = HttpRouter->BindRoute(
 		FHttpPath(TEXT("/mcp")),
-		EHttpServerRequestVerbs::VERB_POST,
+		EHttpServerRequestVerbs::VERB_POST | EHttpServerRequestVerbs::VERB_GET,
 		FHttpRequestHandler::CreateLambda(
 			[this](const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 			{
+				// GET = the optional server->client SSE stream. IHttpRouter is request/response
+				// (can't hold a long-lived stream), and the MCP spec allows 405 here, so we
+				// decline it; POST request/response carries initialize/tools.list/tools.call.
+				if (Request.Verb == EHttpServerRequestVerbs::VERB_GET)
+				{
+					TUniquePtr<FHttpServerResponse> NotAllowed =
+						FHttpServerResponse::Create(FString(), TEXT("text/plain"));
+					NotAllowed->Code = EHttpServerResponseCodes::BadMethod; // 405
+					OnComplete(MoveTemp(NotAllowed));
+					return true;
+				}
+
 				// Decode UTF-8 body (Request.Body is not null-terminated).
 				FString Body;
 				if (Request.Body.Num() > 0)
@@ -88,6 +103,10 @@ bool FCortexHttpServer::Start(int32 Port, FCortexCommandRouter& InRouter)
 				Response->Code = RespStr.IsEmpty()
 					? EHttpServerResponseCodes::Accepted
 					: EHttpServerResponseCodes::Ok;
+
+				// MCP Streamable HTTP session + protocol headers (issued leniently — not enforced).
+				Response->Headers.Add(TEXT("Mcp-Session-Id"), { SessionId });
+				Response->Headers.Add(TEXT("MCP-Protocol-Version"), { TEXT("2024-11-05") });
 
 				OnComplete(MoveTemp(Response));
 				return true;
@@ -148,7 +167,14 @@ FString FCortexHttpServer::HandleJsonRpc(const FString& RequestBody)
 	if (Method == TEXT("initialize"))
 	{
 		Result = MakeShared<FJsonObject>();
-		Result->SetStringField(TEXT("protocolVersion"), kMcpProtocolVersion);
+		// Echo the client's requested protocol version when present (better negotiation).
+		FString ClientProto;
+		const TSharedPtr<FJsonObject>* InitParams = nullptr;
+		if (Root->TryGetObjectField(TEXT("params"), InitParams) && InitParams)
+		{
+			(*InitParams)->TryGetStringField(TEXT("protocolVersion"), ClientProto);
+		}
+		Result->SetStringField(TEXT("protocolVersion"), ClientProto.IsEmpty() ? kMcpProtocolVersion : ClientProto);
 		TSharedPtr<FJsonObject> Caps = MakeShared<FJsonObject>();
 		Caps->SetObjectField(TEXT("tools"), MakeShared<FJsonObject>());
 		Result->SetObjectField(TEXT("capabilities"), Caps);
