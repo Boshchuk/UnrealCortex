@@ -16,6 +16,10 @@
 #include "HttpServerConstants.h"
 
 #include "Misc/Guid.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "HAL/FileManager.h"
+#include "HAL/IConsoleManager.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -26,6 +30,44 @@
 namespace
 {
 	const TCHAR* kMcpProtocolVersion = TEXT("2024-11-05");
+
+	// Empty => auto-generate a token at startup (logged + written to the endpoint file).
+	// Set cortex.http.token=<secret> to pin one. There is intentionally no "disable auth" value.
+	TAutoConsoleVariable<FString> CVarCortexHttpToken(
+		TEXT("cortex.http.token"), TEXT(""),
+		TEXT("Capability token required in the X-MCP-Capability-Token header for /mcp."),
+		ECVF_Default);
+
+	// Case-insensitive single-header lookup (FHttpServerRequest stores TArray<FString> per key).
+	FString GetHeaderValue(const FHttpServerRequest& Request, const TCHAR* HeaderName)
+	{
+		for (const TPair<FString, TArray<FString>>& Pair : Request.Headers)
+		{
+			if (Pair.Key.Equals(HeaderName, ESearchCase::IgnoreCase) && Pair.Value.Num() > 0)
+			{
+				return Pair.Value[0];
+			}
+		}
+		return FString();
+	}
+
+	// Length-independent compare on the shared prefix (length itself may leak — fine for a local token).
+	bool ConstantTimeEquals(const FString& A, const FString& B)
+	{
+		if (A.Len() != B.Len() || A.Len() == 0) { return false; }
+		uint32 Diff = 0;
+		for (int32 i = 0; i < A.Len(); ++i) { Diff |= static_cast<uint32>(A[i] ^ B[i]); }
+		return Diff == 0;
+	}
+
+	// DNS-rebind defense: a browser-sent Origin must be loopback. Absent Origin (CLI clients) is allowed.
+	bool IsAllowedOrigin(const FString& Origin)
+	{
+		return Origin.IsEmpty()
+			|| Origin.StartsWith(TEXT("http://127.0.0.1"), ESearchCase::IgnoreCase)
+			|| Origin.StartsWith(TEXT("http://localhost"),  ESearchCase::IgnoreCase)
+			|| Origin.StartsWith(TEXT("http://[::1]"),      ESearchCase::IgnoreCase);
+	}
 
 	FString SerializeJson(const TSharedPtr<FJsonObject>& Obj)
 	{
@@ -58,7 +100,14 @@ FCortexHttpServer::~FCortexHttpServer()
 bool FCortexHttpServer::Start(int32 Port, FCortexCommandRouter& InRouter)
 {
 	Router = &InRouter;
-	SessionId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
+
+	// Resolve the capability token: pinned via CVar, else auto-generate (secure default — never no-auth).
+	CapabilityToken = CVarCortexHttpToken.GetValueOnAnyThread();
+	if (CapabilityToken.IsEmpty())
+	{
+		CapabilityToken = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
+		UE_LOG(LogCortex, Log, TEXT("[http-mcp] auto-generated capability token (set cortex.http.token to pin)"));
+	}
 
 	FHttpServerModule& Module = FHttpServerModule::Get();
 	HttpRouter = Module.GetHttpRouter(Port, /*bFailOnBindFailure*/ true);
@@ -86,6 +135,25 @@ bool FCortexHttpServer::Start(int32 Port, FCortexCommandRouter& InRouter)
 					return true;
 				}
 
+				// --- transport security gate (before any parsing) ---
+				const FString PresentedToken = GetHeaderValue(Request, TEXT("X-MCP-Capability-Token"));
+				if (!ConstantTimeEquals(PresentedToken, CapabilityToken))
+				{
+					TUniquePtr<FHttpServerResponse> Denied =
+						FHttpServerResponse::Create(FString(), TEXT("text/plain"));
+					Denied->Code = EHttpServerResponseCodes::Denied; // 401
+					OnComplete(MoveTemp(Denied));
+					return true;
+				}
+				if (!IsAllowedOrigin(GetHeaderValue(Request, TEXT("Origin"))))
+				{
+					TUniquePtr<FHttpServerResponse> Forbidden =
+						FHttpServerResponse::Create(FString(), TEXT("text/plain"));
+					Forbidden->Code = EHttpServerResponseCodes::Forbidden; // 403
+					OnComplete(MoveTemp(Forbidden));
+					return true;
+				}
+
 				// Decode UTF-8 body (Request.Body is not null-terminated).
 				FString Body;
 				if (Request.Body.Num() > 0)
@@ -95,17 +163,26 @@ bool FCortexHttpServer::Start(int32 Port, FCortexCommandRouter& InRouter)
 					Body = FString(UTF8_TO_TCHAR(reinterpret_cast<const ANSICHAR*>(Bytes.GetData())));
 				}
 
-				const FString RespStr = HandleJsonRpc(Body);
+				const FString InSessionId = GetHeaderValue(Request, TEXT("Mcp-Session-Id"));
+				FString OutSessionId;
+				int32 HttpStatus = 200;
+				const FString RespStr = HandleJsonRpc(Body, InSessionId, OutSessionId, HttpStatus);
 
 				TUniquePtr<FHttpServerResponse> Response =
 					FHttpServerResponse::Create(RespStr, TEXT("application/json"));
-				// Empty body => JSON-RPC notification: acknowledge with 202.
-				Response->Code = RespStr.IsEmpty()
-					? EHttpServerResponseCodes::Accepted
-					: EHttpServerResponseCodes::Ok;
+				switch (HttpStatus)
+				{
+					case 202: Response->Code = EHttpServerResponseCodes::Accepted;   break; // notification ack
+					case 400: Response->Code = EHttpServerResponseCodes::BadRequest; break; // missing session
+					case 404: Response->Code = EHttpServerResponseCodes::NotFound;   break; // unknown session
+					default:  Response->Code = EHttpServerResponseCodes::Ok;         break;
+				}
 
-				// MCP Streamable HTTP session + protocol headers (issued leniently — not enforced).
-				Response->Headers.Add(TEXT("Mcp-Session-Id"), { SessionId });
+				// Echo the (possibly newly minted) session; omit when we didn't establish one.
+				if (!OutSessionId.IsEmpty())
+				{
+					Response->Headers.Add(TEXT("Mcp-Session-Id"), { OutSessionId });
+				}
 				Response->Headers.Add(TEXT("MCP-Protocol-Version"), { TEXT("2024-11-05") });
 
 				OnComplete(MoveTemp(Response));
@@ -122,6 +199,12 @@ bool FCortexHttpServer::Start(int32 Port, FCortexCommandRouter& InRouter)
 	Module.StartAllListeners();
 	BoundPort = Port;
 	bRunning = true;
+
+	// Discovery: {port, token} for a co-located client. Saved/ is user-local, not synced to VCS.
+	const FString EndpointPath = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Cortex"), TEXT("http-endpoint.json"));
+	FFileHelper::SaveStringToFile(
+		FString::Printf(TEXT("{\"port\":%d,\"token\":\"%s\"}"), Port, *CapabilityToken), *EndpointPath);
+
 	UE_LOG(LogCortex, Log, TEXT("[http-mcp] MCP-over-HTTP endpoint live at http://127.0.0.1:%d/mcp (POC)"), Port);
 	return true;
 }
@@ -135,16 +218,26 @@ void FCortexHttpServer::Stop()
 	RouteHandle.Reset();
 	HttpRouter.Reset();
 	Router = nullptr;
+	ActiveSessions.Empty();
+	CapabilityToken.Reset();
+	IFileManager::Get().Delete(
+		*FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Cortex"), TEXT("http-endpoint.json")),
+		/*RequireExists*/ false, /*EvenReadOnly*/ false, /*Quiet*/ true);
 	bRunning = false;
 	BoundPort = 0;
 }
 
-FString FCortexHttpServer::HandleJsonRpc(const FString& RequestBody)
+FString FCortexHttpServer::HandleJsonRpc(const FString& RequestBody, const FString& InSessionId,
+                                        FString& OutSessionId, int32& OutHttpCode)
 {
+	OutHttpCode = 200;
+	OutSessionId = InSessionId; // default: echo the client's session unchanged
+
 	TSharedPtr<FJsonObject> Root;
 	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(RequestBody);
 	if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
 	{
+		OutHttpCode = 400;
 		return MakeJsonRpcError(nullptr, -32700, TEXT("Parse error"));
 	}
 
@@ -154,19 +247,39 @@ FString FCortexHttpServer::HandleJsonRpc(const FString& RequestBody)
 	const TSharedPtr<FJsonValue>* IdFound = Root->Values.Find(TEXT("id"));
 	const TSharedPtr<FJsonValue> IdValue = IdFound ? *IdFound : nullptr;
 	const bool bHasId = IdValue.IsValid();
+	const bool bIsInitialize = (Method == TEXT("initialize"));
+
+	// Session enforcement: every request except initialize must carry a known session.
+	if (!bIsInitialize)
+	{
+		if (InSessionId.IsEmpty())
+		{
+			OutHttpCode = 400;
+			return MakeJsonRpcError(IdValue, -32600, TEXT("Missing Mcp-Session-Id header"));
+		}
+		if (!ActiveSessions.Contains(InSessionId))
+		{
+			OutHttpCode = 404;
+			return MakeJsonRpcError(IdValue, -32600, TEXT("Invalid or expired session ID"));
+		}
+	}
 
 	// JSON-RPC notifications (no id, or "notifications/*") get an empty ack.
 	if (!bHasId || Method.StartsWith(TEXT("notifications/")))
 	{
+		OutHttpCode = 202;
 		return FString();
 	}
 
 	TSharedPtr<FJsonObject> Result;
 	bool bIsError = false;
 
-	if (Method == TEXT("initialize"))
+	if (bIsInitialize)
 	{
 		Result = MakeShared<FJsonObject>();
+		// Mint a fresh session and hand it back via the Mcp-Session-Id response header.
+		OutSessionId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
+		ActiveSessions.Add(OutSessionId);
 		// Echo the client's requested protocol version when present (better negotiation).
 		FString ClientProto;
 		const TSharedPtr<FJsonObject>* InitParams = nullptr;
