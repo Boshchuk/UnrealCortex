@@ -3,6 +3,7 @@
 
 #include "CoreMinimal.h"
 #include "Containers/Ticker.h"
+#include "HAL/ThreadSafeBool.h"
 #include "Interfaces/IPv4/IPv4Endpoint.h"
 #include "CortexTypes.h"
 
