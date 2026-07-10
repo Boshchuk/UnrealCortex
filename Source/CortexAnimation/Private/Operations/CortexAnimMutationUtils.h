@@ -7,6 +7,7 @@
 class FJsonObject;
 class UAnimMontage;
 class UAnimSequence;
+class USkeleton;
 
 struct FCortexAnimMutationUtils
 {
@@ -54,6 +55,14 @@ struct FCortexAnimMutationUtils
 		bool& bOutSave,
 		FCortexCommandResult& OutError);
 
+	static bool PrepareSkeletonMutation(
+		const TSharedPtr<FJsonObject>& Params,
+		FCortexAnimResolvedAsset& OutResolved,
+		USkeleton*& OutSkeleton,
+		bool& bOutDryRun,
+		bool& bOutSave,
+		FCortexCommandResult& OutError);
+
 	static bool SaveIfRequested(
 		UAnimSequence* Sequence,
 		bool bSave,
@@ -62,6 +71,12 @@ struct FCortexAnimMutationUtils
 
 	static bool SaveMontageIfRequested(
 		UAnimMontage* Montage,
+		bool bSave,
+		TArray<FString>& OutSavedPackages,
+		FCortexCommandResult& OutError);
+
+	static bool SaveSkeletonIfRequested(
+		USkeleton* Skeleton,
 		bool bSave,
 		TArray<FString>& OutSavedPackages,
 		FCortexCommandResult& OutError);

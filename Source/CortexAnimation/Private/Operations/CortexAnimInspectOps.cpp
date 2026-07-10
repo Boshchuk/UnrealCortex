@@ -404,16 +404,34 @@ FCortexCommandResult FCortexAnimInspectOps::GetSkeletonInfo(const TSharedPtr<FJs
 	Data->SetObjectField(TEXT("bones"), FCortexAnimAssetUtils::MakeLimitedArray(Bones, FCortexAnimAssetUtils::ReadLimit(Params, TEXT("bone_limit"), 200, 500)));
 
 	TArray<TSharedPtr<FJsonValue>> Sockets;
-	for (const USkeletalMeshSocket* Socket : Skeleton->Sockets)
+	for (int32 Index = 0; Index < Skeleton->Sockets.Num(); ++Index)
 	{
+		const USkeletalMeshSocket* Socket = Skeleton->Sockets[Index];
 		if (Socket == nullptr)
 		{
 			continue;
 		}
 
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+		Item->SetNumberField(TEXT("index"), Index);
 		Item->SetStringField(TEXT("name"), Socket->SocketName.ToString());
+		Item->SetStringField(TEXT("socket_name"), Socket->SocketName.ToString());
 		Item->SetStringField(TEXT("bone_name"), Socket->BoneName.ToString());
+		TSharedPtr<FJsonObject> Location = MakeShared<FJsonObject>();
+		Location->SetNumberField(TEXT("x"), Socket->RelativeLocation.X);
+		Location->SetNumberField(TEXT("y"), Socket->RelativeLocation.Y);
+		Location->SetNumberField(TEXT("z"), Socket->RelativeLocation.Z);
+		Item->SetObjectField(TEXT("location"), Location);
+		TSharedPtr<FJsonObject> Rotation = MakeShared<FJsonObject>();
+		Rotation->SetNumberField(TEXT("pitch"), Socket->RelativeRotation.Pitch);
+		Rotation->SetNumberField(TEXT("yaw"), Socket->RelativeRotation.Yaw);
+		Rotation->SetNumberField(TEXT("roll"), Socket->RelativeRotation.Roll);
+		Item->SetObjectField(TEXT("rotation"), Rotation);
+		TSharedPtr<FJsonObject> Scale = MakeShared<FJsonObject>();
+		Scale->SetNumberField(TEXT("x"), Socket->RelativeScale.X);
+		Scale->SetNumberField(TEXT("y"), Socket->RelativeScale.Y);
+		Scale->SetNumberField(TEXT("z"), Socket->RelativeScale.Z);
+		Item->SetObjectField(TEXT("scale"), Scale);
 		Sockets.Add(MakeShared<FJsonValueObject>(Item));
 	}
 	Data->SetObjectField(TEXT("sockets"), FCortexAnimAssetUtils::MakeLimitedArray(Sockets, FCortexAnimAssetUtils::ReadLimit(Params, TEXT("socket_limit"), 100, 200)));

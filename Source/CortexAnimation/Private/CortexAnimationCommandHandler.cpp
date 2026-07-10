@@ -4,6 +4,7 @@
 #include "Operations/CortexAnimCurveOps.h"
 #include "Operations/CortexAnimInspectOps.h"
 #include "Operations/CortexAnimMontageOps.h"
+#include "Operations/CortexAnimSocketOps.h"
 
 FCortexCommandResult FCortexAnimationCommandHandler::Execute(
 	const FString& Command,
@@ -67,6 +68,18 @@ FCortexCommandResult FCortexAnimationCommandHandler::Execute(
 	if (Command == TEXT("remove_montage_section"))
 	{
 		return FCortexAnimMontageOps::RemoveSection(Params);
+	}
+	if (Command == TEXT("add_socket"))
+	{
+		return FCortexAnimSocketOps::AddSocket(Params);
+	}
+	if (Command == TEXT("set_socket_transform"))
+	{
+		return FCortexAnimSocketOps::SetSocketTransform(Params);
+	}
+	if (Command == TEXT("remove_socket"))
+	{
+		return FCortexAnimSocketOps::RemoveSocket(Params);
 	}
 
 	return FCortexCommandRouter::Error(
@@ -195,6 +208,37 @@ TArray<FCortexCommandInfo> FCortexAnimationCommandHandler::GetSupportedCommands(
 		FCortexCommandInfo{ TEXT("remove_montage_section"), TEXT("Remove exactly one UAnimMontage section selected by index, name, and start_time. Referenced sections are rejected.") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimMontage asset path"))
 			.Required(TEXT("selector"), TEXT("object"), TEXT("Precise selector { index, name, start_time } from canonical montage section state"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("add_socket"), TEXT("Add one named socket to a USkeleton. Mutating; the bone must exist in the skeleton reference skeleton.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Skeleton asset path"))
+			.Required(TEXT("socket_name"), TEXT("string"), TEXT("Unique skeleton socket name"))
+			.Required(TEXT("bone_name"), TEXT("string"), TEXT("Existing reference skeleton bone name"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from anim.get_skeleton_info"))
+			.Optional(TEXT("location"), TEXT("object"), TEXT("Finite local location { x, y, z }; defaults zero"))
+			.Optional(TEXT("rotation"), TEXT("object"), TEXT("Finite local rotation { pitch, yaw, roll }; defaults zero"))
+			.Optional(TEXT("scale"), TEXT("object"), TEXT("Finite local scale { x, y, z }; defaults one"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("set_socket_transform"), TEXT("Update one USkeleton socket transform selected by index, socket_name, and bone_name. Omitted transform fields are retained.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Skeleton asset path"))
+			.Required(TEXT("selector"), TEXT("object"), TEXT("Precise selector { index, socket_name, bone_name } from canonical socket state"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("location"), TEXT("object"), TEXT("Finite local location { x, y, z }"))
+			.Optional(TEXT("rotation"), TEXT("object"), TEXT("Finite local rotation { pitch, yaw, roll }"))
+			.Optional(TEXT("scale"), TEXT("object"), TEXT("Finite local scale { x, y, z }"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("remove_socket"), TEXT("Remove exactly one USkeleton socket selected by index, socket_name, and bone_name. Mutating; defaults save=false.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Skeleton asset path"))
+			.Required(TEXT("selector"), TEXT("object"), TEXT("Precise selector { index, socket_name, bone_name } from canonical socket state"))
 			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
 			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
 			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))

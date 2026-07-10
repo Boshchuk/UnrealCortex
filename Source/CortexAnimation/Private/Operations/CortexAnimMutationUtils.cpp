@@ -2,6 +2,7 @@
 
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimSequence.h"
+#include "Animation/Skeleton.h"
 #include "CortexCommandRouter.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -161,6 +162,29 @@ bool FCortexAnimMutationUtils::PrepareMontageMutation(
 	return FCortexAnimAssetUtils::CheckExpectedFingerprint(OutMontage, Params, OutError);
 }
 
+bool FCortexAnimMutationUtils::PrepareSkeletonMutation(
+	const TSharedPtr<FJsonObject>& Params,
+	FCortexAnimResolvedAsset& OutResolved,
+	USkeleton*& OutSkeleton,
+	bool& bOutDryRun,
+	bool& bOutSave,
+	FCortexCommandResult& OutError)
+{
+	if (!TryReadOptionalBool(Params, TEXT("dry_run"), false, bOutDryRun, OutError)
+		|| !TryReadOptionalBool(Params, TEXT("save"), false, bOutSave, OutError))
+	{
+		return false;
+	}
+
+	if (!FCortexAnimAssetUtils::ResolveRequiredAsset<USkeleton>(Params, TEXT("Skeleton"), OutResolved, OutError))
+	{
+		return false;
+	}
+
+	OutSkeleton = CastChecked<USkeleton>(OutResolved.Asset);
+	return FCortexAnimAssetUtils::CheckExpectedFingerprint(OutSkeleton, Params, OutError);
+}
+
 bool FCortexAnimMutationUtils::SaveIfRequested(
 	UAnimSequence* Sequence,
 	bool bSave,
@@ -194,6 +218,26 @@ bool FCortexAnimMutationUtils::SaveMontageIfRequested(
 
 	FString SavedPackage;
 	if (!FCortexAnimAssetUtils::SaveAsset(Montage, SavedPackage, OutError))
+	{
+		return false;
+	}
+	OutSavedPackages.Add(SavedPackage);
+	return true;
+}
+
+bool FCortexAnimMutationUtils::SaveSkeletonIfRequested(
+	USkeleton* Skeleton,
+	bool bSave,
+	TArray<FString>& OutSavedPackages,
+	FCortexCommandResult& OutError)
+{
+	if (!bSave)
+	{
+		return true;
+	}
+
+	FString SavedPackage;
+	if (!FCortexAnimAssetUtils::SaveAsset(Skeleton, SavedPackage, OutError))
 	{
 		return false;
 	}
