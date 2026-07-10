@@ -40,8 +40,15 @@ public:
 	int32 GetPort() const { return BoundPort; }
 
 private:
-	/** Parse one JSON-RPC request and produce the response string. Empty => notification (no body). */
-	FString HandleJsonRpc(const FString& RequestBody);
+	/**
+	 * Parse one JSON-RPC request and produce the response string.
+	 * InSessionId  = client's Mcp-Session-Id request header ("" if none).
+	 * OutSessionId = session id to echo back (newly minted on initialize; else InSessionId).
+	 * OutHttpCode  = 200 ok / 202 notification-ack / 400 missing-session / 404 unknown-session.
+	 * Empty return => notification (no body).
+	 */
+	FString HandleJsonRpc(const FString& RequestBody, const FString& InSessionId,
+	                      FString& OutSessionId, int32& OutHttpCode);
 
 	/** Build the tools/list payload from the live command registry. */
 	TSharedPtr<FJsonObject> BuildToolsList() const;
@@ -52,7 +59,8 @@ private:
 	FCortexCommandRouter* Router = nullptr;
 	TSharedPtr<IHttpRouter> HttpRouter;
 	TSharedPtr<const FHttpRouteHandleInternal> RouteHandle;
-	FString SessionId;   // issued on init; returned as Mcp-Session-Id (lenient — not enforced)
+	FString CapabilityToken;      // required in X-MCP-Capability-Token (auto-generated if CVar unset)
+	TSet<FString> ActiveSessions; // minted on initialize; enforced on every later request
 	int32 BoundPort = 0;
 	bool bRunning = false;
 };
