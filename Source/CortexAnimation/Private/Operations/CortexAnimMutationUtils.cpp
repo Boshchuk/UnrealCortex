@@ -1,5 +1,6 @@
 #include "Operations/CortexAnimMutationUtils.h"
 
+#include "Animation/AnimMontage.h"
 #include "Animation/AnimSequence.h"
 #include "CortexCommandRouter.h"
 #include "Dom/JsonObject.h"
@@ -90,6 +91,26 @@ bool FCortexAnimMutationUtils::ValidateSequenceTime(
 	return true;
 }
 
+bool FCortexAnimMutationUtils::ValidateMontageTime(
+	UAnimMontage* Montage,
+	const FString& FieldName,
+	double Time,
+	FCortexCommandResult& OutError)
+{
+	const double MontageLength = Montage != nullptr
+		? static_cast<double>(Montage->GetPlayLength() > 0.0f ? Montage->GetPlayLength() : Montage->CalculateSequenceLength())
+		: 0.0;
+	if (Montage == nullptr || Time < 0.0 || Time > MontageLength)
+	{
+		OutError = FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidField,
+			FString::Printf(TEXT("%s is outside the AnimMontage range"), *FieldName),
+			MakeFieldDetails(FieldName, Montage ? Montage->GetPathName() : FString()));
+		return false;
+	}
+	return true;
+}
+
 bool FCortexAnimMutationUtils::PrepareSequenceMutation(
 	const TSharedPtr<FJsonObject>& Params,
 	FCortexAnimResolvedAsset& OutResolved,
@@ -117,6 +138,29 @@ bool FCortexAnimMutationUtils::PrepareSequenceMutation(
 	return true;
 }
 
+bool FCortexAnimMutationUtils::PrepareMontageMutation(
+	const TSharedPtr<FJsonObject>& Params,
+	FCortexAnimResolvedAsset& OutResolved,
+	UAnimMontage*& OutMontage,
+	bool& bOutDryRun,
+	bool& bOutSave,
+	FCortexCommandResult& OutError)
+{
+	if (!TryReadOptionalBool(Params, TEXT("dry_run"), false, bOutDryRun, OutError)
+		|| !TryReadOptionalBool(Params, TEXT("save"), false, bOutSave, OutError))
+	{
+		return false;
+	}
+
+	if (!FCortexAnimAssetUtils::ResolveRequiredAsset<UAnimMontage>(Params, TEXT("AnimMontage"), OutResolved, OutError))
+	{
+		return false;
+	}
+
+	OutMontage = CastChecked<UAnimMontage>(OutResolved.Asset);
+	return FCortexAnimAssetUtils::CheckExpectedFingerprint(OutMontage, Params, OutError);
+}
+
 bool FCortexAnimMutationUtils::SaveIfRequested(
 	UAnimSequence* Sequence,
 	bool bSave,
@@ -137,6 +181,26 @@ bool FCortexAnimMutationUtils::SaveIfRequested(
 	return true;
 }
 
+bool FCortexAnimMutationUtils::SaveMontageIfRequested(
+	UAnimMontage* Montage,
+	bool bSave,
+	TArray<FString>& OutSavedPackages,
+	FCortexCommandResult& OutError)
+{
+	if (!bSave)
+	{
+		return true;
+	}
+
+	FString SavedPackage;
+	if (!FCortexAnimAssetUtils::SaveAsset(Montage, SavedPackage, OutError))
+	{
+		return false;
+	}
+	OutSavedPackages.Add(SavedPackage);
+	return true;
+}
+
 TSharedPtr<FJsonObject> FCortexAnimMutationUtils::MakeMutationResponse(
 	const FCortexAnimResolvedAsset& Resolved,
 	const FString& Operation,
@@ -148,11 +212,11 @@ TSharedPtr<FJsonObject> FCortexAnimMutationUtils::MakeMutationResponse(
 	const TArray<FString>& SavedPackages,
 	const TSharedPtr<FJsonObject>& Before,
 	const TSharedPtr<FJsonObject>& After,
-	UAnimSequence* Sequence)
+	UObject* Asset)
 {
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetStringField(TEXT("asset_path"), Resolved.AssetPath);
-	Data->SetStringField(TEXT("asset_type"), TEXT("AnimSequence"));
+	Data->SetStringField(TEXT("asset_type"), Resolved.AssetType);
 	Data->SetStringField(TEXT("operation"), Operation);
 	Data->SetObjectField(TEXT("selector"), Selector.IsValid() ? Selector : MakeShared<FJsonObject>());
 	Data->SetBoolField(TEXT("changed"), bChanged);
@@ -168,6 +232,6 @@ TSharedPtr<FJsonObject> FCortexAnimMutationUtils::MakeMutationResponse(
 	Data->SetArrayField(TEXT("saved_packages"), Saved);
 	Data->SetObjectField(TEXT("before"), Before.IsValid() ? Before : MakeShared<FJsonObject>());
 	Data->SetObjectField(TEXT("after"), After.IsValid() ? After : MakeShared<FJsonObject>());
-	Data->SetObjectField(TEXT("current_fingerprint"), FCortexAnimAssetUtils::MakeFingerprint(Sequence));
+	Data->SetObjectField(TEXT("current_fingerprint"), FCortexAnimAssetUtils::MakeFingerprint(Asset));
 	return Data;
 }

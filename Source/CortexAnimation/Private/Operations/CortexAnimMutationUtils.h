@@ -5,6 +5,7 @@
 #include "Operations/CortexAnimAssetUtils.h"
 
 class FJsonObject;
+class UAnimMontage;
 class UAnimSequence;
 
 struct FCortexAnimMutationUtils
@@ -31,6 +32,12 @@ struct FCortexAnimMutationUtils
 		double Time,
 		FCortexCommandResult& OutError);
 
+	static bool ValidateMontageTime(
+		UAnimMontage* Montage,
+		const FString& FieldName,
+		double Time,
+		FCortexCommandResult& OutError);
+
 	static bool PrepareSequenceMutation(
 		const TSharedPtr<FJsonObject>& Params,
 		FCortexAnimResolvedAsset& OutResolved,
@@ -39,8 +46,22 @@ struct FCortexAnimMutationUtils
 		bool& bOutSave,
 		FCortexCommandResult& OutError);
 
+	static bool PrepareMontageMutation(
+		const TSharedPtr<FJsonObject>& Params,
+		FCortexAnimResolvedAsset& OutResolved,
+		UAnimMontage*& OutMontage,
+		bool& bOutDryRun,
+		bool& bOutSave,
+		FCortexCommandResult& OutError);
+
 	static bool SaveIfRequested(
 		UAnimSequence* Sequence,
+		bool bSave,
+		TArray<FString>& OutSavedPackages,
+		FCortexCommandResult& OutError);
+
+	static bool SaveMontageIfRequested(
+		UAnimMontage* Montage,
 		bool bSave,
 		TArray<FString>& OutSavedPackages,
 		FCortexCommandResult& OutError);
@@ -56,5 +77,5 @@ struct FCortexAnimMutationUtils
 		const TArray<FString>& SavedPackages,
 		const TSharedPtr<FJsonObject>& Before,
 		const TSharedPtr<FJsonObject>& After,
-		UAnimSequence* Sequence);
+		UObject* Asset);
 };

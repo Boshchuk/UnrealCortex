@@ -315,7 +315,7 @@ FCortexCommandResult FCortexAnimInspectOps::GetMontageInfo(const TSharedPtr<FJso
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 		Item->SetNumberField(TEXT("index"), Index);
 		Item->SetStringField(TEXT("name"), Section.SectionName.ToString());
-		Item->SetNumberField(TEXT("time"), Section.GetTime());
+		Item->SetNumberField(TEXT("start_time"), Section.GetTime());
 		Item->SetStringField(TEXT("next_section"), Section.NextSectionName.ToString());
 		Sections.Add(MakeShared<FJsonValueObject>(Item));
 	}

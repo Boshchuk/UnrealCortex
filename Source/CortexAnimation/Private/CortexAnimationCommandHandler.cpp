@@ -3,6 +3,7 @@
 #include "Operations/CortexAnimAuthorOps.h"
 #include "Operations/CortexAnimCurveOps.h"
 #include "Operations/CortexAnimInspectOps.h"
+#include "Operations/CortexAnimMontageOps.h"
 
 FCortexCommandResult FCortexAnimationCommandHandler::Execute(
 	const FString& Command,
@@ -54,6 +55,18 @@ FCortexCommandResult FCortexAnimationCommandHandler::Execute(
 	if (Command == TEXT("remove_curve"))
 	{
 		return FCortexAnimCurveOps::RemoveCurve(Params);
+	}
+	if (Command == TEXT("add_montage_section"))
+	{
+		return FCortexAnimMontageOps::AddSection(Params);
+	}
+	if (Command == TEXT("update_montage_section"))
+	{
+		return FCortexAnimMontageOps::UpdateSection(Params);
+	}
+	if (Command == TEXT("remove_montage_section"))
+	{
+		return FCortexAnimMontageOps::RemoveSection(Params);
 	}
 
 	return FCortexCommandRouter::Error(
@@ -153,6 +166,35 @@ TArray<FCortexCommandInfo> FCortexAnimationCommandHandler::GetSupportedCommands(
 		FCortexCommandInfo{ TEXT("remove_curve"), TEXT("Remove one editable float curve from a UAnimSequence. Mutating; missing targets are errors, defaults save=false.") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
 			.Required(TEXT("curve_name"), TEXT("string"), TEXT("Existing float curve name"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("add_montage_section"), TEXT("Add one named section to a UAnimMontage. Mutating; section names are unique and start_time must be within montage length.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimMontage asset path"))
+			.Required(TEXT("name"), TEXT("string"), TEXT("Unique montage section name"))
+			.Required(TEXT("start_time"), TEXT("number"), TEXT("Section start time in seconds; must be within montage length"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from anim.get_montage_info"))
+			.Optional(TEXT("next_section"), TEXT("string"), TEXT("Existing section name to link to, or empty to clear; defaults empty"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("update_montage_section"), TEXT("Update exactly one UAnimMontage section selected by index, name, and start_time. Omitted new_next_section preserves the existing link; present empty clears it.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimMontage asset path"))
+			.Required(TEXT("selector"), TEXT("object"), TEXT("Precise selector { index, name, start_time } from canonical montage section state"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("new_name"), TEXT("string"), TEXT("Replacement section name"))
+			.Optional(TEXT("new_start_time"), TEXT("number"), TEXT("Replacement start time in seconds"))
+			.Optional(TEXT("new_next_section"), TEXT("string"), TEXT("Replacement next section name; empty clears; omission preserves"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("remove_montage_section"), TEXT("Remove exactly one UAnimMontage section selected by index, name, and start_time. Referenced sections are rejected.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimMontage asset path"))
+			.Required(TEXT("selector"), TEXT("object"), TEXT("Precise selector { index, name, start_time } from canonical montage section state"))
 			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
 			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
 			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
