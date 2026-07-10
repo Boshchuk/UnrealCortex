@@ -43,6 +43,76 @@ void SetUnavailableFields(TSharedPtr<FJsonObject>& Data, const TArray<FString>& 
 
 	Data->SetArrayField(TEXT("unavailable_fields"), Values);
 }
+
+TSharedPtr<FJsonObject> MakeInspectFieldDetails(const FString& Field)
+{
+	TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+	Details->SetStringField(TEXT("field"), Field);
+	return Details;
+}
+
+bool TryReadStrictOptionalBool(
+	const TSharedPtr<FJsonObject>& Params,
+	const TCHAR* FieldName,
+	bool bDefault,
+	bool& bOutValue,
+	FCortexCommandResult& OutError)
+{
+	bOutValue = bDefault;
+	if (!Params.IsValid() || !Params->HasField(FieldName))
+	{
+		return true;
+	}
+
+	if (!Params->HasTypedField<EJson::Boolean>(FieldName))
+	{
+		OutError = FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidField,
+			FString::Printf(TEXT("%s must be a boolean when provided"), FieldName),
+			MakeInspectFieldDetails(FieldName));
+		return false;
+	}
+
+	Params->TryGetBoolField(FieldName, bOutValue);
+	return true;
+}
+
+TSharedPtr<FJsonObject> MakeCurveKeyCollection(const FFloatCurve& Curve, int32& InOutRemainingBudget)
+{
+	const TArray<FRichCurveKey>& SourceKeys = Curve.FloatCurve.GetConstRefOfKeys();
+	const int32 Count = SourceKeys.Num();
+	const int32 Returned = FMath::Clamp(InOutRemainingBudget, 0, Count);
+
+	TArray<TSharedPtr<FJsonValue>> Items;
+	Items.Reserve(Returned);
+	for (int32 Index = 0; Index < Returned; ++Index)
+	{
+		TSharedPtr<FJsonObject> Key = MakeShared<FJsonObject>();
+		Key->SetNumberField(TEXT("time"), SourceKeys[Index].Time);
+		Key->SetNumberField(TEXT("value"), SourceKeys[Index].Value);
+		Items.Add(MakeShared<FJsonValueObject>(Key));
+	}
+
+	InOutRemainingBudget = FMath::Max(0, InOutRemainingBudget - Returned);
+
+	TSharedPtr<FJsonObject> Keys = MakeShared<FJsonObject>();
+	Keys->SetNumberField(TEXT("count"), Count);
+	Keys->SetNumberField(TEXT("returned"), Returned);
+	Keys->SetBoolField(TEXT("truncated"), Count > Returned);
+	Keys->SetArrayField(TEXT("items"), Items);
+	return Keys;
+}
+
+TSharedPtr<FJsonObject> MakeEmptyCurveKeyCollection()
+{
+	TSharedPtr<FJsonObject> Keys = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> Items;
+	Keys->SetNumberField(TEXT("count"), 0);
+	Keys->SetNumberField(TEXT("returned"), 0);
+	Keys->SetBoolField(TEXT("truncated"), false);
+	Keys->SetArrayField(TEXT("items"), Items);
+	return Keys;
+}
 }
 
 FCortexCommandResult FCortexAnimInspectOps::ListAssets(const TSharedPtr<FJsonObject>& Params)
@@ -101,17 +171,32 @@ FCortexCommandResult FCortexAnimInspectOps::GetSequenceInfo(const TSharedPtr<FJs
 		return Error;
 	}
 
+	bool bIncludeCurveKeys = false;
+	if (!TryReadStrictOptionalBool(Params, TEXT("include_curve_keys"), false, bIncludeCurveKeys, Error))
+	{
+		return Error;
+	}
+	FString ExactCurveName;
+	if (Params.IsValid())
+	{
+		Params->TryGetStringField(TEXT("curve_name"), ExactCurveName);
+	}
+	int32 RemainingCurveKeyBudget = FCortexAnimAssetUtils::ReadLimit(Params, TEXT("curve_key_limit"), 100, 500);
+
 	UAnimSequence* Sequence = CastChecked<UAnimSequence>(Resolved.Asset);
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	FCortexAnimAssetUtils::SetCommonAssetFields(Data, Resolved);
 	Data->SetNumberField(TEXT("length_seconds"), Sequence->GetPlayLength());
 	Data->SetStringField(TEXT("skeleton"), ObjectPathOf(Sequence->GetSkeleton()));
 	Data->SetBoolField(TEXT("enable_root_motion"), Sequence->bEnableRootMotion);
-	Data->SetNumberField(TEXT("num_sampled_keys"), Sequence->GetNumberOfSampledKeys());
 	Data->SetStringField(TEXT("sampling_frame_rate"), Sequence->GetSamplingFrameRate().ToPrettyText().ToString());
 
 	TArray<FString> Unavailable;
 	const IAnimationDataModel* DataModel = Sequence->GetDataModel();
+	const int32 NumSampledKeys = Sequence->IsCompressedDataValid()
+		? Sequence->GetNumberOfSampledKeys()
+		: (DataModel != nullptr ? DataModel->GetNumberOfFrames() + 1 : 0);
+	Data->SetNumberField(TEXT("num_sampled_keys"), NumSampledKeys);
 	if (DataModel != nullptr)
 	{
 		Data->SetStringField(TEXT("source_frame_rate"), DataModel->GetFrameRate().ToPrettyText().ToString());
@@ -141,19 +226,54 @@ FCortexCommandResult FCortexAnimInspectOps::GetSequenceInfo(const TSharedPtr<FJs
 	TArray<TSharedPtr<FJsonValue>> Curves;
 	if (DataModel != nullptr)
 	{
+		struct FCurveItem
+		{
+			FString Name;
+			FString Type;
+			const FFloatCurve* FloatCurve = nullptr;
+		};
+
+		TArray<FCurveItem> CurveItems;
 		const FAnimationCurveData& CurveData = DataModel->GetCurveData();
 		for (const FFloatCurve& Curve : CurveData.FloatCurves)
 		{
-			TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
-			Item->SetStringField(TEXT("name"), Curve.GetName().ToString());
-			Item->SetStringField(TEXT("type"), TEXT("float"));
-			Curves.Add(MakeShared<FJsonValueObject>(Item));
+			if (!ExactCurveName.IsEmpty() && Curve.GetName().ToString() != ExactCurveName)
+			{
+				continue;
+			}
+
+			CurveItems.Add({ Curve.GetName().ToString(), TEXT("float"), &Curve });
 		}
 		for (const FTransformCurve& Curve : CurveData.TransformCurves)
 		{
+			if (!ExactCurveName.IsEmpty() && Curve.GetName().ToString() != ExactCurveName)
+			{
+				continue;
+			}
+
+			CurveItems.Add({ Curve.GetName().ToString(), TEXT("transform"), nullptr });
+		}
+
+		CurveItems.Sort([](const FCurveItem& Left, const FCurveItem& Right)
+		{
+			if (Left.Name == Right.Name)
+			{
+				return Left.Type < Right.Type;
+			}
+			return Left.Name < Right.Name;
+		});
+
+		for (const FCurveItem& CurveItem : CurveItems)
+		{
 			TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
-			Item->SetStringField(TEXT("name"), Curve.GetName().ToString());
-			Item->SetStringField(TEXT("type"), TEXT("transform"));
+			Item->SetStringField(TEXT("name"), CurveItem.Name);
+			Item->SetStringField(TEXT("type"), CurveItem.Type);
+			if (bIncludeCurveKeys)
+			{
+				Item->SetObjectField(TEXT("keys"), CurveItem.FloatCurve != nullptr
+					? MakeCurveKeyCollection(*CurveItem.FloatCurve, RemainingCurveKeyBudget)
+					: MakeEmptyCurveKeyCollection());
+			}
 			Curves.Add(MakeShared<FJsonValueObject>(Item));
 		}
 	}

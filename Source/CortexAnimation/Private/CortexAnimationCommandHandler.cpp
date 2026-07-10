@@ -1,6 +1,7 @@
 #include "CortexAnimationCommandHandler.h"
 #include "CortexCommandRouter.h"
 #include "Operations/CortexAnimAuthorOps.h"
+#include "Operations/CortexAnimCurveOps.h"
 #include "Operations/CortexAnimInspectOps.h"
 
 FCortexCommandResult FCortexAnimationCommandHandler::Execute(
@@ -42,6 +43,18 @@ FCortexCommandResult FCortexAnimationCommandHandler::Execute(
 	{
 		return FCortexAnimAuthorOps::RemoveNamedNotify(Params);
 	}
+	if (Command == TEXT("add_curve"))
+	{
+		return FCortexAnimCurveOps::AddCurve(Params);
+	}
+	if (Command == TEXT("set_curve_keys"))
+	{
+		return FCortexAnimCurveOps::SetCurveKeys(Params);
+	}
+	if (Command == TEXT("remove_curve"))
+	{
+		return FCortexAnimCurveOps::RemoveCurve(Params);
+	}
 
 	return FCortexCommandRouter::Error(
 		CortexErrorCodes::UnknownCommand,
@@ -65,6 +78,9 @@ TArray<FCortexCommandInfo> FCortexAnimationCommandHandler::GetSupportedCommands(
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
 			.Optional(TEXT("notify_limit"), TEXT("number"), TEXT("Maximum notifies returned; default 50, max 200"))
 			.Optional(TEXT("curve_limit"), TEXT("number"), TEXT("Maximum curves returned; default 50, max 200"))
+			.Optional(TEXT("include_curve_keys"), TEXT("boolean"), TEXT("Include bounded canonical float curve key readback; default false"))
+			.Optional(TEXT("curve_key_limit"), TEXT("number"), TEXT("Total curve keys returned across all curves; default 100, max 500"))
+			.Optional(TEXT("curve_name"), TEXT("string"), TEXT("Optional exact curve name filter"))
 			.Optional(TEXT("sync_marker_limit"), TEXT("number"), TEXT("Maximum sync markers returned; default 50, max 200"))
 	);
 	Commands.Add(
@@ -112,6 +128,31 @@ TArray<FCortexCommandInfo> FCortexAnimationCommandHandler::GetSupportedCommands(
 		FCortexCommandInfo{ TEXT("remove_named_notify"), TEXT("Remove exactly one skeleton named notify selected by index, name, and time. Missing targets are errors. Mutating; defaults save=false.") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
 			.Required(TEXT("selector"), TEXT("object"), TEXT("Precise selector { index, name, time } from canonical notify state"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("add_curve"), TEXT("Add one editable float curve to a UAnimSequence. Mutating; inspect first, pass current fingerprint, defaults save=false.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
+			.Required(TEXT("curve_name"), TEXT("string"), TEXT("Float curve name to add"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("set_curve_keys"), TEXT("Replace one editable float curve's canonical keys on a UAnimSequence. Mutating; keys must be finite, sorted, unique, in range, and capped at 500.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
+			.Required(TEXT("curve_name"), TEXT("string"), TEXT("Existing float curve name"))
+			.Required(TEXT("keys"), TEXT("array"), TEXT("Array of { time, value } keys, strictly sorted by time"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("remove_curve"), TEXT("Remove one editable float curve from a UAnimSequence. Mutating; missing targets are errors, defaults save=false.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
+			.Required(TEXT("curve_name"), TEXT("string"), TEXT("Existing float curve name"))
 			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
 			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
 			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))

@@ -36,7 +36,7 @@ bool FCortexAnimationCapabilitiesReadOnlyTest::RunTest(const FString& Parameters
 		Names.Add(Command.Name);
 	}
 
-	TestEqual(TEXT("Phase B named notify slice exposes eight commands"), Commands.Num(), 8);
+	TestEqual(TEXT("Phase B2 animation slice exposes eleven commands"), Commands.Num(), 11);
 	TestTrue(TEXT("list_assets exists"), Names.Contains(TEXT("list_assets")));
 	TestTrue(TEXT("get_sequence_info exists"), Names.Contains(TEXT("get_sequence_info")));
 	TestTrue(TEXT("get_montage_info exists"), Names.Contains(TEXT("get_montage_info")));
@@ -45,10 +45,12 @@ bool FCortexAnimationCapabilitiesReadOnlyTest::RunTest(const FString& Parameters
 	TestTrue(TEXT("add_named_notify exists"), Names.Contains(TEXT("add_named_notify")));
 	TestTrue(TEXT("update_named_notify exists"), Names.Contains(TEXT("update_named_notify")));
 	TestTrue(TEXT("remove_named_notify exists"), Names.Contains(TEXT("remove_named_notify")));
+	TestTrue(TEXT("add_curve exists"), Names.Contains(TEXT("add_curve")));
+	TestTrue(TEXT("set_curve_keys exists"), Names.Contains(TEXT("set_curve_keys")));
+	TestTrue(TEXT("remove_curve exists"), Names.Contains(TEXT("remove_curve")));
 
 	const TSet<FString> Forbidden = {
 		TEXT("add_notify"),
-		TEXT("add_curve"),
 		TEXT("add_montage_section"),
 		TEXT("add_socket"),
 		TEXT("save_asset")
