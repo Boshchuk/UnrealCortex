@@ -94,7 +94,7 @@ Every mutation wrapped in `FScopedTransaction`. Large responses auto-truncate wi
 
 **Guarded authoring:** Add, update, and remove sequence skeleton named notifies, editable float curves, montage sections, and skeleton sockets. Every mutation requires a fresh `expected_fingerprint`, supports `dry_run`, and defaults `save` to `false`.
 
-**Boundary:** Object notifies, notify states, Animation Blueprint authoring, blendspaces, retargeting, runtime preview, and animation `save_asset` are not supported.
+**Boundary:** Object notifies, notify states, Animation Blueprint authoring, blendspaces, retargeting, and runtime preview are not supported. There is no `anim.save_asset` command; use a mutation's `save=true` option, or `core.save_asset` where appropriate.
 
 **Example tasks:** *"Inspect a montage's sections and slots"* · *"Dry-run a curve-key update using the current fingerprint"* · *"Add a socket to the hand bone, then save only after the preview is correct"*
 
