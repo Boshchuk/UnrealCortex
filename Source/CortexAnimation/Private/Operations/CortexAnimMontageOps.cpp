@@ -90,6 +90,7 @@ bool TryReadSectionSelector(
 	if (!(*SelectorObject)->TryGetNumberField(TEXT("index"), RawIndex)
 		|| !FMath::IsFinite(RawIndex)
 		|| RawIndex < 0.0
+		|| RawIndex > static_cast<double>(TNumericLimits<int32>::Max())
 		|| FMath::FloorToDouble(RawIndex) != RawIndex)
 	{
 		OutError = FCortexCommandRouter::Error(
@@ -222,6 +223,25 @@ void SortMontageSections(UAnimMontage* Montage)
 		}
 		return Left.SectionName.ToString() < Right.SectionName.ToString();
 	});
+}
+
+bool AreEquivalentSections(const TArray<FPlannedSection>& Left, const TArray<FPlannedSection>& Right)
+{
+	if (Left.Num() != Right.Num())
+	{
+		return false;
+	}
+
+	for (int32 Index = 0; Index < Left.Num(); ++Index)
+	{
+		if (Left[Index].Name != Right[Index].Name
+			|| Left[Index].StartTime != Right[Index].StartTime
+			|| Left[Index].NextSectionName != Right[Index].NextSectionName)
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 int32 FindPlannedSectionByName(const TArray<FPlannedSection>& Sections, const FName& Name)
@@ -365,12 +385,12 @@ FCortexCommandResult FCortexAnimMontageOps::AddSection(const TSharedPtr<FJsonObj
 	const bool bDirtyBefore = Montage->GetPackage()->IsDirty();
 	const TSharedPtr<FJsonObject> Before = MissingSectionJson();
 	TArray<FPlannedSection> PlannedSections = CurrentSections(Montage);
-	PlannedSections.Add({ SectionName, StartTime, NextSection.IsEmpty() ? NAME_None : FName(*NextSection) });
+	PlannedSections.Add({ SectionName, static_cast<float>(StartTime), NextSection.IsEmpty() ? NAME_None : FName(*NextSection) });
 	SortSections(PlannedSections);
 	const TSharedPtr<FJsonObject> PlannedAfter = PlannedSectionByName(PlannedSections, SectionName);
-	TSharedPtr<FJsonObject> Selector = MakeShared<FJsonObject>();
-	Selector->SetStringField(TEXT("name"), Name);
-	Selector->SetNumberField(TEXT("start_time"), StartTime);
+	const int32 PlannedIndex = FindPlannedSectionByName(PlannedSections, SectionName);
+	const FSectionSelector PlannedSelector { PlannedIndex, Name, PlannedSections[PlannedIndex].StartTime };
+	const TSharedPtr<FJsonObject> Selector = SelectorToJson(PlannedSelector);
 
 	if (bDryRun)
 	{
@@ -401,8 +421,10 @@ FCortexCommandResult FCortexAnimMontageOps::AddSection(const TSharedPtr<FJsonObj
 	}
 
 	const int32 AddedIndex = FindSectionByName(Montage, SectionName);
+	const FCompositeSection& AddedSection = Montage->CompositeSections[AddedIndex];
+	const FSectionSelector ActualSelector { AddedIndex, AddedSection.SectionName.ToString(), AddedSection.GetTime() };
 	return FCortexCommandRouter::Success(FCortexAnimMutationUtils::MakeMutationResponse(
-		Resolved, TEXT("add_montage_section"), Selector, true, bDirtyBefore, Montage->GetPackage()->IsDirty(), bSave, SavedPackages,
+		Resolved, TEXT("add_montage_section"), SelectorToJson(ActualSelector), true, bDirtyBefore, Montage->GetPackage()->IsDirty(), bSave, SavedPackages,
 		Before, SectionToJson(Montage->CompositeSections[AddedIndex], AddedIndex), Montage));
 }
 
@@ -492,7 +514,7 @@ FCortexCommandResult FCortexAnimMontageOps::UpdateSection(const TSharedPtr<FJson
 	const TSharedPtr<FJsonObject> Before = SectionToJson(Montage->CompositeSections[SectionIndex], SectionIndex);
 	TArray<FPlannedSection> PlannedSections = CurrentSections(Montage);
 	PlannedSections[SectionIndex].Name = FinalName;
-	PlannedSections[SectionIndex].StartTime = NewStartTime;
+	PlannedSections[SectionIndex].StartTime = static_cast<float>(NewStartTime);
 	if (FinalName != OldName)
 	{
 		for (FPlannedSection& Section : PlannedSections)
@@ -506,6 +528,13 @@ FCortexCommandResult FCortexAnimMontageOps::UpdateSection(const TSharedPtr<FJson
 	PlannedSections[SectionIndex].NextSectionName = EffectiveNextName;
 	SortSections(PlannedSections);
 	const TSharedPtr<FJsonObject> PlannedAfter = PlannedSectionByName(PlannedSections, FinalName);
+	TArray<FPlannedSection> CanonicalCurrentSections = CurrentSections(Montage);
+	SortSections(CanonicalCurrentSections);
+	if (AreEquivalentSections(CanonicalCurrentSections, PlannedSections))
+	{
+		return FCortexCommandRouter::Success(FCortexAnimMutationUtils::MakeMutationResponse(
+			Resolved, TEXT("update_montage_section"), SelectorToJson(Selector), false, bDirtyBefore, bDirtyBefore, false, {}, Before, Before, Montage));
+	}
 
 	if (bDryRun)
 	{

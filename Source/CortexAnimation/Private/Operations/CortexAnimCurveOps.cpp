@@ -118,6 +118,29 @@ TSharedPtr<FJsonObject> PlannedCurveJson(const FString& CurveName, const TArray<
 	return Data;
 }
 
+bool HasEquivalentCurveKeys(const FFloatCurve* Curve, const TArray<FRichCurveKey>& Keys)
+{
+	if (Curve == nullptr)
+	{
+		return false;
+	}
+
+	const TArray<FRichCurveKey>& ExistingKeys = Curve->FloatCurve.GetConstRefOfKeys();
+	if (ExistingKeys.Num() != Keys.Num())
+	{
+		return false;
+	}
+
+	for (int32 Index = 0; Index < ExistingKeys.Num(); ++Index)
+	{
+		if (ExistingKeys[Index].Time != Keys[Index].Time || ExistingKeys[Index].Value != Keys[Index].Value)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 bool TryReadCurveSelector(
 	const TSharedPtr<FJsonObject>& Params,
 	FCortexAnimCurveSelector& OutSelector,
@@ -194,7 +217,18 @@ bool TryReadCurveKeys(
 			return false;
 		}
 
-		OutKeys.Add(FRichCurveKey(static_cast<float>(Time), static_cast<float>(Value)));
+		const float ConvertedTime = static_cast<float>(Time);
+		const float ConvertedValue = static_cast<float>(Value);
+		if (!FMath::IsFinite(ConvertedTime) || !FMath::IsFinite(ConvertedValue))
+		{
+			OutError = FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidField,
+				FString::Printf(TEXT("keys[%d] time and value must remain finite after float conversion"), Index),
+				FCortexAnimMutationUtils::MakeFieldDetails(TEXT("keys")));
+			return false;
+		}
+
+		OutKeys.Add(FRichCurveKey(ConvertedTime, ConvertedValue));
 		PreviousTime = Time;
 	}
 	return true;
@@ -342,6 +376,21 @@ FCortexCommandResult FCortexAnimCurveOps::SetCurveKeys(const TSharedPtr<FJsonObj
 	const TSharedPtr<FJsonObject> Before = CurveToJson(Sequence, Selector.CurveName);
 	const TSharedPtr<FJsonObject> PlannedAfter = PlannedCurveJson(Selector.CurveName, Keys);
 	const TSharedPtr<FJsonObject> SelectorJson = MakeCurveSelectorJson(Selector.CurveName);
+	if (HasEquivalentCurveKeys(FindFloatCurve(Sequence, Selector.CurveFName), Keys))
+	{
+		return FCortexCommandRouter::Success(FCortexAnimMutationUtils::MakeMutationResponse(
+			Resolved,
+			TEXT("set_curve_keys"),
+			SelectorJson,
+			false,
+			bDirtyBefore,
+			bDirtyBefore,
+			false,
+			{},
+			Before,
+			Before,
+			Sequence));
+	}
 	if (bDryRun)
 	{
 		return FCortexCommandRouter::Success(FCortexAnimMutationUtils::MakeMutationResponse(

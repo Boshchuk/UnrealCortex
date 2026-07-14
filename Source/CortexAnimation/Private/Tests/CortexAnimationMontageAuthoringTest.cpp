@@ -338,8 +338,14 @@ bool FCortexAnimationMontageAuthoringAddReadbackTest::RunTest(const FString& Par
 	}
 
 	const TSharedPtr<FJsonObject> After = Add.Data->GetObjectField(TEXT("after"));
+	const TSharedPtr<FJsonObject> Selector = Add.Data->GetObjectField(TEXT("selector"));
 	TestTrue(TEXT("add after exists"), After->GetBoolField(TEXT("exists")));
 	TestEqual(TEXT("new section is canonically sorted before original"), static_cast<int32>(After->GetNumberField(TEXT("index"))), 0);
+	TestTrue(TEXT("add selector includes canonical index"), Selector->HasTypedField<EJson::Number>(TEXT("index")));
+	if (Selector->HasTypedField<EJson::Number>(TEXT("index")))
+	{
+		TestEqual(TEXT("add selector uses canonical index"), static_cast<int32>(Selector->GetNumberField(TEXT("index"))), 0);
+	}
 	TestEqual(TEXT("new section name"), After->GetStringField(TEXT("name")), FString(TEXT("Cortex_B")));
 	TestEqual(TEXT("explicit empty next link is preserved"), After->GetStringField(TEXT("next_section")), FString());
 	TestEqual(TEXT("implicit predecessor link was not introduced"), Montage->CompositeSections[0].NextSectionName, NAME_None);
@@ -387,6 +393,15 @@ bool FCortexAnimationMontageAuthoringValidationTest::RunTest(const FString& Para
 	}
 	TestEqual(TEXT("dry-run does not mutate sections"), Montage->CompositeSections.Num(), 0);
 	TestFalse(TEXT("dry-run does not dirty package"), Montage->GetPackage()->IsDirty());
+	if (DryRun.bSuccess && DryRun.Data.IsValid())
+	{
+		const TSharedPtr<FJsonObject> DryRunSelector = DryRun.Data->GetObjectField(TEXT("selector"));
+		TestTrue(TEXT("dry-run add selector includes planned canonical index"), DryRunSelector->HasTypedField<EJson::Number>(TEXT("index")));
+		if (DryRunSelector->HasTypedField<EJson::Number>(TEXT("index")))
+		{
+			TestEqual(TEXT("dry-run add selector uses planned canonical index"), static_cast<int32>(DryRunSelector->GetNumberField(TEXT("index"))), 0);
+		}
+	}
 
 	TSharedPtr<FJsonObject> StaleFingerprint = MontageFingerprintFor(Montage);
 	StaleFingerprint->SetBoolField(TEXT("is_dirty"), true);
@@ -422,6 +437,15 @@ bool FCortexAnimationMontageAuthoringValidationTest::RunTest(const FString& Para
 		AddSectionParams(AssetPath, TEXT("Cortex_A"), 0.2, TEXT(""), MontageCurrentFingerprint(AddA)));
 	TestFalse(TEXT("duplicate section rejected before engine warning"), Duplicate.bSuccess);
 	TestEqual(TEXT("duplicate error code"), Duplicate.ErrorCode, FString(CortexErrorCodes::AssetAlreadyExists));
+
+	TSharedPtr<FJsonObject> OversizedSelectorParams = UpdateSectionParams(
+		AssetPath,
+		SectionSelector(TNumericLimits<int32>::Max() + 1.0, TEXT("Cortex_A"), 0.1),
+		MontageCurrentFingerprint(AddA));
+	OversizedSelectorParams->SetStringField(TEXT("new_name"), TEXT("Cortex_TooLarge"));
+	FCortexCommandResult OversizedSelector = Router.Execute(TEXT("anim.update_montage_section"), OversizedSelectorParams);
+	TestFalse(TEXT("oversized selector index is rejected"), OversizedSelector.bSuccess);
+	TestEqual(TEXT("oversized selector error code"), OversizedSelector.ErrorCode, FString(CortexErrorCodes::InvalidField));
 
 	FCortexCommandResult AddB = Router.Execute(
 		TEXT("anim.add_montage_section"),
@@ -479,10 +503,24 @@ bool FCortexAnimationMontageAuthoringUpdateRemoveTest::RunTest(const FString& Pa
 	TestTrue(TEXT("omitted new_next_section keeps existing link"), NoNextChange.bSuccess);
 	TestEqual(TEXT("existing next link is kept"), Montage->CompositeSections[SectionIndexByName(Montage, TEXT("Cortex_B"))].NextSectionName, FName(TEXT("Cortex_Renamed")));
 
+	Montage->GetPackage()->SetDirtyFlag(false);
+	TSharedPtr<FJsonObject> IdenticalUpdateParams = UpdateSectionParams(
+		AssetPath,
+		SectionSelector(1, TEXT("Cortex_B"), 0.3),
+		MontageFingerprintFor(Montage));
+	IdenticalUpdateParams->SetNumberField(TEXT("new_start_time"), 0.3);
+	FCortexCommandResult IdenticalUpdate = Router.Execute(TEXT("anim.update_montage_section"), IdenticalUpdateParams);
+	TestTrue(TEXT("identical montage update succeeds"), IdenticalUpdate.bSuccess);
+	if (IdenticalUpdate.bSuccess && IdenticalUpdate.Data.IsValid())
+	{
+		TestFalse(TEXT("identical montage update reports unchanged"), IdenticalUpdate.Data->GetBoolField(TEXT("changed")));
+		TestFalse(TEXT("identical montage update does not dirty package"), Montage->GetPackage()->IsDirty());
+	}
+
 	TSharedPtr<FJsonObject> ClearNextParams = UpdateSectionParams(
 		AssetPath,
 		SectionSelector(1, TEXT("Cortex_B"), 0.3),
-		MontageCurrentFingerprint(NoNextChange));
+		MontageCurrentFingerprint(IdenticalUpdate));
 	ClearNextParams->SetStringField(TEXT("new_next_section"), TEXT(""));
 	FCortexCommandResult ClearNext = Router.Execute(TEXT("anim.update_montage_section"), ClearNextParams);
 	TestTrue(TEXT("present empty new_next_section clears link"), ClearNext.bSuccess);

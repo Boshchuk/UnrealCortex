@@ -1,6 +1,7 @@
 #include "Misc/AutomationTest.h"
 
 #include "Animation/AnimData/IAnimationDataController.h"
+#include "Animation/AnimData/CurveIdentifier.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/Skeleton.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -12,6 +13,7 @@
 #include "Editor.h"
 #include "EditorFramework/AssetImportData.h"
 #include "Misc/Guid.h"
+#include "Misc/OutputDevice.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "UObject/Package.h"
@@ -19,6 +21,30 @@
 namespace
 {
 constexpr const TCHAR* CurveSourceSkeletonPath = TEXT("/Game/Characters/Mannequins/Meshes/SK_Mannequin.SK_Mannequin");
+
+class FCortexCurveWarningCapture final : public FOutputDevice
+{
+public:
+	int32 WarningCount = 0;
+
+	virtual void Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const FName& Category) override
+	{
+		(void)V;
+		(void)Category;
+
+		const ELogVerbosity::Type VerbosityLevel =
+			static_cast<ELogVerbosity::Type>(Verbosity & ELogVerbosity::VerbosityMask);
+		if (VerbosityLevel == ELogVerbosity::Warning)
+		{
+			++WarningCount;
+		}
+	}
+
+	virtual bool CanBeUsedOnAnyThread() const override
+	{
+		return true;
+	}
+};
 
 FCortexCommandRouter CreateCurveRouter()
 {
@@ -237,12 +263,17 @@ int32 FloatCurveKeyCount(const UAnimSequence* Sequence, const FString& CurveName
 
 void AddFloatCurveDirect(UAnimSequence* Sequence, const FString& CurveName, const TArray<TPair<double, double>>& Keys)
 {
-	FAnimationCurveData& CurveData = const_cast<FAnimationCurveData&>(Sequence->GetDataModel()->GetCurveData());
-	FFloatCurve& Curve = CurveData.FloatCurves.Add_GetRef(FFloatCurve(FName(*CurveName), AACF_Editable));
+	IAnimationDataController& Controller = Sequence->GetController();
+	const FAnimationCurveIdentifier CurveId(FName(*CurveName), ERawCurveTrackTypes::RCT_Float);
+	Controller.AddCurve(CurveId, AACF_Editable, false);
+	TArray<FRichCurveKey> CurveKeys;
+	CurveKeys.Reserve(Keys.Num());
 	for (const TPair<double, double>& Key : Keys)
 	{
-		Curve.FloatCurve.AddKey(static_cast<float>(Key.Key), static_cast<float>(Key.Value));
+		CurveKeys.Add(FRichCurveKey(static_cast<float>(Key.Key), static_cast<float>(Key.Value)));
 	}
+	Controller.SetCurveKeys(CurveId, CurveKeys, false);
+	Sequence->RefreshCacheData();
 	Sequence->GetPackage()->SetDirtyFlag(false);
 }
 
@@ -291,6 +322,17 @@ bool FCortexAnimationCurveAuthoringAddSetRemoveTest::RunTest(const FString& Para
 		TestEqual(TEXT("canonical after contains two keys"), Keys != nullptr ? Keys->Num() : INDEX_NONE, 2);
 	}
 
+	Sequence->GetPackage()->SetDirtyFlag(false);
+	FCortexCommandResult IdenticalSet = Router.Execute(
+		TEXT("anim.set_curve_keys"),
+		CurveKeysParams(AssetPath, TEXT("Cortex_AimOffset"), { CurveKey(0.0, 0.0), CurveKey(0.5, 1.0) }, CurveFingerprintFor(Sequence)));
+	TestTrue(TEXT("identical curve key set succeeds"), IdenticalSet.bSuccess);
+	if (IdenticalSet.bSuccess && IdenticalSet.Data.IsValid())
+	{
+		TestFalse(TEXT("identical curve key set reports unchanged"), IdenticalSet.Data->GetBoolField(TEXT("changed")));
+		TestFalse(TEXT("identical curve key set does not dirty package"), Sequence->GetPackage()->IsDirty());
+	}
+
 	FCortexCommandResult Inspect = Router.Execute(
 		TEXT("anim.get_sequence_info"),
 		SequenceInfoParams(AssetPath, true, 10, TEXT("Cortex_AimOffset")));
@@ -310,7 +352,7 @@ bool FCortexAnimationCurveAuthoringAddSetRemoveTest::RunTest(const FString& Para
 
 	FCortexCommandResult Remove = Router.Execute(
 		TEXT("anim.remove_curve"),
-		RemoveCurveParams(AssetPath, TEXT("Cortex_AimOffset"), CurrentFingerprint(Set)));
+		RemoveCurveParams(AssetPath, TEXT("Cortex_AimOffset"), CurrentFingerprint(IdenticalSet)));
 	TestTrue(TEXT("remove curve succeeds"), Remove.bSuccess);
 	if (Remove.bSuccess && Remove.Data.IsValid())
 	{
@@ -407,6 +449,12 @@ bool FCortexAnimationCurveAuthoringValidationTest::RunTest(const FString& Parame
 		CurveKeysParams(AssetPath, TEXT("Cortex_Validate"), { CurveKey(1.1, 1.0) }, CurveFingerprintFor(Sequence)));
 	TestFalse(TEXT("out-of-range key time rejected"), OutOfRange.bSuccess);
 	TestEqual(TEXT("out-of-range error code"), OutOfRange.ErrorCode, FString(CortexErrorCodes::InvalidField));
+
+	FCortexCommandResult FloatOverflow = Router.Execute(
+		TEXT("anim.set_curve_keys"),
+		CurveKeysParams(AssetPath, TEXT("Cortex_Validate"), { CurveKey(0.5, 1e300) }, CurveFingerprintFor(Sequence)));
+	TestFalse(TEXT("key value that overflows float is rejected"), FloatOverflow.bSuccess);
+	TestEqual(TEXT("float overflow error code"), FloatOverflow.ErrorCode, FString(CortexErrorCodes::InvalidField));
 	return true;
 }
 
@@ -544,8 +592,13 @@ bool FCortexAnimationCurveInspectionKeyBudgetTest::RunTest(const FString& Parame
 		return false;
 	}
 
-	AddFloatCurveDirect(Sequence, TEXT("Cortex_B"), { { 0.0, 0.0 }, { 0.25, 1.0 }, { 0.5, 2.0 } });
-	AddFloatCurveDirect(Sequence, TEXT("Cortex_A"), { { 0.0, 10.0 }, { 0.5, 20.0 } });
+	FCortexCurveWarningCapture Capture;
+	GLog->AddOutputDevice(&Capture);
+	{
+		IAnimationDataController::FScopedBracket Bracket(Sequence->GetController(), FText::FromString(TEXT("Cortex: Populate Test Float Curves")), false);
+		AddFloatCurveDirect(Sequence, TEXT("Cortex_B"), { { 0.0, 0.0 }, { 0.25, 1.0 }, { 0.5, 2.0 } });
+		AddFloatCurveDirect(Sequence, TEXT("Cortex_A"), { { 0.0, 10.0 }, { 0.5, 20.0 } });
+	}
 
 	FCortexCommandRouter Router = CreateCurveRouter();
 	FCortexCommandResult Inspect = Router.Execute(
@@ -593,5 +646,7 @@ bool FCortexAnimationCurveInspectionKeyBudgetTest::RunTest(const FString& Parame
 			TestFalse(TEXT("key arrays omitted by default"), (*NoKeyItems)[0]->AsObject()->HasField(TEXT("keys")));
 		}
 	}
+	GLog->RemoveOutputDevice(&Capture);
+	TestEqual(TEXT("curve inspection fixture is warning-clean"), Capture.WarningCount, 0);
 	return true;
 }
