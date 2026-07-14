@@ -303,7 +303,23 @@ def test_anim_docstrings_included_when_cache_has_anim():
                             {"name": "dry_run", "type": "boolean", "required": False},
                             {"name": "save", "type": "boolean", "required": False},
                         ],
-                    }
+                    },
+                    {
+                        "name": "update_named_notify",
+                        "params": [
+                            {"name": "asset_path", "type": "string", "required": True},
+                            {"name": "selector", "type": "object", "required": True},
+                            {"name": "expected_fingerprint", "type": "object", "required": True},
+                        ],
+                    },
+                    {
+                        "name": "remove_named_notify",
+                        "params": [
+                            {"name": "asset_path", "type": "string", "required": True},
+                            {"name": "selector", "type": "object", "required": True},
+                            {"name": "expected_fingerprint", "type": "object", "required": True},
+                        ],
+                    },
                 ]
             }
         }
@@ -324,6 +340,122 @@ def test_anim_docstrings_included_when_cache_has_anim():
     for authoring_name in ("add_notify", "update_notify", "remove_notify", "set_curve_keys"):
         assert authoring_name not in docstrings["anim"]
     assert "- save_asset(" not in docstrings["anim"]
+
+
+def _fake_anim_capabilities(command_names: list[str]) -> dict:
+    common_asset = [{"name": "asset_path", "type": "string", "required": True}]
+    expected = {"name": "expected_fingerprint", "type": "object", "required": True}
+    optional_mutation = [
+        {"name": "dry_run", "type": "boolean", "required": False},
+        {"name": "save", "type": "boolean", "required": False},
+    ]
+    definitions = {
+        "add_named_notify": common_asset + [
+            {"name": "notify_name", "type": "string", "required": True},
+            {"name": "time", "type": "number", "required": True},
+            expected,
+            *optional_mutation,
+        ],
+        "update_named_notify": common_asset + [
+            {"name": "selector", "type": "object", "required": True},
+            expected,
+            {"name": "new_name", "type": "string", "required": False},
+            {"name": "new_time", "type": "number", "required": False},
+            *optional_mutation,
+        ],
+        "remove_named_notify": common_asset + [
+            {"name": "selector", "type": "object", "required": True}, expected, *optional_mutation
+        ],
+        "add_curve": common_asset + [
+            {"name": "curve_name", "type": "string", "required": True}, expected, *optional_mutation
+        ],
+        "set_curve_keys": common_asset + [
+            {"name": "curve_name", "type": "string", "required": True},
+            {"name": "keys", "type": "array", "required": True},
+            expected,
+            *optional_mutation,
+        ],
+        "remove_curve": common_asset + [
+            {"name": "curve_name", "type": "string", "required": True}, expected, *optional_mutation
+        ],
+        "add_montage_section": common_asset + [
+            {"name": "name", "type": "string", "required": True},
+            {"name": "start_time", "type": "number", "required": True},
+            expected,
+            {"name": "next_section", "type": "string", "required": False},
+            *optional_mutation,
+        ],
+        "update_montage_section": common_asset + [
+            {"name": "selector", "type": "object", "required": True},
+            expected,
+            {"name": "new_name", "type": "string", "required": False},
+            {"name": "new_start_time", "type": "number", "required": False},
+            {"name": "new_next_section", "type": "string", "required": False},
+            *optional_mutation,
+        ],
+        "remove_montage_section": common_asset + [
+            {"name": "selector", "type": "object", "required": True}, expected, *optional_mutation
+        ],
+        "add_socket": common_asset + [
+            {"name": "socket_name", "type": "string", "required": True},
+            {"name": "bone_name", "type": "string", "required": True},
+            expected,
+            {"name": "location", "type": "object", "required": False},
+            {"name": "rotation", "type": "object", "required": False},
+            {"name": "scale", "type": "object", "required": False},
+            *optional_mutation,
+        ],
+        "set_socket_transform": common_asset + [
+            {"name": "selector", "type": "object", "required": True},
+            expected,
+            {"name": "location", "type": "object", "required": False},
+            {"name": "rotation", "type": "object", "required": False},
+            {"name": "scale", "type": "object", "required": False},
+            *optional_mutation,
+        ],
+        "remove_socket": common_asset + [
+            {"name": "selector", "type": "object", "required": True}, expected, *optional_mutation
+        ],
+    }
+    return {
+        "domains": {
+            "anim": {
+                "commands": [{"name": name, "params": definitions[name]} for name in command_names]
+            }
+        }
+    }
+
+
+def test_anim_docstrings_advertise_only_complete_phase_b2_families():
+    """Live anim hints advertise all twelve authoring commands only as complete families."""
+    command_names = [
+        "add_named_notify", "update_named_notify", "remove_named_notify",
+        "add_curve", "set_curve_keys", "remove_curve",
+        "add_montage_section", "update_montage_section", "remove_montage_section",
+        "add_socket", "set_socket_transform", "remove_socket",
+    ]
+    docstring = build_router_docstrings(_fake_anim_capabilities(command_names))["anim"]
+
+    for signature in (
+        "- add_curve(asset_path: string, curve_name: string, expected_fingerprint: object, dry_run: boolean = optional, save: boolean = optional)",
+        "- set_curve_keys(asset_path: string, curve_name: string, keys: array, expected_fingerprint: object, dry_run: boolean = optional, save: boolean = optional)",
+        "- add_montage_section(asset_path: string, name: string, start_time: number, expected_fingerprint: object, next_section: string = optional, dry_run: boolean = optional, save: boolean = optional)",
+        "- update_montage_section(asset_path: string, selector: object, expected_fingerprint: object, new_name: string = optional, new_start_time: number = optional, new_next_section: string = optional, dry_run: boolean = optional, save: boolean = optional)",
+        "- add_socket(asset_path: string, socket_name: string, bone_name: string, expected_fingerprint: object, location: object = optional, rotation: object = optional, scale: object = optional, dry_run: boolean = optional, save: boolean = optional)",
+        "- set_socket_transform(asset_path: string, selector: object, expected_fingerprint: object, location: object = optional, rotation: object = optional, scale: object = optional, dry_run: boolean = optional, save: boolean = optional)",
+    ):
+        assert signature in docstring
+    assert "save defaults to false" in docstring
+    assert "selector { index, socket_name, bone_name }" in docstring
+    assert "Do not invent Phase C or later animation authoring commands." in docstring
+    assert "add_notify" not in docstring
+
+
+def test_anim_docstrings_do_not_promote_incomplete_family():
+    """A partial live cache must not advertise any incomplete B2 family."""
+    docstring = build_router_docstrings(_fake_anim_capabilities(["add_curve"]))["anim"]
+    for command_name in ("add_curve", "set_curve_keys", "remove_curve", "add_montage_section", "add_socket"):
+        assert command_name not in docstring
 
 
 class TestFallbackDrift:

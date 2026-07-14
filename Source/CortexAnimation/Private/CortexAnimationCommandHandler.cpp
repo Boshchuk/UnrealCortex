@@ -1,7 +1,10 @@
 #include "CortexAnimationCommandHandler.h"
 #include "CortexCommandRouter.h"
 #include "Operations/CortexAnimAuthorOps.h"
+#include "Operations/CortexAnimCurveOps.h"
 #include "Operations/CortexAnimInspectOps.h"
+#include "Operations/CortexAnimMontageOps.h"
+#include "Operations/CortexAnimSocketOps.h"
 
 FCortexCommandResult FCortexAnimationCommandHandler::Execute(
 	const FString& Command,
@@ -42,6 +45,42 @@ FCortexCommandResult FCortexAnimationCommandHandler::Execute(
 	{
 		return FCortexAnimAuthorOps::RemoveNamedNotify(Params);
 	}
+	if (Command == TEXT("add_curve"))
+	{
+		return FCortexAnimCurveOps::AddCurve(Params);
+	}
+	if (Command == TEXT("set_curve_keys"))
+	{
+		return FCortexAnimCurveOps::SetCurveKeys(Params);
+	}
+	if (Command == TEXT("remove_curve"))
+	{
+		return FCortexAnimCurveOps::RemoveCurve(Params);
+	}
+	if (Command == TEXT("add_montage_section"))
+	{
+		return FCortexAnimMontageOps::AddSection(Params);
+	}
+	if (Command == TEXT("update_montage_section"))
+	{
+		return FCortexAnimMontageOps::UpdateSection(Params);
+	}
+	if (Command == TEXT("remove_montage_section"))
+	{
+		return FCortexAnimMontageOps::RemoveSection(Params);
+	}
+	if (Command == TEXT("add_socket"))
+	{
+		return FCortexAnimSocketOps::AddSocket(Params);
+	}
+	if (Command == TEXT("set_socket_transform"))
+	{
+		return FCortexAnimSocketOps::SetSocketTransform(Params);
+	}
+	if (Command == TEXT("remove_socket"))
+	{
+		return FCortexAnimSocketOps::RemoveSocket(Params);
+	}
 
 	return FCortexCommandRouter::Error(
 		CortexErrorCodes::UnknownCommand,
@@ -65,6 +104,9 @@ TArray<FCortexCommandInfo> FCortexAnimationCommandHandler::GetSupportedCommands(
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
 			.Optional(TEXT("notify_limit"), TEXT("number"), TEXT("Maximum notifies returned; default 50, max 200"))
 			.Optional(TEXT("curve_limit"), TEXT("number"), TEXT("Maximum curves returned; default 50, max 200"))
+			.Optional(TEXT("include_curve_keys"), TEXT("boolean"), TEXT("Include bounded canonical float curve key readback; default false"))
+			.Optional(TEXT("curve_key_limit"), TEXT("number"), TEXT("Total curve keys returned across all curves; default 100, max 500"))
+			.Optional(TEXT("curve_name"), TEXT("string"), TEXT("Optional exact curve name filter"))
 			.Optional(TEXT("sync_marker_limit"), TEXT("number"), TEXT("Maximum sync markers returned; default 50, max 200"))
 	);
 	Commands.Add(
@@ -112,6 +154,91 @@ TArray<FCortexCommandInfo> FCortexAnimationCommandHandler::GetSupportedCommands(
 		FCortexCommandInfo{ TEXT("remove_named_notify"), TEXT("Remove exactly one skeleton named notify selected by index, name, and time. Missing targets are errors. Mutating; defaults save=false.") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
 			.Required(TEXT("selector"), TEXT("object"), TEXT("Precise selector { index, name, time } from canonical notify state"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("add_curve"), TEXT("Add one editable float curve to a UAnimSequence. Mutating; inspect first, pass current fingerprint, defaults save=false.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
+			.Required(TEXT("curve_name"), TEXT("string"), TEXT("Float curve name to add"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("set_curve_keys"), TEXT("Replace one editable float curve's canonical keys on a UAnimSequence. Mutating; keys must be finite, sorted, unique, in range, and capped at 500.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
+			.Required(TEXT("curve_name"), TEXT("string"), TEXT("Existing float curve name"))
+			.Required(TEXT("keys"), TEXT("array"), TEXT("Array of { time, value } keys, strictly sorted by time"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("remove_curve"), TEXT("Remove one editable float curve from a UAnimSequence. Mutating; missing targets are errors, defaults save=false.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
+			.Required(TEXT("curve_name"), TEXT("string"), TEXT("Existing float curve name"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("add_montage_section"), TEXT("Add one named section to a UAnimMontage. Mutating; section names are unique and start_time must be within montage length.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimMontage asset path"))
+			.Required(TEXT("name"), TEXT("string"), TEXT("Unique montage section name"))
+			.Required(TEXT("start_time"), TEXT("number"), TEXT("Section start time in seconds; must be within montage length"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from anim.get_montage_info"))
+			.Optional(TEXT("next_section"), TEXT("string"), TEXT("Existing section name to link to, or empty to clear; defaults empty"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("update_montage_section"), TEXT("Update exactly one UAnimMontage section selected by index, name, and start_time. Omitted new_next_section preserves the existing link; present empty clears it.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimMontage asset path"))
+			.Required(TEXT("selector"), TEXT("object"), TEXT("Precise selector { index, name, start_time } from canonical montage section state"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("new_name"), TEXT("string"), TEXT("Replacement section name"))
+			.Optional(TEXT("new_start_time"), TEXT("number"), TEXT("Replacement start time in seconds"))
+			.Optional(TEXT("new_next_section"), TEXT("string"), TEXT("Replacement next section name; empty clears; omission preserves"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("remove_montage_section"), TEXT("Remove exactly one UAnimMontage section selected by index, name, and start_time. Referenced sections are rejected.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimMontage asset path"))
+			.Required(TEXT("selector"), TEXT("object"), TEXT("Precise selector { index, name, start_time } from canonical montage section state"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("add_socket"), TEXT("Add one named socket to a USkeleton. Mutating; the bone must exist in the skeleton reference skeleton.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Skeleton asset path"))
+			.Required(TEXT("socket_name"), TEXT("string"), TEXT("Unique skeleton socket name"))
+			.Required(TEXT("bone_name"), TEXT("string"), TEXT("Existing reference skeleton bone name"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from anim.get_skeleton_info"))
+			.Optional(TEXT("location"), TEXT("object"), TEXT("Finite local location { x, y, z }; defaults zero"))
+			.Optional(TEXT("rotation"), TEXT("object"), TEXT("Finite local rotation { pitch, yaw, roll }; defaults zero"))
+			.Optional(TEXT("scale"), TEXT("object"), TEXT("Finite local scale { x, y, z }; defaults one"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("set_socket_transform"), TEXT("Update one USkeleton socket transform selected by index, socket_name, and bone_name. Omitted transform fields are retained.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Skeleton asset path"))
+			.Required(TEXT("selector"), TEXT("object"), TEXT("Precise selector { index, socket_name, bone_name } from canonical socket state"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("location"), TEXT("object"), TEXT("Finite local location { x, y, z }"))
+			.Optional(TEXT("rotation"), TEXT("object"), TEXT("Finite local rotation { pitch, yaw, roll }"))
+			.Optional(TEXT("scale"), TEXT("object"), TEXT("Finite local scale { x, y, z }"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("remove_socket"), TEXT("Remove exactly one USkeleton socket selected by index, socket_name, and bone_name. Mutating; defaults save=false.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Skeleton asset path"))
+			.Required(TEXT("selector"), TEXT("object"), TEXT("Precise selector { index, socket_name, bone_name } from canonical socket state"))
 			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
 			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
 			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
