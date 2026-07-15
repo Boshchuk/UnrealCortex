@@ -127,6 +127,14 @@ bool FCortexAnimationNotifyStateUpdateRemoveTest::RunTest(const FString& Paramet
 	if (Update.bSuccess && Update.Data.IsValid())
 	{
 		TestEqual(TEXT("updated state duration"), Update.Data->GetObjectField(TEXT("after"))->GetNumberField(TEXT("duration")), 0.3);
+		TSharedPtr<FJsonObject> NoOpParams = MakeShared<FJsonObject>();
+		NoOpParams->SetStringField(TEXT("asset_path"), AssetPath);
+		NoOpParams->SetObjectField(TEXT("selector"), Update.Data->GetObjectField(TEXT("selector")));
+		NoOpParams->SetNumberField(TEXT("new_duration"), 0.3);
+		NoOpParams->SetObjectField(TEXT("expected_fingerprint"), MakeObjectAssetFingerprint(Sequence).ToJson());
+		FCortexCommandResult NoOp = Router.Execute(TEXT("anim.update_notify_state"), NoOpParams);
+		TestTrue(TEXT("explicit exact state no-op succeeds"), NoOp.bSuccess);
+		TestFalse(TEXT("explicit exact state no-op reports unchanged"), NoOp.Data.IsValid() && NoOp.Data->GetBoolField(TEXT("changed")));
 		TSharedPtr<FJsonObject> RemoveParams = MakeShared<FJsonObject>();
 		RemoveParams->SetStringField(TEXT("asset_path"), AssetPath);
 		RemoveParams->SetObjectField(TEXT("selector"), Update.Data->GetObjectField(TEXT("selector")));
