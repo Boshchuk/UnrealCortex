@@ -4,6 +4,8 @@
 #include "Operations/CortexAnimCurveOps.h"
 #include "Operations/CortexAnimInspectOps.h"
 #include "Operations/CortexAnimMontageOps.h"
+#include "Operations/CortexAnimObjectNotifyOps.h"
+#include "Operations/CortexAnimNotifyStateOps.h"
 #include "Operations/CortexAnimSocketOps.h"
 
 FCortexCommandResult FCortexAnimationCommandHandler::Execute(
@@ -44,6 +46,30 @@ FCortexCommandResult FCortexAnimationCommandHandler::Execute(
 	if (Command == TEXT("remove_named_notify"))
 	{
 		return FCortexAnimAuthorOps::RemoveNamedNotify(Params);
+	}
+	if (Command == TEXT("add_notify"))
+	{
+		return FCortexAnimObjectNotifyOps::Add(Params);
+	}
+	if (Command == TEXT("update_notify"))
+	{
+		return FCortexAnimObjectNotifyOps::Update(Params);
+	}
+	if (Command == TEXT("remove_notify"))
+	{
+		return FCortexAnimObjectNotifyOps::Remove(Params);
+	}
+	if (Command == TEXT("add_notify_state"))
+	{
+		return FCortexAnimNotifyStateOps::Add(Params);
+	}
+	if (Command == TEXT("update_notify_state"))
+	{
+		return FCortexAnimNotifyStateOps::Update(Params);
+	}
+	if (Command == TEXT("remove_notify_state"))
+	{
+		return FCortexAnimNotifyStateOps::Remove(Params);
 	}
 	if (Command == TEXT("add_curve"))
 	{
@@ -154,6 +180,60 @@ TArray<FCortexCommandInfo> FCortexAnimationCommandHandler::GetSupportedCommands(
 		FCortexCommandInfo{ TEXT("remove_named_notify"), TEXT("Remove exactly one skeleton named notify selected by index, name, and time. Missing targets are errors. Mutating; defaults save=false.") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
 			.Required(TEXT("selector"), TEXT("object"), TEXT("Precise selector { index, name, time } from canonical notify state"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("update_notify_state"), TEXT("Update exactly one UAnimNotifyState selected by index, class_path, time, and duration. Requires new_start_time and/or new_duration.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
+			.Required(TEXT("selector"), TEXT("object"), TEXT("Precise selector { index, class_path, time, duration } from canonical notify state"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("new_start_time"), TEXT("number"), TEXT("Replacement start time in seconds"))
+			.Optional(TEXT("new_duration"), TEXT("number"), TEXT("Replacement duration in seconds"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("remove_notify_state"), TEXT("Remove exactly one UAnimNotifyState selected by index, class_path, time, and duration. Missing targets are errors; defaults save=false.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
+			.Required(TEXT("selector"), TEXT("object"), TEXT("Precise selector { index, class_path, time, duration } from canonical notify state"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("add_notify_state"), TEXT("Add one instanced UAnimNotifyState notify to a UAnimSequence. Mutating; inspect first, pass current fingerprint, defaults save=false.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
+			.Required(TEXT("notify_state_class_path"), TEXT("string"), TEXT("Visible concrete UAnimNotifyState class path"))
+			.Required(TEXT("start_time"), TEXT("number"), TEXT("State start time in seconds; must be within sequence length"))
+			.Required(TEXT("duration"), TEXT("number"), TEXT("Non-negative state duration that remains within sequence length"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("add_notify"), TEXT("Add one instanced UAnimNotify object notify to a UAnimSequence. Mutating; inspect first, pass current fingerprint, defaults save=false.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
+			.Required(TEXT("notify_class_path"), TEXT("string"), TEXT("Visible concrete UAnimNotify class path"))
+			.Required(TEXT("time"), TEXT("number"), TEXT("Notify time in seconds; must be within sequence length"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("update_notify"), TEXT("Update exactly one UAnimNotify object notify selected by index, class_path, and time. Mutating; defaults save=false.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
+			.Required(TEXT("selector"), TEXT("object"), TEXT("Precise selector { index, class_path, time } from canonical notify state"))
+			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
+			.Required(TEXT("new_time"), TEXT("number"), TEXT("Replacement notify time in seconds"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))
+	);
+	Commands.Add(
+		FCortexCommandInfo{ TEXT("remove_notify"), TEXT("Remove exactly one UAnimNotify object notify selected by index, class_path, and time. Missing targets are errors; defaults save=false.") }
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("AnimSequence asset path"))
+			.Required(TEXT("selector"), TEXT("object"), TEXT("Precise selector { index, class_path, time } from canonical notify state"))
 			.Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Shared Cortex asset fingerprint from latest readback"))
 			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview before/after without mutating or dirtying the asset"))
 			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the mutated package; defaults false"))

@@ -106,6 +106,8 @@ _ANIM_AUTHORING_FAMILIES = {
     "float curve": {"add_curve", "set_curve_keys", "remove_curve"},
     "montage section": {"add_montage_section", "update_montage_section", "remove_montage_section"},
     "skeleton socket": {"add_socket", "set_socket_transform", "remove_socket"},
+    "object notify": {"add_notify", "update_notify", "remove_notify"},
+    "notify state": {"add_notify_state", "update_notify_state", "remove_notify_state"},
 }
 
 
@@ -128,7 +130,7 @@ def _build_animation_hint(command_names: set[str]) -> str:
     )
     lines.append(
         "Only call animation authoring commands that appear in live capabilities and belong to a complete family. "
-        "Do not invent Phase C or later animation authoring commands.\n"
+        "Do not invent later-stage AnimBP authoring, blendspace, retargeting, runtime preview, Sequencer, or Control Rig commands.\n"
     )
     return " ".join(lines)
 
