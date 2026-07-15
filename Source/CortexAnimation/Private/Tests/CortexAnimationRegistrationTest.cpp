@@ -36,7 +36,7 @@ bool FCortexAnimationCapabilitiesReadOnlyTest::RunTest(const FString& Parameters
 		Names.Add(Command.Name);
 	}
 
-	TestEqual(TEXT("Phase B2 animation slice exposes seventeen commands"), Commands.Num(), 17);
+	TestEqual(TEXT("Phase C animation slice exposes twenty-three commands"), Commands.Num(), 23);
 	TestTrue(TEXT("list_assets exists"), Names.Contains(TEXT("list_assets")));
 	TestTrue(TEXT("get_sequence_info exists"), Names.Contains(TEXT("get_sequence_info")));
 	TestTrue(TEXT("get_montage_info exists"), Names.Contains(TEXT("get_montage_info")));
@@ -54,9 +54,14 @@ bool FCortexAnimationCapabilitiesReadOnlyTest::RunTest(const FString& Parameters
 	TestTrue(TEXT("add_socket exists"), Names.Contains(TEXT("add_socket")));
 	TestTrue(TEXT("set_socket_transform exists"), Names.Contains(TEXT("set_socket_transform")));
 	TestTrue(TEXT("remove_socket exists"), Names.Contains(TEXT("remove_socket")));
+	TestTrue(TEXT("add_notify exists"), Names.Contains(TEXT("add_notify")));
+	TestTrue(TEXT("update_notify exists"), Names.Contains(TEXT("update_notify")));
+	TestTrue(TEXT("remove_notify exists"), Names.Contains(TEXT("remove_notify")));
+	TestTrue(TEXT("add_notify_state exists"), Names.Contains(TEXT("add_notify_state")));
+	TestTrue(TEXT("update_notify_state exists"), Names.Contains(TEXT("update_notify_state")));
+	TestTrue(TEXT("remove_notify_state exists"), Names.Contains(TEXT("remove_notify_state")));
 
 	const TSet<FString> Forbidden = {
-		TEXT("add_notify"),
 		TEXT("save_asset")
 	};
 	for (const FString& ForbiddenName : Forbidden)
