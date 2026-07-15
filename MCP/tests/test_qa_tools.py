@@ -294,6 +294,55 @@ def test_run_scenario_inline_interact_duration_timeout():
     assert parsed["steps"][0]["success"] is True
 
 
+class _NamedMockMCP:
+    """MockMCP variant that honors @mcp.tool(name=...), as the standalone hook uses."""
+
+    def __init__(self):
+        self.tools = {}
+
+    def tool(self, name=None, description=None, **_kwargs):
+        def decorator(fn):
+            self.tools[name or fn.__name__] = fn
+            return fn
+
+        return decorator
+
+
+def test_perf_tools_forward_with_explicit_timeout():
+    from cortex_mcp.tools.standalone.qa import register_qa_standalone_tools
+
+    mcp = _NamedMockMCP()
+    connection = MagicMock()
+    connection.send_command.return_value = {"data": {"fps": {"avg": 60.0}}}
+
+    register_qa_standalone_tools(mcp, connection)
+
+    assert "qa_sample_performance" in mcp.tools
+    assert "qa_assert_fps" in mcp.tools
+    assert "qa_assert_frametime" in mcp.tools
+
+    result = mcp.tools["qa_sample_performance"](duration=3.0)
+    parsed = json.loads(result)
+    assert parsed["fps"]["avg"] == 60.0
+    # timeout must exceed the sampling window so the deferred result is not cut off
+    connection.send_command.assert_called_with(
+        "qa.sample_performance", {"duration": 3.0}, timeout=13.0
+    )
+
+    connection.send_command.reset_mock()
+    connection.send_command.return_value = {"data": {"passed": True}}
+    mcp.tools["qa_assert_fps"](min_fps=30.0, duration=2.0)
+    connection.send_command.assert_called_with(
+        "qa.assert_fps", {"min_fps": 30.0, "duration": 2.0}, timeout=12.0
+    )
+
+    connection.send_command.reset_mock()
+    mcp.tools["qa_assert_frametime"](max_ms=16.7, duration=2.0)
+    connection.send_command.assert_called_with(
+        "qa.assert_frametime", {"max_ms": 16.7, "duration": 2.0}, timeout=12.0
+    )
+
+
 def test_detector_finds_multiple_issue_types():
     findings = detect_structural_issues(
         observed_state={
