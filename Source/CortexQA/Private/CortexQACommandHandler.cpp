@@ -5,6 +5,7 @@
 #include "CortexCoreModule.h"
 #include "Operations/CortexQAActionOps.h"
 #include "Operations/CortexQAAssertOps.h"
+#include "Operations/CortexQAPerfOps.h"
 #include "Operations/CortexQASetupOps.h"
 #include "Operations/CortexQAWorldOps.h"
 #include "CortexQAUtils.h"
@@ -67,6 +68,18 @@ FCortexCommandResult FCortexQACommandHandler::Execute(
     if (Command == TEXT("assert_state"))
     {
         return FCortexQAAssertOps::AssertState(Params);
+    }
+    if (Command == TEXT("sample_performance"))
+    {
+        return FCortexQAPerfOps::SamplePerformance(Params, MoveTemp(DeferredCallback));
+    }
+    if (Command == TEXT("assert_fps"))
+    {
+        return FCortexQAPerfOps::AssertFps(Params, MoveTemp(DeferredCallback));
+    }
+    if (Command == TEXT("assert_frametime"))
+    {
+        return FCortexQAPerfOps::AssertFrametime(Params, MoveTemp(DeferredCallback));
     }
     if (Command == TEXT("start_recording"))
     {
@@ -133,6 +146,16 @@ TArray<FCortexCommandInfo> FCortexQACommandHandler::GetSupportedCommands() const
             .Optional(TEXT("property"), TEXT("string"), TEXT("Property path"))
             .Optional(TEXT("value"), TEXT("object"), TEXT("Observed value"))
             .Optional(TEXT("expected"), TEXT("object"), TEXT("Expected value"))
+            .Optional(TEXT("message"), TEXT("string"), TEXT("Assertion failure context")),
+        FCortexCommandInfo{ TEXT("sample_performance"), TEXT("Sample per-frame FPS/frametime over a window; returns min/avg/max fps and avg/p95/max frametime") }
+            .Optional(TEXT("duration"), TEXT("number"), TEXT("Sampling window in seconds (default 3, clamped 0.5..60)")),
+        FCortexCommandInfo{ TEXT("assert_fps"), TEXT("Sample a window and assert average FPS >= min_fps") }
+            .Required(TEXT("min_fps"), TEXT("number"), TEXT("Minimum acceptable average FPS"))
+            .Optional(TEXT("duration"), TEXT("number"), TEXT("Sampling window in seconds (default 3)"))
+            .Optional(TEXT("message"), TEXT("string"), TEXT("Assertion failure context")),
+        FCortexCommandInfo{ TEXT("assert_frametime"), TEXT("Sample a window and assert p95 frametime <= max_ms") }
+            .Required(TEXT("max_ms"), TEXT("number"), TEXT("Maximum acceptable p95 frametime in ms"))
+            .Optional(TEXT("duration"), TEXT("number"), TEXT("Sampling window in seconds (default 3)"))
             .Optional(TEXT("message"), TEXT("string"), TEXT("Assertion failure context")),
         FCortexCommandInfo{ TEXT("start_recording"), TEXT("Start recording QA session in PIE") }
             .Optional(TEXT("name"), TEXT("string"), TEXT("Session name")),
