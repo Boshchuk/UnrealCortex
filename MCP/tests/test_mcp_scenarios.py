@@ -1392,3 +1392,47 @@ async def test_scenario_material_property_workflow(mcp_client):
     finally:
         if asset_path:
             await _cleanup_material(mcp_client, asset_path)
+
+
+@pytest.mark.anyio
+@pytest.mark.scenario
+async def test_scenario_animation_phase_c_dry_run(mcp_client):
+    """Phase C object/state dry runs preserve sequence readback and reject wrong families."""
+    assets = await call_tool(mcp_client, "anim_cmd", {
+        "command": "list_assets", "params": {"asset_type": "AnimSequence", "path": "/Game", "limit": 20},
+    })
+    items = assets.get("assets", {}).get("items", [])
+    if not items:
+        pytest.skip("No AnimSequence asset available for animation scenario")
+    asset_path = items[0]["asset_path"]
+    before = await call_tool(mcp_client, "anim_cmd", {
+        "command": "get_sequence_info", "params": {"asset_path": asset_path, "notify_limit": 200},
+    })
+    fingerprint = before["fingerprint"]
+    object_dry_run = await call_tool(mcp_client, "anim_cmd", {
+        "command": "add_notify", "params": {
+            "asset_path": asset_path, "notify_class_path": "/Script/Engine.AnimNotify_PlaySound", "time": 0.0,
+            "expected_fingerprint": fingerprint, "dry_run": True, "save": False,
+        },
+    })
+    state_dry_run = await call_tool(mcp_client, "anim_cmd", {
+        "command": "add_notify_state", "params": {
+            "asset_path": asset_path, "notify_state_class_path": "/Script/Engine.AnimNotifyState_TimedParticleEffect",
+            "start_time": 0.0, "duration": 0.0, "expected_fingerprint": fingerprint, "dry_run": True, "save": False,
+        },
+    })
+    assert object_dry_run["changed"] is True and state_dry_run["changed"] is True
+    assert object_dry_run["dirty_after"] == object_dry_run["dirty_before"]
+    assert state_dry_run["dirty_after"] == state_dry_run["dirty_before"]
+    after = await call_tool(mcp_client, "anim_cmd", {
+        "command": "get_sequence_info", "params": {"asset_path": asset_path, "notify_limit": 200},
+    })
+    assert after["fingerprint"] == fingerprint
+    assert after["notifies"] == before["notifies"]
+    wrong_object = await call_tool(mcp_client, "anim_cmd", {
+        "command": "add_notify", "params": {
+            "asset_path": asset_path, "notify_class_path": "/Script/Engine.AnimNotifyState_TimedParticleEffect", "time": 0.0,
+            "expected_fingerprint": fingerprint, "dry_run": True,
+        },
+    })
+    assert wrong_object["success"] is False

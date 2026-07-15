@@ -416,6 +416,30 @@ def _fake_anim_capabilities(command_names: list[str]) -> dict:
         "remove_socket": common_asset + [
             {"name": "selector", "type": "object", "required": True}, expected, *optional_mutation
         ],
+        "add_notify": common_asset + [
+            {"name": "notify_class_path", "type": "string", "required": True},
+            {"name": "time", "type": "number", "required": True}, expected, *optional_mutation,
+        ],
+        "update_notify": common_asset + [
+            {"name": "selector", "type": "object", "required": True}, expected,
+            {"name": "new_time", "type": "number", "required": True}, *optional_mutation,
+        ],
+        "remove_notify": common_asset + [
+            {"name": "selector", "type": "object", "required": True}, expected, *optional_mutation,
+        ],
+        "add_notify_state": common_asset + [
+            {"name": "notify_state_class_path", "type": "string", "required": True},
+            {"name": "start_time", "type": "number", "required": True},
+            {"name": "duration", "type": "number", "required": True}, expected, *optional_mutation,
+        ],
+        "update_notify_state": common_asset + [
+            {"name": "selector", "type": "object", "required": True}, expected,
+            {"name": "new_start_time", "type": "number", "required": False},
+            {"name": "new_duration", "type": "number", "required": False}, *optional_mutation,
+        ],
+        "remove_notify_state": common_asset + [
+            {"name": "selector", "type": "object", "required": True}, expected, *optional_mutation,
+        ],
     }
     return {
         "domains": {
@@ -447,8 +471,20 @@ def test_anim_docstrings_advertise_only_complete_phase_b2_families():
         assert signature in docstring
     assert "save defaults to false" in docstring
     assert "selector { index, socket_name, bone_name }" in docstring
-    assert "Do not invent Phase C or later animation authoring commands." in docstring
+    assert "Do not invent later-stage AnimBP authoring" in docstring
     assert "add_notify" not in docstring
+
+
+def test_anim_docstrings_advertise_only_complete_phase_c_families():
+    commands = [
+        "add_notify", "update_notify", "remove_notify",
+        "add_notify_state", "update_notify_state", "remove_notify_state",
+    ]
+    docstring = build_router_docstrings(_fake_anim_capabilities(commands))["anim"]
+    assert "- add_notify(asset_path: string, notify_class_path: string, time: number, expected_fingerprint: object, dry_run: boolean = optional, save: boolean = optional)" in docstring
+    assert "- add_notify_state(asset_path: string, notify_state_class_path: string, start_time: number, duration: number, expected_fingerprint: object, dry_run: boolean = optional, save: boolean = optional)" in docstring
+    assert "set_curve_keys" not in docstring
+    assert "save_asset" not in docstring
 
 
 def test_anim_docstrings_do_not_promote_incomplete_family():
