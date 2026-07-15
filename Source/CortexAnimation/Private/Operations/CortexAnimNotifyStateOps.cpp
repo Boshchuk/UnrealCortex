@@ -23,7 +23,7 @@ TSharedPtr<FJsonObject> StateNotifyToJson(const FAnimNotifyEvent& Event, int32 I
 	Data->SetBoolField(TEXT("exists"), true);
 	Data->SetStringField(TEXT("kind"), TEXT("state"));
 	Data->SetNumberField(TEXT("index"), Index);
-	Data->SetStringField(TEXT("class_path"), Event.NotifyStateClass != nullptr ? Event.NotifyStateClass->GetPathName() : FString());
+	Data->SetStringField(TEXT("class_path"), Event.NotifyStateClass != nullptr ? Event.NotifyStateClass->GetClass()->GetPathName() : FString());
 	Data->SetStringField(TEXT("display_name"), Event.NotifyName.ToString());
 	Data->SetNumberField(TEXT("time"), Event.GetTime());
 	Data->SetNumberField(TEXT("duration"), Event.GetDuration());
@@ -39,7 +39,7 @@ TSharedPtr<FJsonObject> MakeStateSelectorJson(const FAnimNotifyEvent& Event, int
 {
 	TSharedPtr<FJsonObject> Selector = MakeShared<FJsonObject>();
 	Selector->SetNumberField(TEXT("index"), Index);
-	Selector->SetStringField(TEXT("class_path"), Event.NotifyStateClass != nullptr ? Event.NotifyStateClass->GetPathName() : FString());
+	Selector->SetStringField(TEXT("class_path"), Event.NotifyStateClass != nullptr ? Event.NotifyStateClass->GetClass()->GetPathName() : FString());
 	Selector->SetNumberField(TEXT("time"), Event.GetTime());
 	Selector->SetNumberField(TEXT("duration"), Event.GetDuration());
 	return Selector;
@@ -83,7 +83,7 @@ int32 FindStateIndex(const UAnimSequence* Sequence, const FStateSelector& Select
 	}
 	const FAnimNotifyEvent& Event = Sequence->Notifies[Selector.Index];
 	return Event.Notify == nullptr && Event.NotifyStateClass != nullptr
-		&& Event.NotifyStateClass->GetPathName() == Selector.ClassPath
+		&& Event.NotifyStateClass->GetClass()->GetPathName() == Selector.ClassPath
 		&& FMath::IsNearlyEqual(Event.GetTime(), static_cast<float>(Selector.Time))
 		&& FMath::IsNearlyEqual(Event.GetDuration(), static_cast<float>(Selector.Duration)) ? Selector.Index : INDEX_NONE;
 }
@@ -118,7 +118,7 @@ FCortexCommandResult FCortexAnimNotifyStateOps::Add(const TSharedPtr<FJsonObject
 		}
 		return Error;
 	}
-	UClass* StateClass = LoadClass<UAnimNotifyState>(nullptr, *ClassPath);
+	UClass* StateClass = LoadClass<UAnimNotifyState>(nullptr, *ClassPath, nullptr, LOAD_NoWarn);
 	if (StateClass == nullptr || !StateClass->IsChildOf(UAnimNotifyState::StaticClass())
 		|| StateClass->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_Hidden | CLASS_HideDropDown))
 	{
@@ -197,8 +197,10 @@ FCortexCommandResult FCortexAnimNotifyStateOps::Update(const TSharedPtr<FJsonObj
 	if (FinalStart < 0.0 || FinalDuration < 0.0 || FinalStart + FinalDuration > Sequence->GetPlayLength()) return MakeStateError(TEXT("final start time and duration must remain within the AnimSequence range"), TEXT("new_duration"));
 	const bool bDirtyBefore = Sequence->GetPackage()->IsDirty();
 	const TSharedPtr<FJsonObject> Before = StateNotifyToJson(Sequence->Notifies[Index], Index);
-	if (FMath::IsNearlyEqual(FinalStart, static_cast<double>(Sequence->Notifies[Index].GetTime()), 0.0001)
-		&& FMath::IsNearlyEqual(FinalDuration, static_cast<double>(Sequence->Notifies[Index].GetDuration()), 0.0001))
+	const float CanonicalStart = static_cast<float>(FinalStart);
+	const float CanonicalDuration = static_cast<float>(FinalDuration);
+	if (CanonicalStart == Sequence->Notifies[Index].GetTime()
+		&& CanonicalDuration == Sequence->Notifies[Index].GetDuration())
 		return FCortexCommandRouter::Success(FCortexAnimMutationUtils::MakeMutationResponse(Resolved, TEXT("update_notify_state"), MakeStateSelectorJson(Sequence->Notifies[Index], Index), false, bDirtyBefore, bDirtyBefore, false, {}, Before, Before, Sequence));
 	if (bDryRun)
 	{
@@ -230,9 +232,9 @@ FCortexCommandResult FCortexAnimNotifyStateOps::Remove(const TSharedPtr<FJsonObj
 	if (!FCortexAnimMutationUtils::PrepareSequenceMutation(Params, Resolved, Sequence, bDryRun, bSave, Error)) return Error;
 	const int32 Index = FindStateIndex(Sequence, Selector);
 	if (Index == INDEX_NONE) return FCortexCommandRouter::Error(CortexErrorCodes::AssetNotFound, TEXT("Notify state selector did not match an existing notify state"), FCortexAnimMutationUtils::MakeFieldDetails(TEXT("selector"), Resolved.AssetPath));
-	const bool bDirtyBefore = Sequence->GetPackage()->IsDirty(); const TSharedPtr<FJsonObject> Before = StateNotifyToJson(Sequence->Notifies[Index], Index);
+	const bool bDirtyBefore = Sequence->GetPackage()->IsDirty(); const TSharedPtr<FJsonObject> Before = StateNotifyToJson(Sequence->Notifies[Index], Index); const TSharedPtr<FJsonObject> CanonicalSelector = MakeStateSelectorJson(Sequence->Notifies[Index], Index);
 	if (bDryRun) return FCortexCommandRouter::Success(FCortexAnimMutationUtils::MakeMutationResponse(Resolved, TEXT("remove_notify_state"), MakeStateSelectorJson(Sequence->Notifies[Index], Index), true, bDirtyBefore, bDirtyBefore, false, {}, Before, MakeMissingStateNotifyJson(), Sequence));
 	{ FScopedTransaction Transaction(FText::FromString(TEXT("Cortex: Remove Anim Notify State"))); Sequence->Modify(); Sequence->Notifies.RemoveAt(Index); Sequence->RefreshCacheData(); Sequence->MarkPackageDirty(); }
 	TArray<FString> Saved; if (!FCortexAnimMutationUtils::SaveIfRequested(Sequence, bSave, Saved, Error)) return Error;
-	return FCortexCommandRouter::Success(FCortexAnimMutationUtils::MakeMutationResponse(Resolved, TEXT("remove_notify_state"), MakeShared<FJsonObject>(), true, bDirtyBefore, Sequence->GetPackage()->IsDirty(), bSave, Saved, Before, MakeMissingStateNotifyJson(), Sequence));
+	return FCortexCommandRouter::Success(FCortexAnimMutationUtils::MakeMutationResponse(Resolved, TEXT("remove_notify_state"), CanonicalSelector, true, bDirtyBefore, Sequence->GetPackage()->IsDirty(), bSave, Saved, Before, MakeMissingStateNotifyJson(), Sequence));
 }

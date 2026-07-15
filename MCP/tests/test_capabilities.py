@@ -487,6 +487,23 @@ def test_anim_docstrings_advertise_only_complete_phase_c_families():
     assert "save_asset" not in docstring
 
 
+@pytest.mark.parametrize(
+    "partial_family",
+    [
+        ["add_notify", "update_notify"],
+        ["add_notify_state", "remove_notify_state"],
+    ],
+)
+def test_anim_docstrings_do_not_promote_partial_phase_c_family(partial_family):
+    """Object-notify and notify-state families are independently capability-gated."""
+    docstring = build_router_docstrings(_fake_anim_capabilities(partial_family))["anim"]
+    for command_name in (
+        "add_notify", "update_notify", "remove_notify",
+        "add_notify_state", "update_notify_state", "remove_notify_state",
+    ):
+        assert command_name not in docstring
+
+
 def test_anim_docstrings_do_not_promote_incomplete_family():
     """A partial live cache must not advertise any incomplete B2 family."""
     docstring = build_router_docstrings(_fake_anim_capabilities(["add_curve"]))["anim"]

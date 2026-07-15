@@ -118,7 +118,7 @@ FCortexCommandResult FCortexAnimObjectNotifyOps::Add(const TSharedPtr<FJsonObjec
 	{
 		return CommandError;
 	}
-	UClass* NotifyClass = LoadClass<UAnimNotify>(nullptr, *ClassPath);
+	UClass* NotifyClass = LoadClass<UAnimNotify>(nullptr, *ClassPath, nullptr, LOAD_NoWarn);
 	if (NotifyClass == nullptr || !NotifyClass->IsChildOf(UAnimNotify::StaticClass())
 		|| NotifyClass->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_Hidden | CLASS_HideDropDown))
 	{
@@ -256,6 +256,7 @@ FCortexCommandResult FCortexAnimObjectNotifyOps::Remove(const TSharedPtr<FJsonOb
 	}
 	const bool bDirtyBefore = Sequence->GetPackage()->IsDirty();
 	const TSharedPtr<FJsonObject> Before = NotifyJson(Sequence->Notifies[Index], Index);
+	const TSharedPtr<FJsonObject> CanonicalSelector = MakeSelectorJson(Sequence->Notifies[Index], Index);
 	if (bDryRun)
 	{
 		return FCortexCommandRouter::Success(FCortexAnimMutationUtils::MakeMutationResponse(Resolved, TEXT("remove_notify"), MakeSelectorJson(Sequence->Notifies[Index], Index), true, bDirtyBefore, bDirtyBefore, false, {}, Before, MissingObjectNotifyJson(), Sequence));
@@ -272,5 +273,5 @@ FCortexCommandResult FCortexAnimObjectNotifyOps::Remove(const TSharedPtr<FJsonOb
 	{
 		return Error;
 	}
-	return FCortexCommandRouter::Success(FCortexAnimMutationUtils::MakeMutationResponse(Resolved, TEXT("remove_notify"), MakeShared<FJsonObject>(), true, bDirtyBefore, Sequence->GetPackage()->IsDirty(), bSave, SavedPackages, Before, MissingObjectNotifyJson(), Sequence));
+	return FCortexCommandRouter::Success(FCortexAnimMutationUtils::MakeMutationResponse(Resolved, TEXT("remove_notify"), CanonicalSelector, true, bDirtyBefore, Sequence->GetPackage()->IsDirty(), bSave, SavedPackages, Before, MissingObjectNotifyJson(), Sequence));
 }

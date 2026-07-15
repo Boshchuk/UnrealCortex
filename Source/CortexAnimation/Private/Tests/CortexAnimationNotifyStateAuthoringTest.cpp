@@ -85,6 +85,8 @@ bool FCortexAnimationNotifyStateAddTest::RunTest(const FString& Parameters)
 	if (Result.bSuccess && Result.Data.IsValid())
 	{
 		const TSharedPtr<FJsonObject> After = Result.Data->GetObjectField(TEXT("after"));
+		const TSharedPtr<FJsonObject> Selector = Result.Data->GetObjectField(TEXT("selector"));
+		TestEqual(TEXT("state selector uses the state class path"), Selector->GetStringField(TEXT("class_path")), FString(TEXT("/Script/Engine.AnimNotifyState_TimedParticleEffect")));
 		TestEqual(TEXT("canonical duration"), After->GetNumberField(TEXT("duration")), 0.25);
 		TestTrue(TEXT("canonical end link path is present"), After->HasField(TEXT("end_link_asset_path")));
 		TestTrue(TEXT("canonical end link time is present"), After->HasField(TEXT("end_link_time")));
@@ -135,12 +137,21 @@ bool FCortexAnimationNotifyStateUpdateRemoveTest::RunTest(const FString& Paramet
 		FCortexCommandResult NoOp = Router.Execute(TEXT("anim.update_notify_state"), NoOpParams);
 		TestTrue(TEXT("explicit exact state no-op succeeds"), NoOp.bSuccess);
 		TestFalse(TEXT("explicit exact state no-op reports unchanged"), NoOp.Data.IsValid() && NoOp.Data->GetBoolField(TEXT("changed")));
+		TSharedPtr<FJsonObject> PreciseUpdateParams = MakeShared<FJsonObject>();
+		PreciseUpdateParams->SetStringField(TEXT("asset_path"), AssetPath);
+		PreciseUpdateParams->SetObjectField(TEXT("selector"), Update.Data->GetObjectField(TEXT("selector")));
+		PreciseUpdateParams->SetNumberField(TEXT("new_duration"), 0.30005);
+		PreciseUpdateParams->SetObjectField(TEXT("expected_fingerprint"), MakeObjectAssetFingerprint(Sequence).ToJson());
+		FCortexCommandResult PreciseUpdate = Router.Execute(TEXT("anim.update_notify_state"), PreciseUpdateParams);
+		TestTrue(TEXT("sub-millisecond state duration update succeeds"), PreciseUpdate.bSuccess);
+		TestTrue(TEXT("sub-millisecond state duration update reports changed"), PreciseUpdate.Data.IsValid() && PreciseUpdate.Data->GetBoolField(TEXT("changed")));
 		TSharedPtr<FJsonObject> RemoveParams = MakeShared<FJsonObject>();
 		RemoveParams->SetStringField(TEXT("asset_path"), AssetPath);
-		RemoveParams->SetObjectField(TEXT("selector"), Update.Data->GetObjectField(TEXT("selector")));
+		RemoveParams->SetObjectField(TEXT("selector"), PreciseUpdate.Data->GetObjectField(TEXT("selector")));
 		RemoveParams->SetObjectField(TEXT("expected_fingerprint"), MakeObjectAssetFingerprint(Sequence).ToJson());
 		FCortexCommandResult Remove = Router.Execute(TEXT("anim.remove_notify_state"), RemoveParams);
 		TestTrue(TEXT("state remove succeeds"), Remove.bSuccess);
+		TestTrue(TEXT("state remove preserves its canonical selector"), Remove.Data.IsValid() && Remove.Data->HasField(TEXT("selector")) && Remove.Data->GetObjectField(TEXT("selector"))->HasField(TEXT("class_path")));
 		TestEqual(TEXT("state remove leaves no events"), Sequence->Notifies.Num(), 0);
 	}
 	Sequence->ClearFlags(RF_Public | RF_Standalone);

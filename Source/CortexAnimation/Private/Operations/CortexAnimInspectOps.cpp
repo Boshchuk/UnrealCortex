@@ -3,6 +3,7 @@
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimCurveTypes.h"
 #include "Animation/AnimMontage.h"
+#include "Animation/AnimNotifies/AnimNotifyState.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimData/IAnimationDataModel.h"
 #include "AnimationStateMachineGraph.h"
@@ -217,8 +218,21 @@ FCortexCommandResult FCortexAnimInspectOps::GetSequenceInfo(const TSharedPtr<FJs
 		Item->SetStringField(TEXT("name"), Notify.NotifyName.ToString());
 		Item->SetNumberField(TEXT("time"), Notify.GetTime());
 		Item->SetNumberField(TEXT("duration"), Notify.GetDuration());
+		const bool bIsState = Notify.NotifyStateClass != nullptr;
+		Item->SetStringField(TEXT("kind"), bIsState ? TEXT("state") : TEXT("object"));
+		Item->SetStringField(TEXT("class_path"), Notify.Notify != nullptr
+			? Notify.Notify->GetClass()->GetPathName()
+			: (bIsState ? Notify.NotifyStateClass->GetClass()->GetPathName() : FString()));
 		Item->SetStringField(TEXT("notify_class"), Notify.Notify != nullptr ? Notify.Notify->GetClass()->GetPathName() : FString());
 		Item->SetStringField(TEXT("notify_object"), ObjectPathOf(Notify.Notify));
+		Item->SetNumberField(TEXT("trigger_weight_threshold"), Notify.TriggerWeightThreshold);
+		Item->SetNumberField(TEXT("trigger_time_offset"), Notify.TriggerTimeOffset);
+		Item->SetNumberField(TEXT("end_trigger_time_offset"), Notify.EndTriggerTimeOffset);
+		if (bIsState)
+		{
+			Item->SetStringField(TEXT("end_link_asset_path"), ObjectPathOf(Notify.EndLink.GetLinkedSequence()));
+			Item->SetNumberField(TEXT("end_link_time"), Notify.EndLink.GetTime());
+		}
 		Notifies.Add(MakeShared<FJsonValueObject>(Item));
 	}
 	Data->SetObjectField(TEXT("notifies"), FCortexAnimAssetUtils::MakeLimitedArray(Notifies, FCortexAnimAssetUtils::ReadLimit(Params, TEXT("notify_limit"), 50, 200)));
