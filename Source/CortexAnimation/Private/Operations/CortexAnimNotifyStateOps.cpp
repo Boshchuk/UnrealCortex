@@ -197,7 +197,8 @@ FCortexCommandResult FCortexAnimNotifyStateOps::Update(const TSharedPtr<FJsonObj
 	if (FinalStart < 0.0 || FinalDuration < 0.0 || FinalStart + FinalDuration > Sequence->GetPlayLength()) return MakeStateError(TEXT("final start time and duration must remain within the AnimSequence range"), TEXT("new_duration"));
 	const bool bDirtyBefore = Sequence->GetPackage()->IsDirty();
 	const TSharedPtr<FJsonObject> Before = StateNotifyToJson(Sequence->Notifies[Index], Index);
-	if (FMath::IsNearlyEqual(FinalStart, Sequence->Notifies[Index].GetTime()) && FMath::IsNearlyEqual(FinalDuration, Sequence->Notifies[Index].GetDuration()))
+	if (FMath::IsNearlyEqual(FinalStart, static_cast<double>(Sequence->Notifies[Index].GetTime()), 0.0001)
+		&& FMath::IsNearlyEqual(FinalDuration, static_cast<double>(Sequence->Notifies[Index].GetDuration()), 0.0001))
 		return FCortexCommandRouter::Success(FCortexAnimMutationUtils::MakeMutationResponse(Resolved, TEXT("update_notify_state"), MakeStateSelectorJson(Sequence->Notifies[Index], Index), false, bDirtyBefore, bDirtyBefore, false, {}, Before, Before, Sequence));
 	if (bDryRun)
 	{
