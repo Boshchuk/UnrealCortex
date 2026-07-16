@@ -35,5 +35,14 @@ public class CortexStateTree : ModuleRules
 			PrivateDependencyModuleNames.Add("MessageLog");
 			PrivateDependencyModuleNames.Add("StructUtils");
 		}
+
+		// UE 5.6+: StateTree binding descriptors (FStateTreeBindableStructDesc, used by
+		// FStateTreeCompilerLogMessage) now derive from FPropertyBindingBindableStructDescriptor,
+		// whose dllimport destructor lives in the PropertyBindingUtils module. Without this the
+		// destructor symbol is unresolved at link time. The type/module does not exist pre-5.6.
+		if (Target.Version.MajorVersion == 5 && Target.Version.MinorVersion >= 6)
+		{
+			PrivateDependencyModuleNames.Add("PropertyBindingUtils");
+		}
 	}
 }
