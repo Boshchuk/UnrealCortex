@@ -8,6 +8,7 @@
 #include "Misc/App.h"
 #include "Misc/Base64.h"
 #include "Misc/DefaultValueHelper.h"
+#include "Misc/EngineVersionComparison.h"
 #include "PythonScriptTypes.h"
 #include "Editor.h"
 #include "Engine/World.h"
@@ -524,10 +525,17 @@ FCortexCommandResult FCortexEditorUtilityOps::ListCVars(const TSharedPtr<FJsonOb
 	FConsoleObjectVisitor Visitor = FConsoleObjectVisitor::CreateLambda(
 		[&Matches, &TotalMatched](const TCHAR* Name, IConsoleObject* Object)
 		{
-			if (Object == nullptr || Object->IsShadowObject())
+			if (Object == nullptr)
 			{
 				return;
 			}
+#if !UE_VERSION_OLDER_THAN(5, 5, 0)
+			// IsShadowObject (preview-platform CVar shadows) does not exist before UE 5.5.
+			if (Object->IsShadowObject())
+			{
+				return;
+			}
+#endif
 
 			++TotalMatched;
 			const FString ObjectName(Name);
