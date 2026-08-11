@@ -160,6 +160,8 @@ FCortexCommandRouter::~FCortexCommandRouter()
 // FCortexBatchScope implementation
 TSet<TWeakObjectPtr<UMaterial>> FCortexBatchScope::DirtyMaterials;
 TMap<FString, FCortexBatchScope::FBatchCleanupCallback> FCortexBatchScope::CleanupActions;
+TArray<FCortexBatchRollbackEntry> FCortexBatchScope::RollbackEntries;
+bool FCortexBatchScope::bRollbackExecuted = false;
 
 FCortexBatchScope::FCortexBatchScope()
 {
@@ -172,6 +174,12 @@ FCortexBatchScope::~FCortexBatchScope()
 
 	if (FCortexCommandRouter::BatchDepth == 0)
 	{
+		if (!bRollbackExecuted)
+		{
+			RollbackEntries.Empty();
+		}
+		bRollbackExecuted = false;
+
 		// Invoke generic cleanup actions (MoveTemp for re-entrancy safety:
 		// callbacks like NotifyGraphChanged may trigger delegates that call AddCleanupAction)
 		TMap<FString, FBatchCleanupCallback> PendingActions = MoveTemp(CleanupActions);
@@ -217,6 +225,63 @@ void FCortexBatchScope::AddCleanupAction(const FString& Key, FBatchCleanupCallba
 	{
 		CleanupActions.Add(Key, MoveTemp(Callback));
 	}
+}
+
+void FCortexBatchScope::RegisterRollbackEntry(
+	const FString& Kind,
+	const FString& NodeId,
+	const FString& Description,
+	TFunction<bool()> Rollback,
+	TFunction<bool()> Verify,
+	TWeakObjectPtr<UPackage> Package)
+{
+	if (!FCortexCommandRouter::IsInBatch() || bRollbackExecuted)
+	{
+		return;
+	}
+	RollbackEntries.Add({ Kind, NodeId, Description, MoveTemp(Rollback), MoveTemp(Verify), Package });
+}
+
+FCortexBatchRollbackResult FCortexBatchScope::ExecuteRollback()
+{
+	bRollbackExecuted = true;
+	FCortexBatchRollbackResult Result;
+	TSet<UPackage*> VerifiedPackages;
+	for (int32 Index = RollbackEntries.Num() - 1; Index >= 0; --Index)
+	{
+		FCortexBatchRollbackEntry& Entry = RollbackEntries[Index];
+		const bool bRollbackSucceeded = Entry.Rollback();
+		const bool bVerified = bRollbackSucceeded && Entry.Verify();
+		if (Entry.Kind == TEXT("add_node") && bRollbackSucceeded)
+		{
+			Result.CreatedNodeIds.Add(Entry.NodeId);
+		}
+		if (bVerified && Entry.Package.IsValid())
+		{
+			VerifiedPackages.Add(Entry.Package.Get());
+		}
+		if (!bVerified)
+		{
+			Result.bVerified = false;
+			Result.ResidualChanges.Add(Entry.Description);
+		}
+	}
+	// A fully verified rollback restored the graph to its prior state, so clear the dirty flag on
+	// every affected package; a subsequent save must not persist a no-op mutation.
+	if (Result.bVerified)
+	{
+		for (UPackage* Package : VerifiedPackages)
+		{
+			Package->SetDirtyFlag(false);
+		}
+	}
+	RollbackEntries.Empty();
+	return Result;
+}
+
+void FCortexBatchScope::DiscardRollbackEntries()
+{
+	RollbackEntries.Empty();
 }
 
 FCortexCommandResult FCortexCommandRouter::Execute(
@@ -745,6 +810,13 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 		return Error(CortexErrorCodes::InvalidField, TEXT("Missing required param: commands or steps (array)"));
 	}
 
+	if (CommandsArray->Num() == 0)
+	{
+		return Error(
+			CortexErrorCodes::InvalidInvocationShape,
+			TEXT("batch_query requires at least one command; zero-command batches are never successful"));
+	}
+
 	if (CommandsArray->Num() > MaxBatchSize)
 	{
 		return Error(
@@ -756,6 +828,10 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 	// Read stop_on_error parameter (default false)
 	bool bStopOnError = false;
 	Params->TryGetBoolField(TEXT("stop_on_error"), bStopOnError);
+	bool bRollbackOnError = false;
+	Params->TryGetBoolField(TEXT("rollback_on_error"), bRollbackOnError);
+	bool bVerifyRollback = bRollbackOnError;
+	Params->TryGetBoolField(TEXT("verify_rollback"), bVerifyRollback);
 
 	const double BatchStartTime = FPlatformTime::Seconds();
 
@@ -768,6 +844,7 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 	FCortexBatchScope BatchScope;
 
 	TArray<TSharedPtr<FJsonValue>> ResultsArray;
+	bool bDirtyEditorState = false;
 
 	for (int32 Index = 0; Index < CommandsArray->Num(); ++Index)
 	{
@@ -795,6 +872,21 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 		FString SubCommand;
 		(*CmdObj)->TryGetStringField(TEXT("command"), SubCommand);
 		EntryResult->SetStringField(TEXT("command"), SubCommand);
+
+		// Block compile/save steps after an unverified rollback left the editor dirty.
+		const bool bIsCompileOrSave = SubCommand == TEXT("compile") || SubCommand == TEXT("save")
+			|| SubCommand == TEXT("save_asset") || SubCommand.EndsWith(TEXT(".compile"))
+			|| SubCommand.EndsWith(TEXT(".save_asset")) || SubCommand.EndsWith(TEXT(".save"));
+		if (bDirtyEditorState && bIsCompileOrSave)
+		{
+			EntryResult->SetBoolField(TEXT("success"), false);
+			EntryResult->SetStringField(TEXT("error_code"), CortexErrorCodes::DirtyEditorState);
+			EntryResult->SetStringField(TEXT("error_message"),
+				TEXT("Rollback could not be verified; compile/save is prohibited in the same batch"));
+			EntryResult->SetNumberField(TEXT("timing_ms"), 0.0);
+			ResultsArray.Add(MakeShared<FJsonValueObject>(EntryResult));
+			continue;
+		}
 
 		// Block nested batch
 		if (SubCommand == TEXT("batch") || SubCommand == TEXT("batch_query"))
@@ -875,11 +967,100 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 		// Stop on error if requested and step failed
 		if (bStopOnError && !SubResult.bSuccess)
 		{
+			if (bRollbackOnError)
+			{
+				const FCortexBatchRollbackResult RollbackResult = FCortexBatchScope::ExecuteRollback();
+				const bool bVerified = bVerifyRollback ? RollbackResult.bVerified : false;
+				if (!bVerified)
+				{
+					bDirtyEditorState = true;
+				}
+				Transaction.Cancel();
+
+				TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+				TSharedPtr<FJsonObject> RollbackObj = MakeShared<FJsonObject>();
+				RollbackObj->SetBoolField(TEXT("attempted"), true);
+				RollbackObj->SetBoolField(TEXT("verified"), bVerified);
+				Details->SetObjectField(TEXT("rollback"), RollbackObj);
+				TArray<TSharedPtr<FJsonValue>> CreatedIds;
+				for (const FString& NodeId : RollbackResult.CreatedNodeIds)
+				{
+					CreatedIds.Add(MakeShared<FJsonValueString>(NodeId));
+				}
+				Details->SetArrayField(TEXT("created_node_ids"), CreatedIds);
+				TArray<TSharedPtr<FJsonValue>> Residual;
+				for (const FString& Change : RollbackResult.ResidualChanges)
+				{
+					Residual.Add(MakeShared<FJsonValueString>(Change));
+				}
+				Details->SetArrayField(TEXT("residual_changes"), Residual);
+				Details->SetArrayField(TEXT("results"), ResultsArray);
+
+				return Error(
+					bVerified ? SubResult.ErrorCode : CortexErrorCodes::DirtyEditorState,
+					bVerified
+						? FString::Printf(TEXT("Batch failed at step %d; rollback completed and verified"), Index)
+						: TEXT("Batch failed and rollback could not be verified; the editor may be in a dirty state"),
+					Details);
+			}
 			break;
 		}
 	}
 
 	const double BatchElapsed = (FPlatformTime::Seconds() - BatchStartTime) * 1000.0;
+
+	bool bSawFailure = false;
+	FString FirstFailureCode;
+	for (const TSharedPtr<FJsonValue>& Value : ResultsArray)
+	{
+		const TSharedPtr<FJsonObject>* Entry = nullptr;
+		if (Value.IsValid() && Value->TryGetObject(Entry) && Entry != nullptr)
+		{
+			bool bOk = true;
+			if ((*Entry)->TryGetBoolField(TEXT("success"), bOk) && !bOk && !bSawFailure)
+			{
+				bSawFailure = true;
+				(*Entry)->TryGetStringField(TEXT("error_code"), FirstFailureCode);
+			}
+		}
+	}
+
+	if (bRollbackOnError && bSawFailure)
+	{
+		const FCortexBatchRollbackResult RollbackResult = FCortexBatchScope::ExecuteRollback();
+		const bool bVerified = bVerifyRollback ? RollbackResult.bVerified : false;
+		if (!bVerified)
+		{
+			bDirtyEditorState = true;
+		}
+		Transaction.Cancel();
+
+		TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+		TSharedPtr<FJsonObject> RollbackObj = MakeShared<FJsonObject>();
+		RollbackObj->SetBoolField(TEXT("attempted"), true);
+		RollbackObj->SetBoolField(TEXT("verified"), bVerified);
+		Details->SetObjectField(TEXT("rollback"), RollbackObj);
+		TArray<TSharedPtr<FJsonValue>> CreatedIds;
+		for (const FString& NodeId : RollbackResult.CreatedNodeIds)
+		{
+			CreatedIds.Add(MakeShared<FJsonValueString>(NodeId));
+		}
+		Details->SetArrayField(TEXT("created_node_ids"), CreatedIds);
+		TArray<TSharedPtr<FJsonValue>> Residual;
+		for (const FString& Change : RollbackResult.ResidualChanges)
+		{
+			Residual.Add(MakeShared<FJsonValueString>(Change));
+		}
+		Details->SetArrayField(TEXT("residual_changes"), Residual);
+		Details->SetArrayField(TEXT("results"), ResultsArray);
+
+		return Error(
+			bVerified ? FirstFailureCode : CortexErrorCodes::DirtyEditorState,
+			bVerified
+				? TEXT("Batch failed; rollback completed and verified")
+				: TEXT("Batch failed and rollback could not be verified; the editor may be in a dirty state"),
+			Details);
+	}
 
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetArrayField(TEXT("results"), ResultsArray);

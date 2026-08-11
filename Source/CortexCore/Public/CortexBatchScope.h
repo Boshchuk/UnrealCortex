@@ -2,8 +2,36 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Templates/Function.h"
+#include "UObject/Package.h"
 
 class UMaterial;
+
+/**
+ * One reversible mutation recorded while executing a batch.
+ * Registered by domain operations (graph add_node/connect) via FCortexBatchScope
+ * so a failing batch can undo every mutation it created, in reverse order.
+ */
+struct CORTEXCORE_API FCortexBatchRollbackEntry
+{
+	FString Kind;
+	FString NodeId;
+	FString Description;
+	TFunction<bool()> Rollback;
+	TFunction<bool()> Verify;
+	// Package affected by this entry; verified rollback clears its dirty flag so a "successful"
+	// rollback never leaves the asset marked modified when the graph is back to its prior state.
+	TWeakObjectPtr<UPackage> Package;
+};
+
+/** Result of executing the rollback journal for a failing batch. */
+struct CORTEXCORE_API FCortexBatchRollbackResult
+{
+	bool bAttempted = true;
+	bool bVerified = true;
+	TArray<FString> CreatedNodeIds;
+	TArray<FString> ResidualChanges;
+};
 
 /**
  * RAII guard for batch execution.
@@ -33,10 +61,38 @@ public:
 	 */
 	static void AddCleanupAction(const FString& Key, FBatchCleanupCallback Callback);
 
+	/**
+	 * Register a reversible mutation (e.g. a node or connection created by the batch).
+	 * Only recorded while inside a batch and before rollback has executed.
+	 */
+	static void RegisterRollbackEntry(
+		const FString& Kind,
+		const FString& NodeId,
+		const FString& Description,
+		TFunction<bool()> Rollback,
+		TFunction<bool()> Verify,
+		TWeakObjectPtr<UPackage> Package = nullptr);
+
+	/**
+	 * Execute the rollback journal in reverse registration order.
+	 * Returns whether every mutation was reverted and verified; on full verification the
+	 * affected packages' dirty flags are cleared so a later save cannot persist a no-op.
+	 */
+	static FCortexBatchRollbackResult ExecuteRollback();
+
+	/** Discard recorded rollback entries without executing them. */
+	static void DiscardRollbackEntries();
+
 private:
 	/** Materials that need PostEditChange when batch ends. */
 	static TSet<TWeakObjectPtr<UMaterial>> DirtyMaterials;
 
 	/** Generic cleanup actions keyed for deduplication. */
 	static TMap<FString, FBatchCleanupCallback> CleanupActions;
+
+	/** Reverse-order rollback journal for the current batch. */
+	static TArray<FCortexBatchRollbackEntry> RollbackEntries;
+
+	/** True once rollback has executed for the current outermost batch. */
+	static bool bRollbackExecuted;
 };

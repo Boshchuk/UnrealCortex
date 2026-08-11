@@ -1061,6 +1061,41 @@ FCortexCommandResult FCortexGraphNodeOps::AddNode(const TSharedPtr<FJsonObject>&
 		CompositeNewNode->AllocateDefaultPins();
 	}
 
+	// Record the mutation for failure-atomic batch rollback: a failing batch removes every
+	// node it created (reverse journal order) and verifies the graph is back to its prior state.
+	if (FCortexCommandRouter::IsInBatch())
+	{
+		FCortexBatchScope::RegisterRollbackEntry(
+			TEXT("add_node"),
+			NewNode->GetName(),
+			FString::Printf(TEXT("add_node %s"), *NodeClassName),
+			[Graph, NewNode]() -> bool
+			{
+				if (NewNode == nullptr || Graph == nullptr)
+				{
+					return false;
+				}
+				Graph->RemoveNode(NewNode);
+				return true;
+			},
+			[Graph, NodeId = NewNode->GetName()]() -> bool
+			{
+				if (Graph == nullptr)
+				{
+					return false;
+				}
+				for (UEdGraphNode* Node : Graph->Nodes)
+				{
+					if (Node != nullptr && Node->GetName() == NodeId)
+					{
+						return false;
+					}
+				}
+				return true;
+			},
+			Cast<UPackage>(Graph->GetOutermost()));
+	}
+
 	Graph->NotifyGraphChanged();
 	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
 

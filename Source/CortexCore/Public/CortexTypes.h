@@ -30,6 +30,8 @@ namespace CortexErrorCodes
 	static const FString BatchLimitExceeded = TEXT("BATCH_LIMIT_EXCEEDED");
 	static const FString BatchRecursionBlocked = TEXT("BATCH_RECURSION_BLOCKED");
 	static const FString BatchRefResolutionFailed = TEXT("BATCH_REF_RESOLUTION_FAILED");
+	static const FString InvalidInvocationShape = TEXT("INVALID_INVOCATION_SHAPE");
+	static const FString DirtyEditorState = TEXT("DIRTY_EDITOR_STATE");
 	static const FString StalePrecondition = TEXT("STALE_PRECONDITION");
 	static const FString GraphNotFound = TEXT("GRAPH_NOT_FOUND");
 	static const FString SubgraphNotFound = TEXT("SUBGRAPH_NOT_FOUND");

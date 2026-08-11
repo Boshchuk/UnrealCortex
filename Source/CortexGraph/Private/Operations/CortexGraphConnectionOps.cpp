@@ -1,5 +1,6 @@
 #include "Operations/CortexGraphConnectionOps.h"
 #include "Operations/CortexGraphNodeOps.h"
+#include "CortexBatchScope.h"
 #include "CortexEditorUtils.h"
 #include "CortexGraphModule.h"
 #include "Engine/Blueprint.h"
@@ -201,12 +202,38 @@ FCortexCommandResult FCortexGraphConnectionOps::Connect(const TSharedPtr<FJsonOb
 	{
 		SourcePin->MakeLinkTo(TargetPin);
 	}
+	const bool bConnected = true;
+
+	// Record the mutation for failure-atomic batch rollback: a failing batch breaks every
+	// connection it created (reverse journal order) and verifies the link is gone.
+	if (FCortexCommandRouter::IsInBatch() && bConnected)
+	{
+		FCortexBatchScope::RegisterRollbackEntry(
+			TEXT("connect"),
+			TEXT(""),
+			FString::Printf(TEXT("connect %s -> %s"), *SourcePin->PinName.ToString(), *TargetPin->PinName.ToString()),
+			[SourcePin, TargetPin]() -> bool
+			{
+				if (SourcePin == nullptr || TargetPin == nullptr)
+				{
+					return false;
+				}
+				SourcePin->BreakLinkTo(TargetPin);
+				return true;
+			},
+			[SourcePin, TargetPin]() -> bool
+			{
+				return SourcePin != nullptr && TargetPin != nullptr
+					&& !SourcePin->LinkedTo.Contains(TargetPin);
+			},
+			SourcePin ? Cast<UPackage>(SourcePin->GetOwningNode()->GetOutermost()) : nullptr);
+	}
 
 	Graph->NotifyGraphChanged();
 	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
 
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
-	Data->SetBoolField(TEXT("connected"), true);
+	Data->SetBoolField(TEXT("connected"), bConnected);
 	Data->SetStringField(TEXT("source"), FString::Printf(TEXT("%s.%s"), *SourceNodeId, *SourcePinName));
 	Data->SetStringField(TEXT("target"), FString::Printf(TEXT("%s.%s"), *TargetNodeId, *TargetPinName));
 
