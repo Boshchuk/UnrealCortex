@@ -202,11 +202,11 @@ FCortexCommandResult FCortexGraphConnectionOps::Connect(const TSharedPtr<FJsonOb
 	{
 		SourcePin->MakeLinkTo(TargetPin);
 	}
-	const bool bConnected = true;
 
 	// Record the mutation for failure-atomic batch rollback: a failing batch breaks every
 	// connection it created (reverse journal order) and verifies the link is gone.
-	if (FCortexCommandRouter::IsInBatch() && bConnected)
+	// All early-return error paths above already ran, so the link is established here.
+	if (FCortexCommandRouter::IsInBatch())
 	{
 		FCortexBatchScope::RegisterRollbackEntry(
 			TEXT("connect"),

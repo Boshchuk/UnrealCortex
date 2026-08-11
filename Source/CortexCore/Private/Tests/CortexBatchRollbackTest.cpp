@@ -121,5 +121,42 @@ bool FCortexBatchRollbackTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("unverified batch fails"), UnverifiedResult.bSuccess);
 	TestEqual(TEXT("dirty editor state code"), UnverifiedResult.ErrorCode, CortexErrorCodes::DirtyEditorState);
 
+	// Tail-case rollback: stop_on_error=false so all steps run, a later step fails, and the
+	// post-loop scan must still roll back every node created anywhere in the batch.
+	TSharedPtr<FJsonObject> Tail = MakeShared<FJsonObject>();
+	Tail->SetBoolField(TEXT("stop_on_error"), false);
+	Tail->SetBoolField(TEXT("rollback_on_error"), true);
+	Tail->SetBoolField(TEXT("verify_rollback"), true);
+	AddStep(Tail, TEXT("probe.create_node"));
+	AddStep(Tail, TEXT("probe.fail_step"));
+	AddStep(Tail, TEXT("probe.create_node"));
+	FCortexCommandResult TailResult = Router.Execute(TEXT("batch"), Tail);
+	TestFalse(TEXT("tail-case batch with any failure returns failure"), TailResult.bSuccess);
+	if (TailResult.ErrorDetails.IsValid())
+	{
+		const TSharedPtr<FJsonObject>* TailRollback = nullptr;
+		TestTrue(TEXT("tail-case rollback object present"),
+			TailResult.ErrorDetails->TryGetObjectField(TEXT("rollback"), TailRollback) && TailRollback != nullptr);
+		if (TailRollback != nullptr)
+		{
+			TestTrue(TEXT("tail-case rollback attempted"), (*TailRollback)->GetBoolField(TEXT("attempted")));
+			TestTrue(TEXT("tail-case rollback verified"), (*TailRollback)->GetBoolField(TEXT("verified")));
+		}
+		const TArray<TSharedPtr<FJsonValue>>* TailCreated = nullptr;
+		TestTrue(TEXT("tail-case created_node_ids present"),
+			TailResult.ErrorDetails->TryGetArrayField(TEXT("created_node_ids"), TailCreated));
+		if (TailCreated)
+		{
+			TestEqual(TEXT("both created nodes rolled back"), TailCreated->Num(), 2);
+		}
+		const TArray<TSharedPtr<FJsonValue>>* TailResidual = nullptr;
+		TestTrue(TEXT("tail-case residual_changes present"),
+			TailResult.ErrorDetails->TryGetArrayField(TEXT("residual_changes"), TailResidual));
+		if (TailResidual)
+		{
+			TestEqual(TEXT("tail-case no residual changes"), TailResidual->Num(), 0);
+		}
+	}
+
 	return true;
 }

@@ -89,5 +89,7 @@ bool FCortexGraphBatchRollbackTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("post-rollback node count read"), CountNodes(After));
 	TestEqual(TEXT("node count restored to pre-batch value"), After, Before);
 
+	TestBP->MarkAsGarbage();
+	TestPackage->MarkAsGarbage();
 	return true;
 }
