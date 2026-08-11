@@ -31,6 +31,10 @@ FCortexCommandResult FCortexUMGCommandHandler::Execute(
     {
         return FCortexUMGWidgetTreeOps::GetWidget(Params);
     }
+    if (Command == TEXT("set_widget_variable"))
+    {
+        return FCortexUMGWidgetTreeOps::SetWidgetVariable(Params);
+    }
     if (Command == TEXT("list_widget_classes"))
     {
         return FCortexUMGWidgetTreeOps::ListWidgetClasses(Params);
@@ -129,6 +133,11 @@ TArray<FCortexCommandInfo> FCortexUMGCommandHandler::GetSupportedCommands() cons
         FCortexCommandInfo{ TEXT("get_widget"), TEXT("Get single widget details") }
             .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
             .Required(TEXT("widget_name"), TEXT("string"), TEXT("Widget to inspect")),
+        FCortexCommandInfo{ TEXT("set_widget_variable"), TEXT("Set whether a designer widget becomes a Blueprint variable") }
+            .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
+            .Required(TEXT("widget_name"), TEXT("string"), TEXT("Widget to modify"))
+            .Required(TEXT("is_variable"), TEXT("boolean"), TEXT("True makes the widget referenceable from graphs"))
+            .Optional(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Optional stale-write guard")),
         FCortexCommandInfo{ TEXT("list_widget_classes"), TEXT("List available widget classes") }
             .Optional(TEXT("category"), TEXT("string"), TEXT("Widget class category filter")),
         FCortexCommandInfo{ TEXT("duplicate_widget"), TEXT("Duplicate widget and subtree") }

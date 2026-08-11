@@ -1,4 +1,5 @@
 #include "Operations/CortexUMGWidgetTreeOps.h"
+#include "CortexAssetFingerprint.h"
 #include "CortexUMGUtils.h"
 #include "WidgetBlueprint.h"
 #include "Blueprint/UserWidget.h"
@@ -474,6 +475,7 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::GetWidget(const TSharedPtr<FJsonOb
         StaticEnum<ESlateVisibility>()->GetNameStringByValue(
             static_cast<int64>(Widget->GetVisibility())));
     Data->SetBoolField(TEXT("is_enabled"), Widget->GetIsEnabled());
+    Data->SetBoolField(TEXT("is_variable"), Widget->bIsVariable);
 
     TArray<TSharedPtr<FJsonValue>> ChildNames;
     int32 ChildCount = 0;
@@ -737,5 +739,82 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::DuplicateWidget(const TSharedPtr<F
     Data->SetStringField(TEXT("new_root"), NewName);
     Data->SetNumberField(TEXT("widgets_created"), WidgetsCreated);
     Data->SetObjectField(TEXT("name_mapping"), NameMapping);
+    return FCortexCommandRouter::Success(Data);
+}
+
+FCortexCommandResult FCortexUMGWidgetTreeOps::SetWidgetVariable(const TSharedPtr<FJsonObject>& Params)
+{
+    const FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+    const FString WidgetName = Params->GetStringField(TEXT("widget_name"));
+    bool bIsVariable = false;
+    if (!Params->TryGetBoolField(TEXT("is_variable"), bIsVariable))
+    {
+        return FCortexCommandRouter::Error(
+            CortexErrorCodes::InvalidField,
+            TEXT("Missing required param: is_variable (boolean)"));
+    }
+
+    FCortexCommandResult LoadError;
+    UWidgetBlueprint* WBP = CortexUMGUtils::LoadWidgetBlueprint(AssetPath, LoadError);
+    if (!WBP)
+    {
+        return LoadError;
+    }
+
+    UWidget* Widget = CortexUMGUtils::FindWidgetByName(WBP->WidgetTree, WidgetName);
+    if (!Widget)
+    {
+        return FCortexCommandRouter::Error(
+            CortexErrorCodes::WidgetNotFound,
+            FString::Printf(TEXT("Widget not found: %s"), *WidgetName));
+    }
+
+    const FCortexAssetFingerprint CurrentFingerprint = MakePackageNameAssetFingerprint(
+        WBP->GetPackage()->GetName(), WBP->GetPackage()->IsDirty());
+    const TSharedPtr<FJsonObject>* ExpectedFingerprint = nullptr;
+    if (Params->TryGetObjectField(TEXT("expected_fingerprint"), ExpectedFingerprint) && ExpectedFingerprint != nullptr)
+    {
+        const FString CurrentHash = CurrentFingerprint.ToJson()->GetStringField(TEXT("package_saved_hash"));
+        FString ExpectedHash;
+        if (!(*ExpectedFingerprint)->TryGetStringField(TEXT("package_saved_hash"), ExpectedHash) || ExpectedHash != CurrentHash)
+        {
+            TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+            Details->SetObjectField(TEXT("current_fingerprint"), CurrentFingerprint.ToJson());
+            return FCortexCommandRouter::Error(
+                CortexErrorCodes::StalePrecondition,
+                TEXT("Expected fingerprint does not match current widget blueprint fingerprint"),
+                Details);
+        }
+    }
+
+    const bool bWasVariable = Widget->bIsVariable;
+    if (bWasVariable == bIsVariable)
+    {
+        TSharedPtr<FJsonObject> NoOp = MakeShared<FJsonObject>();
+        NoOp->SetStringField(TEXT("asset_path"), AssetPath);
+        NoOp->SetStringField(TEXT("widget_name"), WidgetName);
+        NoOp->SetBoolField(TEXT("was_variable"), bWasVariable);
+        NoOp->SetBoolField(TEXT("is_variable"), bIsVariable);
+        NoOp->SetBoolField(TEXT("changed"), false);
+        NoOp->SetObjectField(TEXT("fingerprint"), CurrentFingerprint.ToJson());
+        return FCortexCommandRouter::Success(NoOp);
+    }
+
+    FScopedTransaction Transaction(FText::FromString(
+        FString::Printf(TEXT("Cortex: Set widget variable %s = %s"), *WidgetName, bIsVariable ? TEXT("true") : TEXT("false"))));
+    WBP->WidgetTree->Modify();
+    Widget->bIsVariable = bIsVariable;
+    FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
+
+    const FCortexAssetFingerprint ResultFingerprint = MakePackageNameAssetFingerprint(
+        WBP->GetPackage()->GetName(), WBP->GetPackage()->IsDirty());
+
+    TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("asset_path"), AssetPath);
+    Data->SetStringField(TEXT("widget_name"), WidgetName);
+    Data->SetBoolField(TEXT("was_variable"), bWasVariable);
+    Data->SetBoolField(TEXT("is_variable"), bIsVariable);
+    Data->SetBoolField(TEXT("changed"), true);
+    Data->SetObjectField(TEXT("fingerprint"), ResultFingerprint.ToJson());
     return FCortexCommandRouter::Success(Data);
 }
