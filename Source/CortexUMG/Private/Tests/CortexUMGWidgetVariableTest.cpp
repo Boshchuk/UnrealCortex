@@ -6,6 +6,7 @@
 #include "Blueprint/WidgetTree.h"
 #include "Components/TextBlock.h"
 #include "Components/CanvasPanel.h"
+#include "Blueprint/UserWidget.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexUMGWidgetVariableTest,
@@ -14,10 +15,13 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexUMGWidgetVariableTest::RunTest(const FString& Parameters)
 {
-	UPackage* TestPackage = CreatePackage(TEXT("/Game/Temp/CortexUMGWidgetVariableTest"));
+	UPackage* TestPackage = CreatePackage(TEXT("/Temp/CortexUMGWidgetVariableTest"));
 	TestPackage->SetPackageFlags(PKG_PlayInEditor);
 
-	UWidgetBlueprint* WBP = NewObject<UWidgetBlueprint>(TestPackage, UWidgetBlueprint::StaticClass(), TEXT("WBP_VariableTest"));
+	UWidgetBlueprint* WBP = NewObject<UWidgetBlueprint>(
+		TestPackage, UWidgetBlueprint::StaticClass(), TEXT("WBP_VariableTest"),
+		RF_Public | RF_Standalone | RF_Transactional);
+	WBP->ParentClass = UUserWidget::StaticClass();
 	WBP->WidgetTree = NewObject<UWidgetTree>(WBP, UWidgetTree::StaticClass(), TEXT("WidgetTree"));
 	UCanvasPanel* RootCanvas = WBP->WidgetTree->ConstructWidget<UCanvasPanel>(UCanvasPanel::StaticClass(), TEXT("Root"));
 	WBP->WidgetTree->RootWidget = RootCanvas;
@@ -49,12 +53,14 @@ bool FCortexUMGWidgetVariableTest::RunTest(const FString& Parameters)
 	SetParams->SetBoolField(TEXT("is_variable"), true);
 	FCortexCommandResult SetResult = Router.Execute(TEXT("umg.set_widget_variable"), SetParams);
 	TestTrue(TEXT("set_widget_variable succeeds"), SetResult.bSuccess);
+	TSharedPtr<FJsonObject> ResultFingerprint;
 	if (SetResult.bSuccess && SetResult.Data.IsValid())
 	{
 		TestFalse(TEXT("was_variable reports false"), SetResult.Data->GetBoolField(TEXT("was_variable")));
 		TestTrue(TEXT("is_variable reports true"), SetResult.Data->GetBoolField(TEXT("is_variable")));
 		TestTrue(TEXT("changed is true"), SetResult.Data->GetBoolField(TEXT("changed")));
 		TestTrue(TEXT("fingerprint present"), SetResult.Data->HasField(TEXT("fingerprint")));
+		ResultFingerprint = SetResult.Data->GetObjectField(TEXT("fingerprint"));
 	}
 	TestTrue(TEXT("widget object mutated"), DesignWidget->bIsVariable);
 
@@ -68,6 +74,23 @@ bool FCortexUMGWidgetVariableTest::RunTest(const FString& Parameters)
 	{
 		TestFalse(TEXT("no-op reports changed false"), Repeat.Data->GetBoolField(TEXT("changed")));
 	}
+
+	// Reverse transition true -> false with a matching expected_fingerprint from the mutation
+	// result: proves the guard PASSES a correct fingerprint AND the reverse path mutates.
+	TSharedPtr<FJsonObject> ReverseParams = MakeShared<FJsonObject>();
+	ReverseParams->SetStringField(TEXT("asset_path"), AssetPath);
+	ReverseParams->SetStringField(TEXT("widget_name"), TEXT("CommonTextBlock_147"));
+	ReverseParams->SetBoolField(TEXT("is_variable"), false);
+	ReverseParams->SetObjectField(TEXT("expected_fingerprint"), ResultFingerprint);
+	FCortexCommandResult Reverse = Router.Execute(TEXT("umg.set_widget_variable"), ReverseParams);
+	TestTrue(TEXT("reverse transition with matching fingerprint succeeds"), Reverse.bSuccess);
+	if (Reverse.bSuccess && Reverse.Data.IsValid())
+	{
+		TestTrue(TEXT("reverse was_variable reports true"), Reverse.Data->GetBoolField(TEXT("was_variable")));
+		TestFalse(TEXT("reverse is_variable reports false"), Reverse.Data->GetBoolField(TEXT("is_variable")));
+		TestTrue(TEXT("reverse changed is true"), Reverse.Data->GetBoolField(TEXT("changed")));
+	}
+	TestFalse(TEXT("widget object mutated back"), DesignWidget->bIsVariable);
 
 	TSharedPtr<FJsonObject> StaleParams = MakeShared<FJsonObject>();
 	StaleParams->SetStringField(TEXT("asset_path"), AssetPath);
