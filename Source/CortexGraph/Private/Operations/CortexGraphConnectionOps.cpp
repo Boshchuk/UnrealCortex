@@ -233,7 +233,7 @@ FCortexCommandResult FCortexGraphConnectionOps::Connect(const TSharedPtr<FJsonOb
 	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
 
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
-	Data->SetBoolField(TEXT("connected"), bConnected);
+	Data->SetBoolField(TEXT("connected"), true);
 	Data->SetStringField(TEXT("source"), FString::Printf(TEXT("%s.%s"), *SourceNodeId, *SourcePinName));
 	Data->SetStringField(TEXT("target"), FString::Printf(TEXT("%s.%s"), *TargetNodeId, *TargetPinName));
 

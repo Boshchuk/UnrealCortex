@@ -18,6 +18,7 @@
 #include "Materials/Material.h"
 #include "MaterialGraph/MaterialGraph.h"
 #include "ScopedTransaction.h"
+#include "UObject/UObjectIterator.h"
 
 int32 FCortexCommandRouter::BatchDepth = 0;
 
@@ -162,6 +163,7 @@ TSet<TWeakObjectPtr<UMaterial>> FCortexBatchScope::DirtyMaterials;
 TMap<FString, FCortexBatchScope::FBatchCleanupCallback> FCortexBatchScope::CleanupActions;
 TArray<FCortexBatchRollbackEntry> FCortexBatchScope::RollbackEntries;
 bool FCortexBatchScope::bRollbackExecuted = false;
+TSet<UPackage*> FCortexBatchScope::PackagesDirtyBeforeBatch;
 
 FCortexBatchScope::FCortexBatchScope()
 {
@@ -179,6 +181,7 @@ FCortexBatchScope::~FCortexBatchScope()
 			RollbackEntries.Empty();
 		}
 		bRollbackExecuted = false;
+		PackagesDirtyBeforeBatch.Reset();
 
 		// Invoke generic cleanup actions (MoveTemp for re-entrancy safety:
 		// callbacks like NotifyGraphChanged may trigger delegates that call AddCleanupAction)
@@ -267,12 +270,16 @@ FCortexBatchRollbackResult FCortexBatchScope::ExecuteRollback()
 		}
 	}
 	// A fully verified rollback restored the graph to its prior state, so clear the dirty flag on
-	// every affected package; a subsequent save must not persist a no-op mutation.
+	// every affected package; a subsequent save must not persist a no-op mutation. Packages that
+	// were already dirty before the batch hold unrelated unsaved edits and are left untouched.
 	if (Result.bVerified)
 	{
 		for (UPackage* Package : VerifiedPackages)
 		{
-			Package->SetDirtyFlag(false);
+			if (!PackagesDirtyBeforeBatch.Contains(Package))
+			{
+				Package->SetDirtyFlag(false);
+			}
 		}
 	}
 	RollbackEntries.Empty();
@@ -282,6 +289,18 @@ FCortexBatchRollbackResult FCortexBatchScope::ExecuteRollback()
 void FCortexBatchScope::DiscardRollbackEntries()
 {
 	RollbackEntries.Empty();
+}
+
+void FCortexBatchScope::CaptureDirtyBaseline()
+{
+	PackagesDirtyBeforeBatch.Reset();
+	for (TObjectIterator<UPackage> It; It; ++It)
+	{
+		if (It->IsDirty())
+		{
+			PackagesDirtyBeforeBatch.Add(*It);
+		}
+	}
 }
 
 FCortexCommandResult FCortexCommandRouter::Execute(
@@ -842,6 +861,7 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 
 	// RAII: sets IsInBatch()=true, defers PostEditChange
 	FCortexBatchScope BatchScope;
+	FCortexBatchScope::CaptureDirtyBaseline();
 
 	TArray<TSharedPtr<FJsonValue>> ResultsArray;
 	bool bDirtyEditorState = false;

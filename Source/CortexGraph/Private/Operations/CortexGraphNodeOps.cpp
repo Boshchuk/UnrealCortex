@@ -260,6 +260,9 @@ TSharedPtr<FJsonObject> AllocateProbePins(
 		return nullptr;
 	}
 	UEdGraph* ProbeGraph = NewObject<UEdGraph>(Blueprint, UEdGraph::StaticClass());
+	// K2 nodes dereference the graph schema during AllocateDefaultPins/ReconstructNode; a null
+	// schema here would crash describe_node when construction params are provided.
+	ProbeGraph->Schema = UEdGraphSchema_K2::StaticClass();
 	UEdGraphNode* ProbeNode = NewObject<UEdGraphNode>(ProbeGraph, NodeClass);
 	FString ApplyError;
 	FCortexGraphNodeContract::ApplyNodeConstructionParams(ProbeGraph, ProbeNode, Blueprint, NodeParams, ApplyError);

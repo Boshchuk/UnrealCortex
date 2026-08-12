@@ -83,6 +83,9 @@ public:
 	/** Discard recorded rollback entries without executing them. */
 	static void DiscardRollbackEntries();
 
+	/** Snapshot the set of packages already dirty at the start of the outermost batch. */
+	static void CaptureDirtyBaseline();
+
 private:
 	/** Materials that need PostEditChange when batch ends. */
 	static TSet<TWeakObjectPtr<UMaterial>> DirtyMaterials;
@@ -95,4 +98,7 @@ private:
 
 	/** True once rollback has executed for the current outermost batch. */
 	static bool bRollbackExecuted;
+
+	/** Packages already dirty before the outermost batch began; a verified rollback must never clear these. */
+	static TSet<UPackage*> PackagesDirtyBeforeBatch;
 };
