@@ -1,6 +1,7 @@
 #include "Operations/CortexAnimSocketOps.h"
 
 #include "Animation/Skeleton.h"
+#include "Engine/SkeletalMeshSocket.h"
 #include "CortexCommandRouter.h"
 #include "Dom/JsonObject.h"
 #include "Operations/CortexAnimAssetUtils.h"
