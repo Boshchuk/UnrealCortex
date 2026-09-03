@@ -1,4 +1,5 @@
 #include "Misc/AutomationTest.h"
+#include "CortexJsonCompat.h"
 #include "HAL/FileManager.h"
 #include "Dom/JsonObject.h"
 #include "Misc/FileHelper.h"
@@ -43,7 +44,7 @@ bool FCortexMcpConfigTranslatorCodexTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("MCP servers object should be valid"), ServersObject != nullptr && ServersObject->IsValid());
 
     TArray<FString> ServerNames;
-    (*ServersObject)->Values.GetKeys(ServerNames);
+    CortexJson::GetFieldNames((*ServersObject), ServerNames);
     ServerNames.Sort();
     TestTrue(TEXT("Project should define at least one MCP server"), ServerNames.Num() > 0);
 
@@ -90,7 +91,7 @@ bool FCortexMcpConfigTranslatorCodexTest::RunTest(const FString& Parameters)
         const TSharedPtr<FJsonObject>* EnvObject = nullptr;
         if ((*ServerObject)->TryGetObjectField(TEXT("env"), EnvObject) && EnvObject != nullptr && (*EnvObject)->Values.Num() > 0)
         {
-            for (const TPair<FString, TSharedPtr<FJsonValue>>& EnvPair : (*EnvObject)->Values)
+            for (const auto& EnvPair : (*EnvObject)->Values)
             {
                 FString EnvValue;
                 if (!EnvPair.Value.IsValid() || !EnvPair.Value->TryGetString(EnvValue))

@@ -1,6 +1,7 @@
 ﻿#include "Operations/CortexSTStateOps.h"
 
 #include "CortexCommandRouter.h"
+#include "CortexJsonCompat.h"
 #include "CortexSTCompat.h"
 #include "CortexSTTypes.h"
 #include "CortexStateTreeModule.h"
@@ -394,9 +395,9 @@ bool ApplyStatePropertiesPatch(
 	const TArray<FString> AllowedFields = GetAllowedStateFields();
 	TSet<FString> AllowedFieldSet(AllowedFields);
 
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Entry : Properties->Values)
+	for (const auto& Entry : Properties->Values)
 	{
-		if (!AllowedFieldSet.Contains(Entry.Key))
+		if (!AllowedFieldSet.Contains(CortexJson::KeyToString(Entry.Key)))
 		{
 			OutError = MakeInvalidFieldError(
 				FString::Printf(TEXT("Unsupported state property: %s"), *Entry.Key),
@@ -405,9 +406,9 @@ bool ApplyStatePropertiesPatch(
 		}
 	}
 
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Entry : Properties->Values)
+	for (const auto& Entry : Properties->Values)
 	{
-		const FString& FieldName = Entry.Key;
+		const FString FieldName = CortexJson::KeyToString(Entry.Key);
 
 		if (FieldName == TEXT("name"))
 		{

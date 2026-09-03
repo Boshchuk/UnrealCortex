@@ -1,4 +1,5 @@
 #include "CoreMinimal.h"
+#include "CortexJsonCompat.h"
 #include "CortexCommandRouter.h"
 #include "CortexDataCommandHandler.h"
 #include "CortexTypes.h"
@@ -210,10 +211,10 @@ namespace
 			}
 
 			Table->GetMutableStringTable()->SetNamespace(TEXT("CortexExportTests"));
-			Table->GetMutableStringTable()->SetSourceString(TEXT("zeta.key"), TEXT("Zeta text"));
-			Table->GetMutableStringTable()->SetSourceString(TEXT("alpha.key"), TEXT("Alpha text"));
-			Table->GetMutableStringTable()->SetSourceString(TEXT("middle.key"), TEXT("Middle text"));
-			Table->GetMutableStringTable()->SetSourceString(TEXT("ignored.other"), TEXT("Ignored text"));
+			Table->GetMutableStringTable()->SetSourceString(TEXT("zeta.key"), TEXT("Zeta text"), FString());
+			Table->GetMutableStringTable()->SetSourceString(TEXT("alpha.key"), TEXT("Alpha text"), FString());
+			Table->GetMutableStringTable()->SetSourceString(TEXT("middle.key"), TEXT("Middle text"), FString());
+			Table->GetMutableStringTable()->SetSourceString(TEXT("ignored.other"), TEXT("Ignored text"), FString());
 			return Table;
 		}
 

@@ -1,4 +1,5 @@
 #include "CortexBPAssetOps.h"
+#include "CortexJsonCompat.h"
 #include "Operations/CortexBPTypeUtils.h"
 #include "CortexAssetFingerprint.h"
 #include "CortexBatchMutation.h"
@@ -665,7 +666,7 @@ namespace
 			return Copy;
 		}
 
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Source->Values)
+		for (const auto& Pair : Source->Values)
 		{
 			Copy->SetField(Pair.Key, Pair.Value);
 		}

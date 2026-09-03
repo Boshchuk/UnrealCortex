@@ -1,4 +1,5 @@
 #include "Operations/CortexDataImportQueueOps.h"
+#include "CortexJsonCompat.h"
 
 #include "CortexSafeFileContract.h"
 #include "CortexTypes.h"
@@ -257,13 +258,14 @@ namespace
 		const TSet<FString>& AllowedFields,
 		FCortexCommandResult& OutError)
 	{
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Params->Values)
+		for (const auto& Pair : Params->Values)
 		{
-			if (!AllowedFields.Contains(Pair.Key))
+			const FString ParamName = CortexJson::KeyToString(Pair.Key);
+			if (!AllowedFields.Contains(ParamName))
 			{
 				OutError = MakeInvalidFieldError(
-					FString::Printf(TEXT("Unknown top-level param: %s"), *Pair.Key),
-					Pair.Key);
+					FString::Printf(TEXT("Unknown top-level param: %s"), *ParamName),
+					ParamName);
 				return false;
 			}
 		}
@@ -566,13 +568,14 @@ namespace
 			}
 		}
 
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Operation.Params->Values)
+		for (const auto& Pair : Operation.Params->Values)
 		{
-			if (!RequiredFields.Contains(Pair.Key) && !OptionalFields.Contains(Pair.Key))
+			const FString ParamName = CortexJson::KeyToString(Pair.Key);
+			if (!RequiredFields.Contains(ParamName) && !OptionalFields.Contains(ParamName))
 			{
 				OutError = MakeInvalidFieldError(
-					FString::Printf(TEXT("Operation %s has unknown param: %s"), *Operation.Id, *Pair.Key),
-					Pair.Key);
+					FString::Printf(TEXT("Operation %s has unknown param: %s"), *Operation.Id, *ParamName),
+					ParamName);
 				return false;
 			}
 		}

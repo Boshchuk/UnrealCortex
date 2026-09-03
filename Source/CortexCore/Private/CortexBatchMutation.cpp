@@ -1,5 +1,6 @@
 #include "CortexBatchMutation.h"
 #include "CortexCommandRouter.h"
+#include "CortexJsonCompat.h"
 
 namespace
 {
@@ -13,9 +14,9 @@ TSharedPtr<FJsonObject> DeepCopyJsonObject(const TSharedPtr<FJsonObject>& Source
 	}
 
 	TSharedPtr<FJsonObject> Copy = MakeShared<FJsonObject>();
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Source->Values)
+	for (const auto& Pair : Source->Values)
 	{
-		Copy->SetField(Pair.Key, DeepCopyJsonValue(Pair.Value));
+		Copy->SetField(CortexJson::KeyToString(Pair.Key), DeepCopyJsonValue(Pair.Value));
 	}
 	return Copy;
 }
@@ -63,11 +64,12 @@ TSharedPtr<FJsonObject> BuildItemParams(
 		return ItemParams;
 	}
 
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Source->Values)
+	for (const auto& Pair : Source->Values)
 	{
-		if (!ExcludedFields.Contains(Pair.Key))
+		const FString FieldName = CortexJson::KeyToString(Pair.Key);
+		if (!ExcludedFields.Contains(FieldName))
 		{
-			ItemParams->SetField(Pair.Key, DeepCopyJsonValue(Pair.Value));
+			ItemParams->SetField(FieldName, DeepCopyJsonValue(Pair.Value));
 		}
 	}
 
@@ -135,7 +137,7 @@ bool JsonValuesMatch(const TSharedPtr<FJsonValue>& Left, const TSharedPtr<FJsonV
 			return false;
 		}
 
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : LeftObject->Values)
+		for (const auto& Pair : LeftObject->Values)
 		{
 			const TSharedPtr<FJsonValue>* RightValue = RightObject->Values.Find(Pair.Key);
 			if (RightValue == nullptr || !JsonValuesMatch(Pair.Value, *RightValue))
@@ -157,8 +159,8 @@ bool JsonFieldMatchesRequired(
 	const TSharedPtr<FJsonObject>& ExpectedFingerprint,
 	const FString& FieldName)
 {
-	const TSharedPtr<FJsonValue>* CurrentValue = CurrentFingerprint->Values.Find(FieldName);
-	const TSharedPtr<FJsonValue>* ExpectedValue = ExpectedFingerprint->Values.Find(FieldName);
+	const TSharedPtr<FJsonValue>* CurrentValue = CortexJson::FindField(CurrentFingerprint, FieldName);
+	const TSharedPtr<FJsonValue>* ExpectedValue = CortexJson::FindField(ExpectedFingerprint, FieldName);
 	if (CurrentValue == nullptr || ExpectedValue == nullptr)
 	{
 		return false;
@@ -401,9 +403,9 @@ bool FCortexBatchMutation::FingerprintsMatch(
 		}
 	}
 
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : ExpectedFingerprint->Values)
+	for (const auto& Pair : ExpectedFingerprint->Values)
 	{
-		if (RequiredFields.Contains(Pair.Key))
+		if (RequiredFields.Contains(CortexJson::KeyToString(Pair.Key)))
 		{
 			continue;
 		}

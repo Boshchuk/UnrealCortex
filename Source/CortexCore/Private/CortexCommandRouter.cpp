@@ -1,5 +1,6 @@
 
 #include "CortexCommandRouter.h"
+#include "CortexJsonCompat.h"
 #include "CortexBatchScope.h"
 #include "CortexCoreModule.h"
 #include "CortexFileUtils.h"
@@ -497,11 +498,11 @@ bool FCortexCommandRouter::ResolveObjectRefs(
 
 	// Iterate over all fields and resolve refs
 	TArray<FString> Keys;
-	Params->Values.GetKeys(Keys);
+	CortexJson::GetFieldNames(Params, Keys);
 
 	for (const FString& Key : Keys)
 	{
-		TSharedPtr<FJsonValue> Value = Params->Values[Key];
+		TSharedPtr<FJsonValue> Value = Params->Values[CortexJson::MakeKey(Key)];
 		if (!ResolveValueRefs(Value, Key, StepResults, CurrentStepIndex, OutError, 0))
 		{
 			return false;

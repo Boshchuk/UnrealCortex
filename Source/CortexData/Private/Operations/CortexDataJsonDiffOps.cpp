@@ -1,4 +1,5 @@
 #include "Operations/CortexDataJsonDiffOps.h"
+#include "CortexJsonCompat.h"
 
 #include "CortexSafeFileContract.h"
 #include "CortexTypes.h"
@@ -255,11 +256,12 @@ namespace
 			return Copy;
 		}
 
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Entry : Source->Values)
+		for (const auto& Entry : Source->Values)
 		{
-			if (!IgnoredFields.Contains(Entry.Key) && Entry.Value.IsValid())
+			const FString FieldName = CortexJson::KeyToString(Entry.Key);
+			if (!IgnoredFields.Contains(FieldName) && Entry.Value.IsValid())
 			{
-				Copy->SetField(Entry.Key, Entry.Value);
+				Copy->SetField(FieldName, Entry.Value);
 			}
 		}
 
@@ -505,11 +507,11 @@ namespace
 		TSet<FString> FieldNames;
 		if (LeftFields.IsValid())
 		{
-			LeftFields->Values.GetKeys(FieldNames);
+			CortexJson::AppendFieldNames(LeftFields, FieldNames);
 		}
 		if (RightFields.IsValid())
 		{
-			RightFields->Values.GetKeys(FieldNames);
+			CortexJson::AppendFieldNames(RightFields, FieldNames);
 		}
 
 		TArray<FString> SortedFields = FieldNames.Array();

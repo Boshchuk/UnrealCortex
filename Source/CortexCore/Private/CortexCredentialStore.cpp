@@ -1,4 +1,5 @@
 #include "CortexCredentialStore.h"
+#include "CortexJsonCompat.h"
 
 #include "CortexCoreModule.h"
 #include "Containers/UnrealString.h"
@@ -174,12 +175,12 @@ bool FCortexCredentialStore::Load()
 		return false;
 	}
 
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Entry : RootObject->Values)
+	for (const auto& Entry : RootObject->Values)
 	{
 		FString LoadedKey;
 		if (Entry.Value.IsValid() && Entry.Value->TryGetString(LoadedKey) && !LoadedKey.IsEmpty())
 		{
-			ApiKeys.Add(NormalizeProviderId(Entry.Key), LoadedKey);
+			ApiKeys.Add(NormalizeProviderId(CortexJson::KeyToString(Entry.Key)), LoadedKey);
 		}
 	}
 

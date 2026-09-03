@@ -1,4 +1,5 @@
 #include "Providers/CortexCodexAppServerProtocol.h"
+#include "CortexJsonCompat.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -136,7 +137,7 @@ namespace
         {
             const TMap<FString, TSharedPtr<FJsonValue>> OverrideValues =
                 FCortexMcpConfigTranslator::BuildCodexConfigOverrideValues(Config.McpConfigPath);
-            for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : OverrideValues)
+            for (const auto& Pair : OverrideValues)
             {
                 if (Pair.Value.IsValid())
                 {
