@@ -35,5 +35,11 @@ public class CortexStateTree : ModuleRules
 			PrivateDependencyModuleNames.Add("MessageLog");
 			PrivateDependencyModuleNames.Add("StructUtils");
 		}
+
+		// UE 5.7 moves property binding support types out of StateTreeEditorModule.
+		if (Target.Version.MajorVersion == 5 && Target.Version.MinorVersion >= 7)
+		{
+			PrivateDependencyModuleNames.Add("PropertyBindingUtils");
+		}
 	}
 }
