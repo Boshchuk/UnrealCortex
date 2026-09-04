@@ -206,15 +206,14 @@ bool FCortexSafeFileContractRejectsSymlinkParentTest::RunTest(const FString& Par
 		AddInfo(FString::Printf(TEXT("Skipping symlink/junction parent test; mklink /J failed with code %d: %s %s"), MklinkExitCode, *StdOut, *StdErr));
 		return true;
 	}
-#else
-	AddInfo(TEXT("Skipping symlink/junction parent test on this platform"));
-	return true;
-#endif
-
 	return ExpectResolveWriteInvalid(
 		*this,
 		TEXT("Symlink/junction parent"),
 		FPaths::Combine(TEXT("Saved"), TEXT("CortexSafeFileContract"), TEXT("LinkedParent"), TEXT("report.json")));
+#else
+	AddInfo(TEXT("Skipping symlink/junction parent test on this platform"));
+	return true;
+#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -254,11 +253,6 @@ bool FCortexSafeFileContractRejectsSymlinkTargetFileTest::RunTest(const FString&
 		AddInfo(FString::Printf(TEXT("Skipping symlink target file test; mklink failed with code %d: %s %s"), MklinkExitCode, *StdOut, *StdErr));
 		return true;
 	}
-#else
-	AddInfo(TEXT("Skipping symlink target file test on this platform"));
-	return true;
-#endif
-
 	ExpectResolveReadFailure(
 		*this,
 		TEXT("Symlink target read path"),
@@ -269,4 +263,8 @@ bool FCortexSafeFileContractRejectsSymlinkTargetFileTest::RunTest(const FString&
 		*this,
 		TEXT("Symlink target write path"),
 		LinkedFile);
+#else
+	AddInfo(TEXT("Skipping symlink target file test on this platform"));
+	return true;
+#endif
 }
