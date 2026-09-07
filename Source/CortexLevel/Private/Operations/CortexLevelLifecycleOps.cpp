@@ -728,7 +728,27 @@ bool FCortexLevelLifecycleOps::IsCurrentLevelDirty()
 
 bool FCortexLevelLifecycleOps::IsValidContentPath(const FString& Path)
 {
-	return Path.StartsWith(TEXT("/Game/")) || Path.StartsWith(TEXT("/Plugins/"));
+	// Plugin content mounts at its own root (/LinearMuseum/...), never under "/Plugins/",
+	// so a prefix test rejected every level living in a plugin. Validate the syntax and
+	// require the mount root to actually be registered instead.
+	if (!FPackageName::IsValidLongPackageName(Path))
+	{
+		return false;
+	}
+
+	// Engine and transient roots are never valid targets for level lifecycle operations.
+	static const TCHAR* const BlockedRoots[] = {
+		TEXT("/Engine/"), TEXT("/Script/"), TEXT("/Temp/"), TEXT("/Memory/")
+	};
+	for (const TCHAR* const BlockedRoot : BlockedRoots)
+	{
+		if (Path.StartsWith(BlockedRoot))
+		{
+			return false;
+		}
+	}
+
+	return !FPackageName::GetPackageMountPoint(Path).IsNone();
 }
 
 bool FCortexLevelLifecycleOps::DoesLevelExist(const FString& ContentPath)

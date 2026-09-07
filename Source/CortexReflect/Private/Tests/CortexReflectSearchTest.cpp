@@ -2,6 +2,11 @@
 #include "CortexReflectCommandHandler.h"
 #include "Operations/CortexReflectOps.h"
 #include "CortexTypes.h"
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Misc/PackageName.h"
+#include "Misc/Paths.h"
+#include "UObject/UObjectIterator.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexReflectMetadataProjectPluginModuleClassificationTest,
@@ -228,6 +233,121 @@ bool FCortexReflectSearchMissingPatternTest::RunTest(const FString& Parameters)
 	FCortexCommandResult Result = Handler.Execute(TEXT("search"), Params);
 
 	TestFalse(TEXT("search without pattern should fail"), Result.bSuccess);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexReflectSearchProjectPluginBlueprintVisibleTest,
+	"Cortex.Reflect.Search.ProjectPluginBlueprintVisible",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexReflectSearchProjectPluginBlueprintVisibleTest::RunTest(const FString& Parameters)
+{
+	// Sibling of ProjectPluginVisible (REFLECT-004), which fixed IsProjectClass for NATIVE
+	// project-plugin classes. Its Blueprint branch kept testing for a "/Game/" prefix, so a
+	// Blueprint living in a project plugin was still classified as non-project and vanished
+	// from results whenever include_engine was false.
+	//
+	// Discovered at runtime rather than hard-coded, so this is portable across projects: any
+	// loaded Blueprint whose package file sits under the project directory but outside
+	// /Game/ is by definition project-plugin content.
+	FString TargetClassName;
+	int32 BlueprintsExamined = 0;
+
+	FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+	FPaths::NormalizeDirectoryName(ProjectDir);
+
+	for (TObjectIterator<UBlueprintGeneratedClass> It; It; ++It)
+	{
+		UBlueprintGeneratedClass* BPGC = *It;
+		if (!BPGC || !BPGC->ClassGeneratedBy)
+		{
+			continue;
+		}
+		++BlueprintsExamined;
+
+		const FString PackageName = BPGC->GetOutermost()->GetName();
+		if (PackageName.StartsWith(TEXT("/Game/")))
+		{
+			continue;	// project content, already covered by the /Game/ path
+		}
+
+		FString Filename;
+		if (!FPackageName::TryConvertLongPackageNameToFilename(PackageName, Filename))
+		{
+			continue;
+		}
+
+		FString AssetDir = FPaths::ConvertRelativePathToFull(FPaths::GetPath(Filename));
+		FPaths::NormalizeDirectoryName(AssetDir);
+		if (FPaths::IsUnderDirectory(AssetDir, ProjectDir))
+		{
+			TargetClassName = BPGC->GetName();
+			break;
+		}
+	}
+
+	// Report the denominator: a skip must be distinguishable from a pass.
+	AddInfo(FString::Printf(
+		TEXT("Examined %d loaded Blueprint classes; project-plugin Blueprint found: %s"),
+		BlueprintsExamined,
+		TargetClassName.IsEmpty() ? TEXT("<none>") : *TargetClassName));
+
+	if (TargetClassName.IsEmpty())
+	{
+		AddInfo(TEXT("No project-plugin Blueprint loaded in this environment - skipping"));
+		return true;
+	}
+
+	// Strip the generated "_C" suffix so the name matches how search reports classes.
+	FString SearchPattern = TargetClassName;
+	SearchPattern.RemoveFromEnd(TEXT("_C"));
+
+	FCortexReflectCommandHandler Handler;
+
+	// Control: it must be findable at all. If not, the pattern is wrong and a null below
+	// would say nothing about IsProjectClass.
+	{
+		TSharedPtr<FJsonObject> VerifyParams = MakeShared<FJsonObject>();
+		VerifyParams->SetStringField(TEXT("pattern"), SearchPattern);
+		VerifyParams->SetBoolField(TEXT("include_engine"), true);
+
+		FCortexCommandResult VerifyResult = Handler.Execute(TEXT("search"), VerifyParams);
+		TestTrue(TEXT("control search should succeed"), VerifyResult.bSuccess);
+
+		int32 VerifyCount = 0;
+		if (VerifyResult.Data.IsValid())
+		{
+			VerifyResult.Data->TryGetNumberField(TEXT("total_results"), VerifyCount);
+		}
+		if (VerifyCount == 0)
+		{
+			AddInfo(FString::Printf(
+				TEXT("Control found 0 results for '%s' - pattern does not match, skipping"),
+				*SearchPattern));
+			return true;
+		}
+	}
+
+	// The actual assertion: still visible with include_engine=false.
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("pattern"), SearchPattern);
+	Params->SetBoolField(TEXT("include_engine"), false);
+
+	FCortexCommandResult Result = Handler.Execute(TEXT("search"), Params);
+	TestTrue(TEXT("search should succeed"), Result.bSuccess);
+
+	int32 TotalResults = 0;
+	if (Result.Data.IsValid())
+	{
+		Result.Data->TryGetNumberField(TEXT("total_results"), TotalResults);
+	}
+	TestTrue(
+		FString::Printf(TEXT("project-plugin Blueprint '%s' must be visible with include_engine=false"),
+			*SearchPattern),
+		TotalResults > 0);
 
 	return true;
 }
