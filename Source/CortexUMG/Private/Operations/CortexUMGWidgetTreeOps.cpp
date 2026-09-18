@@ -1,4 +1,5 @@
 #include "Operations/CortexUMGWidgetTreeOps.h"
+#include "CortexBatchMutation.h"
 #include "CortexAssetFingerprint.h"
 #include "CortexUMGUtils.h"
 #include "WidgetBlueprint.h"
@@ -40,6 +41,7 @@
 #include "UObject/UObjectGlobals.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "UObject/UnrealType.h"
 
 struct FCuratedWidgetEntry
 {
@@ -77,6 +79,54 @@ static const TArray<FCuratedWidgetEntry>& GetCuratedWidgetEntries()
         { TEXT("ComboBoxString"), TEXT("Input"), false, TEXT("Dropdown string selector"), &UComboBoxString::StaticClass },
     };
     return Entries;
+}
+
+static FCortexAssetFingerprint MakeWidgetBlueprintFingerprint(const UWidgetBlueprint* WidgetBlueprint)
+{
+	uint32 WidgetTreeSignature = 0;
+	if (WidgetBlueprint != nullptr && WidgetBlueprint->WidgetTree != nullptr)
+	{
+		TArray<UWidget*> Widgets;
+		WidgetBlueprint->WidgetTree->GetAllWidgets(Widgets);
+		Widgets.Sort([](const UWidget& Left, const UWidget& Right)
+		{
+			return Left.GetName() < Right.GetName();
+		});
+		for (const UWidget* Widget : Widgets)
+		{
+			if (Widget == nullptr)
+			{
+				continue;
+			}
+			WidgetTreeSignature = HashCombineFast(WidgetTreeSignature, GetTypeHash(Widget->GetName()));
+			WidgetTreeSignature = HashCombineFast(WidgetTreeSignature, GetTypeHash(Widget->GetClass()->GetPathName()));
+			WidgetTreeSignature = HashCombineFast(WidgetTreeSignature, GetTypeHash(Widget->bIsVariable));
+			for (TFieldIterator<FProperty> It(Widget->GetClass(), EFieldIterationFlags::IncludeSuper); It; ++It)
+			{
+				const FProperty* Property = *It;
+				if (Property == nullptr
+					|| !Property->HasAnyPropertyFlags(CPF_Edit)
+					|| Property->HasAnyPropertyFlags(CPF_Transient | CPF_DuplicateTransient | CPF_Deprecated))
+				{
+					continue;
+				}
+				FString PropertyValue;
+				Property->ExportTextItem_Direct(
+					PropertyValue,
+					Property->ContainerPtrToValuePtr<void>(Widget),
+					nullptr,
+					const_cast<UWidget*>(Widget),
+					PPF_None);
+				WidgetTreeSignature = HashCombineFast(WidgetTreeSignature, GetTypeHash(Property->GetFName()));
+				WidgetTreeSignature = HashCombineFast(WidgetTreeSignature, GetTypeHash(PropertyValue));
+			}
+		}
+	}
+
+	return MakePackageNameAssetFingerprint(
+		WidgetBlueprint && WidgetBlueprint->GetPackage() ? WidgetBlueprint->GetPackage()->GetName() : FString(),
+		WidgetBlueprint && WidgetBlueprint->GetPackage() && WidgetBlueprint->GetPackage()->IsDirty(),
+		WidgetTreeSignature);
 }
 
 UClass* FCortexUMGWidgetTreeOps::ResolveWidgetClass(const FString& ClassName)
@@ -769,17 +819,15 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::SetWidgetVariable(const TSharedPtr
             FString::Printf(TEXT("Widget not found: %s"), *WidgetName));
     }
 
-    const FCortexAssetFingerprint CurrentFingerprint = MakePackageNameAssetFingerprint(
-        WBP->GetPackage()->GetName(), WBP->GetPackage()->IsDirty());
-    const TSharedPtr<FJsonObject>* ExpectedFingerprint = nullptr;
-    if (Params->TryGetObjectField(TEXT("expected_fingerprint"), ExpectedFingerprint) && ExpectedFingerprint != nullptr)
-    {
-        const FString CurrentHash = CurrentFingerprint.ToJson()->GetStringField(TEXT("package_saved_hash"));
-        FString ExpectedHash;
-        if (!(*ExpectedFingerprint)->TryGetStringField(TEXT("package_saved_hash"), ExpectedHash) || ExpectedHash != CurrentHash)
-        {
-            TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
-            Details->SetObjectField(TEXT("current_fingerprint"), CurrentFingerprint.ToJson());
+	const FCortexAssetFingerprint CurrentFingerprint = MakeWidgetBlueprintFingerprint(WBP);
+	const TSharedPtr<FJsonObject>* ExpectedFingerprint = nullptr;
+	if (Params->TryGetObjectField(TEXT("expected_fingerprint"), ExpectedFingerprint) && ExpectedFingerprint != nullptr)
+	{
+		const TSharedPtr<FJsonObject> CurrentFingerprintJson = CurrentFingerprint.ToJson();
+		if (!FCortexBatchMutation::FingerprintsMatch(CurrentFingerprintJson, *ExpectedFingerprint))
+		{
+			TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+			Details->SetObjectField(TEXT("current_fingerprint"), CurrentFingerprintJson);
             return FCortexCommandRouter::Error(
                 CortexErrorCodes::StalePrecondition,
                 TEXT("Expected fingerprint does not match current widget blueprint fingerprint"),
@@ -802,12 +850,16 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::SetWidgetVariable(const TSharedPtr
 
     FScopedTransaction Transaction(FText::FromString(
         FString::Printf(TEXT("Cortex: Set widget variable %s = %s"), *WidgetName, bIsVariable ? TEXT("true") : TEXT("false"))));
-    WBP->WidgetTree->Modify();
+    // Record the WIDGET (whose bIsVariable bit changes), not the tree: the transactor must be
+    // able to restore the bit on Undo. The Widget Blueprint is structurally marked so the
+    // compiler regenerates the skeleton and exposes the property (matching UE's own toggle
+    // path in SWidgetDetailsView which calls Widget->Modify() and
+    // MarkBlueprintAsStructurallyModified).
+    Widget->Modify();
     Widget->bIsVariable = bIsVariable;
-    FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
 
-    const FCortexAssetFingerprint ResultFingerprint = MakePackageNameAssetFingerprint(
-        WBP->GetPackage()->GetName(), WBP->GetPackage()->IsDirty());
+	const FCortexAssetFingerprint ResultFingerprint = MakeWidgetBlueprintFingerprint(WBP);
 
     TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
     Data->SetStringField(TEXT("asset_path"), AssetPath);

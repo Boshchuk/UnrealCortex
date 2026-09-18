@@ -79,5 +79,61 @@ bool FCortexGraphDescribeNodeTest::RunTest(const FString& Parameters)
 		TestFalse(TEXT("unsupported class fails"), Result.bSuccess);
 	}
 
+	// Contract shape must be type-stable: with construction params the probe path
+	// allocates real pins, and expected_pins must STILL serialize as an array (the
+	// same shape as the no-params contract) — a machine-readable contract cannot
+	// type-switch the same field between array and object.
+	auto DescribeWithParams = [&Router, this](const FString& NodeClass, const TSharedPtr<FJsonObject>& NodeParams) -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("node_class"), NodeClass);
+		Params->SetObjectField(TEXT("params"), NodeParams);
+		FCortexCommandResult Result = Router.Execute(TEXT("graph.describe_node"), Params);
+		TestTrue(TEXT("describe_node with params succeeds"), Result.bSuccess);
+		return Result.bSuccess && Result.Data.IsValid() ? Result.Data : nullptr;
+	};
+
+	{
+		TSharedPtr<FJsonObject> NodeParams = MakeShared<FJsonObject>();
+		NodeParams->SetStringField(TEXT("function_name"), TEXT("KismetSystemLibrary.PrintString"));
+		TSharedPtr<FJsonObject> Contract = DescribeWithParams(TEXT("UK2Node_CallFunction"), NodeParams);
+		TestTrue(TEXT("CallFunction params contract present"), Contract.IsValid());
+		if (Contract.IsValid())
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Pins = nullptr;
+			TestTrue(TEXT("expected_pins stays an array with params"), Contract->TryGetArrayField(TEXT("expected_pins"), Pins) && Pins != nullptr);
+			TestTrue(TEXT("pins_allocated true with params"), Contract->GetBoolField(TEXT("pins_allocated")));
+			if (Pins != nullptr)
+			{
+				TestTrue(TEXT("probe pins contain PrintString inputs"), Pins->Num() > 0);
+			}
+		}
+	}
+
+	{
+		// Invalid construction params must not change the expected_pins shape either.
+		TSharedPtr<FJsonObject> BadParams = MakeShared<FJsonObject>();
+		BadParams->SetStringField(TEXT("function_name"), TEXT("Missing.Owner"));
+		TSharedPtr<FJsonObject> Contract = DescribeWithParams(TEXT("UK2Node_CallFunction"), BadParams);
+		TestTrue(TEXT("invalid-params contract present"), Contract.IsValid());
+		if (Contract.IsValid())
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Pins = nullptr;
+			TestTrue(TEXT("expected_pins stays an array with invalid params"), Contract->TryGetArrayField(TEXT("expected_pins"), Pins) && Pins != nullptr);
+		}
+	}
+
+	{
+		// Empty params object: same stable array shape.
+		TSharedPtr<FJsonObject> EmptyParams = MakeShared<FJsonObject>();
+		TSharedPtr<FJsonObject> Contract = DescribeWithParams(TEXT("UK2Node_IfThenElse"), EmptyParams);
+		TestTrue(TEXT("empty-params contract present"), Contract.IsValid());
+		if (Contract.IsValid())
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Pins = nullptr;
+			TestTrue(TEXT("expected_pins stays an array with empty params"), Contract->TryGetArrayField(TEXT("expected_pins"), Pins) && Pins != nullptr);
+		}
+	}
+
 	return true;
 }

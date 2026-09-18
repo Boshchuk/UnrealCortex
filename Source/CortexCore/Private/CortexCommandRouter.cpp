@@ -164,14 +164,17 @@ TMap<FString, FCortexBatchScope::FBatchCleanupCallback> FCortexBatchScope::Clean
 TArray<FCortexBatchRollbackEntry> FCortexBatchScope::RollbackEntries;
 bool FCortexBatchScope::bRollbackExecuted = false;
 TSet<UPackage*> FCortexBatchScope::PackagesDirtyBeforeBatch;
+bool FCortexBatchScope::bRollbackEnabled = false;
 
 FCortexBatchScope::FCortexBatchScope()
 {
 	FCortexCommandRouter::BatchDepth++;
+	bRollbackEnabledBeforeBatch = bRollbackEnabled;
 }
 
 FCortexBatchScope::~FCortexBatchScope()
 {
+	bRollbackEnabled = bRollbackEnabledBeforeBatch;
 	FCortexCommandRouter::BatchDepth--;
 
 	if (FCortexCommandRouter::BatchDepth == 0)
@@ -259,19 +262,18 @@ FCortexBatchRollbackResult FCortexBatchScope::ExecuteRollback()
 		{
 			Result.CreatedNodeIds.Add(Entry.NodeId);
 		}
-		if (bVerified && Entry.Package.IsValid())
-		{
-			VerifiedPackages.Add(Entry.Package.Get());
-		}
 		if (!bVerified)
 		{
 			Result.bVerified = false;
 			Result.ResidualChanges.Add(Entry.Description);
 		}
+		else if (Entry.Package.IsValid())
+		{
+			VerifiedPackages.Add(Entry.Package.Get());
+		}
 	}
-	// A fully verified rollback restored the graph to its prior state, so clear the dirty flag on
-	// every affected package; a subsequent save must not persist a no-op mutation. Packages that
-	// were already dirty before the batch hold unrelated unsaved edits and are left untouched.
+	// Rollback-enabled batches execute only explicitly rollback-safe reads and journaled mutations,
+	// so a verified rollback can restore the original clean state without hiding unrelated writes.
 	if (Result.bVerified)
 	{
 		for (UPackage* Package : VerifiedPackages)
@@ -291,6 +293,11 @@ void FCortexBatchScope::DiscardRollbackEntries()
 	RollbackEntries.Empty();
 }
 
+bool FCortexBatchScope::IsRollbackEnabled()
+{
+	return bRollbackEnabled;
+}
+
 void FCortexBatchScope::CaptureDirtyBaseline()
 {
 	PackagesDirtyBeforeBatch.Reset();
@@ -301,6 +308,38 @@ void FCortexBatchScope::CaptureDirtyBaseline()
 			PackagesDirtyBeforeBatch.Add(*It);
 		}
 	}
+}
+
+bool FCortexCommandRouter::IsRollbackSafeCommand(const FString& Command) const
+{
+	FString Namespace;
+	FString DomainCommand;
+	if (!Command.Split(TEXT("."), &Namespace, &DomainCommand) || Namespace.IsEmpty() || DomainCommand.IsEmpty())
+	{
+		return false;
+	}
+
+	for (const FCortexRegisteredDomain& Domain : RegisteredDomains)
+	{
+		if (Domain.Namespace != Namespace || !Domain.Handler.IsValid())
+		{
+			continue;
+		}
+		for (const FCortexCommandInfo& Info : Domain.Handler->GetSupportedCommands())
+		{
+			if (Info.Name == DomainCommand)
+			{
+				return Info.bRollbackSafe;
+			}
+		}
+		return false;
+	}
+	return false;
+}
+
+void FCortexBatchScope::SetRollbackEnabled(bool bEnabled)
+{
+	bRollbackEnabled = bEnabled;
 }
 
 FCortexCommandResult FCortexCommandRouter::Execute(
@@ -862,9 +901,10 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 	// RAII: sets IsInBatch()=true, defers PostEditChange
 	FCortexBatchScope BatchScope;
 	FCortexBatchScope::CaptureDirtyBaseline();
+	FCortexBatchScope::SetRollbackEnabled(bRollbackOnError);
 
 	TArray<TSharedPtr<FJsonValue>> ResultsArray;
-	bool bDirtyEditorState = false;
+	bool bSawFailure = false;
 
 	for (int32 Index = 0; Index < CommandsArray->Num(); ++Index)
 	{
@@ -882,6 +922,7 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 			EntryResult->SetStringField(TEXT("error_message"), TEXT("Invalid command entry (not an object)"));
 			EntryResult->SetNumberField(TEXT("timing_ms"), 0.0);
 			ResultsArray.Add(MakeShared<FJsonValueObject>(EntryResult));
+			bSawFailure = true;
 			if (bStopOnError)
 			{
 				break;
@@ -893,18 +934,22 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 		(*CmdObj)->TryGetStringField(TEXT("command"), SubCommand);
 		EntryResult->SetStringField(TEXT("command"), SubCommand);
 
-		// Block compile/save steps after an unverified rollback left the editor dirty.
-		const bool bIsCompileOrSave = SubCommand == TEXT("compile") || SubCommand == TEXT("save")
-			|| SubCommand == TEXT("save_asset") || SubCommand.EndsWith(TEXT(".compile"))
-			|| SubCommand.EndsWith(TEXT(".save_asset")) || SubCommand.EndsWith(TEXT(".save"));
-		if (bDirtyEditorState && bIsCompileOrSave)
+		// Rollback is intentionally graph-scoped. Only commands that explicitly opt into the
+		// contract may run: this prevents hidden compile/save defaults and unjournaled mutations
+		// from escaping an otherwise verified rollback.
+		if (bRollbackOnError && !IsRollbackSafeCommand(SubCommand))
 		{
 			EntryResult->SetBoolField(TEXT("success"), false);
-			EntryResult->SetStringField(TEXT("error_code"), CortexErrorCodes::DirtyEditorState);
+			EntryResult->SetStringField(TEXT("error_code"), CortexErrorCodes::InvalidOperation);
 			EntryResult->SetStringField(TEXT("error_message"),
-				TEXT("Rollback could not be verified; compile/save is prohibited in the same batch"));
+				FString::Printf(TEXT("Command is not safe inside rollback-enabled batches: %s"), *SubCommand));
 			EntryResult->SetNumberField(TEXT("timing_ms"), 0.0);
 			ResultsArray.Add(MakeShared<FJsonValueObject>(EntryResult));
+			bSawFailure = true;
+			if (bStopOnError)
+			{
+				break;
+			}
 			continue;
 		}
 
@@ -916,6 +961,7 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 			EntryResult->SetStringField(TEXT("error_message"), TEXT("Nested batch commands are not allowed"));
 			EntryResult->SetNumberField(TEXT("timing_ms"), 0.0);
 			ResultsArray.Add(MakeShared<FJsonValueObject>(EntryResult));
+			bSawFailure = true;
 			if (bStopOnError)
 			{
 				break;
@@ -947,6 +993,7 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 			EntryResult->SetStringField(TEXT("error_message"), RefError);
 			EntryResult->SetNumberField(TEXT("timing_ms"), 0.0);
 			ResultsArray.Add(MakeShared<FJsonValueObject>(EntryResult));
+			bSawFailure = true;
 			if (bStopOnError)
 			{
 				break;
@@ -980,6 +1027,7 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 		{
 			EntryResult->SetStringField(TEXT("error_code"), SubResult.ErrorCode);
 			EntryResult->SetStringField(TEXT("error_message"), SubResult.ErrorMessage);
+			bSawFailure = true;
 		}
 
 		ResultsArray.Add(MakeShared<FJsonValueObject>(EntryResult));
@@ -991,10 +1039,6 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 			{
 				const FCortexBatchRollbackResult RollbackResult = FCortexBatchScope::ExecuteRollback();
 				const bool bVerified = bVerifyRollback ? RollbackResult.bVerified : false;
-				if (!bVerified)
-				{
-					bDirtyEditorState = true;
-				}
 				Transaction.Cancel();
 
 				TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
@@ -1029,17 +1073,17 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 
 	const double BatchElapsed = (FPlatformTime::Seconds() - BatchStartTime) * 1000.0;
 
-	bool bSawFailure = false;
 	FString FirstFailureCode;
+	bool bFoundFirstFailure = false;
 	for (const TSharedPtr<FJsonValue>& Value : ResultsArray)
 	{
 		const TSharedPtr<FJsonObject>* Entry = nullptr;
 		if (Value.IsValid() && Value->TryGetObject(Entry) && Entry != nullptr)
 		{
 			bool bOk = true;
-			if ((*Entry)->TryGetBoolField(TEXT("success"), bOk) && !bOk && !bSawFailure)
+			if ((*Entry)->TryGetBoolField(TEXT("success"), bOk) && !bOk && !bFoundFirstFailure)
 			{
-				bSawFailure = true;
+				bFoundFirstFailure = true;
 				(*Entry)->TryGetStringField(TEXT("error_code"), FirstFailureCode);
 			}
 		}
@@ -1049,10 +1093,6 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 	{
 		const FCortexBatchRollbackResult RollbackResult = FCortexBatchScope::ExecuteRollback();
 		const bool bVerified = bVerifyRollback ? RollbackResult.bVerified : false;
-		if (!bVerified)
-		{
-			bDirtyEditorState = true;
-		}
 		Transaction.Cancel();
 
 		TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();

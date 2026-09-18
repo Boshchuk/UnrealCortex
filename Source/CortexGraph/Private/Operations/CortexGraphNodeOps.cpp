@@ -1068,30 +1068,82 @@ FCortexCommandResult FCortexGraphNodeOps::AddNode(const TSharedPtr<FJsonObject>&
 	// node it created (reverse journal order) and verifies the graph is back to its prior state.
 	if (FCortexCommandRouter::IsInBatch())
 	{
+		const TWeakObjectPtr<UBlueprint> WeakBlueprint = Blueprint;
+		const FString RootGraphName = GraphName;
+		const FString JournalSubgraphPath = SubgraphPath;
+		const FGuid NodeGuid = NewNode->NodeGuid;
+		const FString NodeId = NewNode->GetName();
+		const UK2Node_Composite* JournalComposite = Cast<UK2Node_Composite>(NewNode);
+		const FString BoundGraphName = JournalComposite && JournalComposite->BoundGraph
+			? JournalComposite->BoundGraph->GetName() : FString();
 		FCortexBatchScope::RegisterRollbackEntry(
 			TEXT("add_node"),
-			NewNode->GetName(),
+			NodeId,
 			FString::Printf(TEXT("add_node %s"), *NodeClassName),
-			[Graph, NewNode]() -> bool
+			[WeakBlueprint, RootGraphName, JournalSubgraphPath, NodeGuid, NodeId]() -> bool
 			{
-				if (NewNode == nullptr || Graph == nullptr)
+				UBlueprint* CurrentBlueprint = WeakBlueprint.Get();
+				if (CurrentBlueprint == nullptr)
 				{
 					return false;
 				}
-				Graph->RemoveNode(NewNode);
+				FCortexCommandResult ResolveError;
+				UEdGraph* CurrentGraph = FCortexGraphNodeOps::FindGraph(CurrentBlueprint, RootGraphName, ResolveError);
+				if (CurrentGraph != nullptr && !JournalSubgraphPath.IsEmpty())
+				{
+					CurrentGraph = FCortexGraphNodeOps::ResolveSubgraph(CurrentGraph, JournalSubgraphPath, ResolveError);
+				}
+				if (CurrentGraph == nullptr)
+				{
+					return false;
+				}
+				UEdGraphNode* CurrentNode = nullptr;
+				for (UEdGraphNode* Candidate : CurrentGraph->Nodes)
+				{
+					if (Candidate != nullptr && (Candidate->NodeGuid == NodeGuid || Candidate->GetName() == NodeId))
+					{
+						CurrentNode = Candidate;
+						break;
+					}
+				}
+				if (CurrentNode != nullptr)
+				{
+					CurrentNode->DestroyNode();
+				}
 				return true;
 			},
-			[Graph, NodeId = NewNode->GetName()]() -> bool
+			[WeakBlueprint, RootGraphName, JournalSubgraphPath, NodeGuid, NodeId, BoundGraphName]() -> bool
 			{
-				if (Graph == nullptr)
+				UBlueprint* CurrentBlueprint = WeakBlueprint.Get();
+				if (CurrentBlueprint == nullptr)
 				{
 					return false;
 				}
-				for (UEdGraphNode* Node : Graph->Nodes)
+				FCortexCommandResult ResolveError;
+				UEdGraph* CurrentGraph = FCortexGraphNodeOps::FindGraph(CurrentBlueprint, RootGraphName, ResolveError);
+				if (CurrentGraph != nullptr && !JournalSubgraphPath.IsEmpty())
 				{
-					if (Node != nullptr && Node->GetName() == NodeId)
+					CurrentGraph = FCortexGraphNodeOps::ResolveSubgraph(CurrentGraph, JournalSubgraphPath, ResolveError);
+				}
+				if (CurrentGraph == nullptr)
+				{
+					return false;
+				}
+				for (UEdGraphNode* Node : CurrentGraph->Nodes)
+				{
+					if (Node != nullptr && (Node->NodeGuid == NodeGuid || Node->GetName() == NodeId))
 					{
 						return false;
+					}
+				}
+				if (!BoundGraphName.IsEmpty())
+				{
+					for (const UEdGraph* SubGraph : CurrentGraph->SubGraphs)
+					{
+						if (SubGraph != nullptr && SubGraph->GetName() == BoundGraphName)
+						{
+							return false;
+						}
 					}
 				}
 				return true;
@@ -1257,14 +1309,26 @@ FCortexCommandResult FCortexGraphNodeOps::DescribeNode(const TSharedPtr<FJsonObj
 		// bare UBlueprint::StaticClass() instance; pins_allocated=false is reported for node types
 		// that still cannot allocate pins without a real graph (e.g. composite/custom events).
 		UBlueprint* ProbeOwner = NewObject<UBlueprint>(GetTransientPackage(), UBlueprint::StaticClass());
+		// Root the probe: it lives in the GC-eligible transient package and is referenced only by
+		// a raw pointer; CompileBlueprint can trigger a GC pass (reinstancing cleanup), which
+		// previously collected it and crashed MakeUniqueObjectName on the dangling outer when the
+		// probe graph was allocated.
+		ProbeOwner->AddToRoot();
 		ProbeOwner->ParentClass = AActor::StaticClass();
 		// Force generated/skeleton class recompile so class-aware pin allocation has valid context.
 		FKismetEditorUtilities::CompileBlueprint(ProbeOwner);
 		if (TSharedPtr<FJsonObject> Pins = AllocateProbePins(ProbeOwner, NodeClassName, *NodeParams))
 		{
-			Data->SetObjectField(TEXT("expected_pins"), Pins);
-			Data->SetBoolField(TEXT("pins_allocated"), true);
+			// expected_pins must keep its stable array shape (the no-params contract serializes an
+			// array); the probe allocator wraps pins in { "pins": [...] }, so flatten it back.
+			const TArray<TSharedPtr<FJsonValue>>* PinArray = nullptr;
+			if (Pins->TryGetArrayField(TEXT("pins"), PinArray) && PinArray != nullptr)
+			{
+				Data->SetArrayField(TEXT("expected_pins"), *PinArray);
+				Data->SetBoolField(TEXT("pins_allocated"), true);
+			}
 		}
+		ProbeOwner->RemoveFromRoot();
 	}
 
 	return FCortexCommandRouter::Success(Data);

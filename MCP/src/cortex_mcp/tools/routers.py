@@ -149,10 +149,21 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
                     return format_response(response.get("data", {}), "get_data_catalog")
                 if command == "batch_query":
                     import json as _json
-                    commands = route_params.get("commands", [])
-                    if isinstance(commands, str):
-                        commands = _json.loads(commands)
-                    response = connection.send_command("batch", {"commands": commands})
+                    # Forward the failure-atomic batch contract unchanged: commands (or the
+                    # steps alias, normalized per the C++ boundary) plus the rollback controls.
+                    batch_payload: dict = {}
+                    if "commands" in route_params:
+                        commands = route_params["commands"]
+                        batch_payload["commands"] = _json.loads(commands) if isinstance(commands, str) else commands
+                    elif "steps" in route_params:
+                        steps = route_params["steps"]
+                        batch_payload["steps"] = _json.loads(steps) if isinstance(steps, str) else steps
+                    else:
+                        batch_payload["commands"] = []
+                    for control in ("stop_on_error", "rollback_on_error", "verify_rollback"):
+                        if control in route_params:
+                            batch_payload[control] = route_params[control]
+                    response = connection.send_command("batch", batch_payload)
                     return format_response(response.get("data", {}), "batch_query")
 
             # Check for cursor (subsequent page — no C++ call needed)

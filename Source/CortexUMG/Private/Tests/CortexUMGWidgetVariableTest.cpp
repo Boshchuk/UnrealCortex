@@ -1,5 +1,6 @@
 #include "Misc/AutomationTest.h"
 #include "CortexCommandRouter.h"
+#include "CortexAssetFingerprint.h"
 #include "CortexUMGCommandHandler.h"
 #include "Dom/JsonObject.h"
 #include "WidgetBlueprint.h"
@@ -7,6 +8,8 @@
 #include "Components/TextBlock.h"
 #include "Components/CanvasPanel.h"
 #include "Blueprint/UserWidget.h"
+#include "Editor.h"
+#include "Editor/Transactor.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexUMGWidgetVariableTest,
@@ -16,7 +19,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCortexUMGWidgetVariableTest::RunTest(const FString& Parameters)
 {
 	UPackage* TestPackage = CreatePackage(TEXT("/Temp/CortexUMGWidgetVariableTest"));
-	TestPackage->SetPackageFlags(PKG_PlayInEditor);
+	// NOTE: no PKG_PlayInEditor here — FTransaction::IsTransient() treats any record
+	// containing a PIE object as transient and pops the whole transaction from the undo
+	// queue, which would make the transaction-capture assertions below impossible.
 
 	UWidgetBlueprint* WBP = NewObject<UWidgetBlueprint>(
 		TestPackage, UWidgetBlueprint::StaticClass(), TEXT("WBP_VariableTest"),
@@ -64,6 +69,26 @@ bool FCortexUMGWidgetVariableTest::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("widget object mutated"), DesignWidget->bIsVariable);
 
+	// The bIsVariable bit must be captured by the transaction through Widget->Modify(),
+	// not lost by recording a different object. Executing editor Undo on a transient
+	// Widget Blueprint can crash UE 5.6 in Kismet post-undo fixup (see
+	// CortexUMGUndoRedoTest), so prove the transaction captures the widget object
+	// through the transactor instead of executing Undo.
+	if (GEditor == nullptr || GEditor->Trans == nullptr || !GEditor->CanTransact())
+	{
+		AddInfo(TEXT("Editor undo system not available - skipping transaction-capture assertions"));
+	}
+	else
+	{
+		const int32 QueueLength = GEditor->Trans->GetQueueLength();
+		const FTransaction* LastTransaction = QueueLength > 0
+			? GEditor->Trans->GetTransaction(QueueLength - 1)
+			: nullptr;
+		TestNotNull(TEXT("set_widget_variable records a transaction"), LastTransaction);
+		TestTrue(TEXT("transaction captures the widget object (Widget->Modify)"),
+			LastTransaction != nullptr && LastTransaction->ContainsObject(DesignWidget));
+	}
+
 	TSharedPtr<FJsonObject> RepeatParams = MakeShared<FJsonObject>();
 	RepeatParams->SetStringField(TEXT("asset_path"), AssetPath);
 	RepeatParams->SetStringField(TEXT("widget_name"), TEXT("CommonTextBlock_147"));
@@ -91,6 +116,47 @@ bool FCortexUMGWidgetVariableTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("reverse changed is true"), Reverse.Data->GetBoolField(TEXT("changed")));
 	}
 	TestFalse(TEXT("widget object mutated back"), DesignWidget->bIsVariable);
+
+	// A saved-hash-only comparison misses unsaved editor changes. A fingerprint captured while the
+	// package is clean must become stale when the same package transitions to dirty, even though its
+	// on-disk hash has not changed.
+	TestPackage->SetDirtyFlag(false);
+	TSharedPtr<FJsonObject> CleanFingerprint = MakePackageNameAssetFingerprint(
+		TestPackage->GetName(), TestPackage->IsDirty()).ToJson();
+	TestPackage->SetDirtyFlag(true);
+	TSharedPtr<FJsonObject> DirtyMismatchParams = MakeShared<FJsonObject>();
+	DirtyMismatchParams->SetStringField(TEXT("asset_path"), AssetPath);
+	DirtyMismatchParams->SetStringField(TEXT("widget_name"), TEXT("CommonTextBlock_147"));
+	DirtyMismatchParams->SetBoolField(TEXT("is_variable"), true);
+	DirtyMismatchParams->SetObjectField(TEXT("expected_fingerprint"), CleanFingerprint);
+	FCortexCommandResult DirtyMismatch = Router.Execute(TEXT("umg.set_widget_variable"), DirtyMismatchParams);
+	TestFalse(TEXT("clean fingerprint rejects write after package becomes dirty"), DirtyMismatch.bSuccess);
+	TestEqual(TEXT("dirty mismatch error code"), DirtyMismatch.ErrorCode, CortexErrorCodes::StalePrecondition);
+	TestFalse(TEXT("dirty mismatch does not mutate widget"), DesignWidget->bIsVariable);
+
+	// Dirty-to-dirty changes must also invalidate the guard. Capture the command's current
+	// fingerprint, make another unsaved widget-tree edit without changing package dirty state, then
+	// prove the stale fingerprint cannot authorize the variable mutation.
+	TSharedPtr<FJsonObject> DirtyFingerprintParams = MakeShared<FJsonObject>();
+	DirtyFingerprintParams->SetStringField(TEXT("asset_path"), AssetPath);
+	DirtyFingerprintParams->SetStringField(TEXT("widget_name"), TEXT("CommonTextBlock_147"));
+	DirtyFingerprintParams->SetBoolField(TEXT("is_variable"), false);
+	FCortexCommandResult DirtyFingerprintResult = Router.Execute(
+		TEXT("umg.set_widget_variable"), DirtyFingerprintParams);
+	TestTrue(TEXT("dirty no-op returns current fingerprint"), DirtyFingerprintResult.bSuccess);
+	TSharedPtr<FJsonObject> DirtyFingerprint = DirtyFingerprintResult.bSuccess && DirtyFingerprintResult.Data.IsValid()
+		? DirtyFingerprintResult.Data->GetObjectField(TEXT("fingerprint")) : nullptr;
+	DesignWidget->SetIsEnabled(false);
+	TSharedPtr<FJsonObject> DirtyToDirtyParams = MakeShared<FJsonObject>();
+	DirtyToDirtyParams->SetStringField(TEXT("asset_path"), AssetPath);
+	DirtyToDirtyParams->SetStringField(TEXT("widget_name"), TEXT("CommonTextBlock_147"));
+	DirtyToDirtyParams->SetBoolField(TEXT("is_variable"), true);
+	DirtyToDirtyParams->SetObjectField(TEXT("expected_fingerprint"), DirtyFingerprint);
+	FCortexCommandResult DirtyToDirty = Router.Execute(TEXT("umg.set_widget_variable"), DirtyToDirtyParams);
+	TestFalse(TEXT("dirty fingerprint rejects a later unsaved widget edit"), DirtyToDirty.bSuccess);
+	TestEqual(TEXT("dirty-to-dirty mismatch error code"),
+		DirtyToDirty.ErrorCode, CortexErrorCodes::StalePrecondition);
+	TestFalse(TEXT("dirty-to-dirty mismatch does not mutate widget"), DesignWidget->bIsVariable);
 
 	TSharedPtr<FJsonObject> StaleParams = MakeShared<FJsonObject>();
 	StaleParams->SetStringField(TEXT("asset_path"), AssetPath);

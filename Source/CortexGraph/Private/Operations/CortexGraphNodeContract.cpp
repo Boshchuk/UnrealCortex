@@ -353,34 +353,39 @@ bool FCortexGraphNodeContract::Validate(
 			}
 		}
 		else
-		{
-			UClass* SelfClass = Blueprint->SkeletonGeneratedClass
-				? Blueprint->SkeletonGeneratedClass
-				: Blueprint->GeneratedClass;
-			FProperty* Member = nullptr;
-			if (SelfClass)
 			{
-				Member = SelfClass->FindPropertyByName(FName(*VariableName));
-			}
-			// Blueprint member variables are FBPVariableDescription entries (NewVariables), not
-			// reflected FProperties; FindNewVariableIndex returns INDEX_NONE when absent.
-			if (Member == nullptr
-				&& FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, FName(*VariableName)) == INDEX_NONE)
-			{
-				return Fail(TEXT("params.variable_name"), FString::Printf(TEXT("Self property not found: %s"), *VariableName));
-			}
-			if (UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(Blueprint))
-			{
-				if (UWidget* Widget = WBP->WidgetTree ? WBP->WidgetTree->FindWidget(FName(*VariableName)) : nullptr)
+				UClass* SelfClass = Blueprint->SkeletonGeneratedClass
+					? Blueprint->SkeletonGeneratedClass
+					: Blueprint->GeneratedClass;
+				FProperty* Member = nullptr;
+				if (SelfClass)
 				{
-					if (!Widget->bIsVariable)
+					Member = SelfClass->FindPropertyByName(FName(*VariableName));
+				}
+				// Designer widgets are Widget Tree members, not reflected FProperties or
+				// FBPVariableDescription entries. Resolve them BEFORE the generic self-property
+				// failure so a non-variable designer widget gets the actionable
+				// umg.set_widget_variable guidance, and a referenceable one validates cleanly.
+				if (UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(Blueprint))
+				{
+					if (UWidget* Widget = WBP->WidgetTree ? WBP->WidgetTree->FindWidget(FName(*VariableName)) : nullptr)
 					{
-						return Fail(TEXT("params.variable_name"),
-							FString::Printf(TEXT("Designer widget '%s' has is_variable=false and cannot be referenced from a graph; call umg.set_widget_variable first."), *VariableName));
+						if (!Widget->bIsVariable)
+						{
+							return Fail(TEXT("params.variable_name"),
+								FString::Printf(TEXT("Designer widget '%s' has is_variable=false and cannot be referenced from a graph; call umg.set_widget_variable first."), *VariableName));
+						}
+						return true;
 					}
 				}
+				// Blueprint member variables are FBPVariableDescription entries (NewVariables), not
+				// reflected FProperties; FindNewVariableIndex returns INDEX_NONE when absent.
+				if (Member == nullptr
+					&& FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, FName(*VariableName)) == INDEX_NONE)
+				{
+					return Fail(TEXT("params.variable_name"), FString::Printf(TEXT("Self property not found: %s"), *VariableName));
+				}
 			}
-		}
 	}
 	else if (NodeClassName == TEXT("UK2Node_Timeline"))
 	{

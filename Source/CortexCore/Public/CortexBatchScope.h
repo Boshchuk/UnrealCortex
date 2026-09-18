@@ -19,8 +19,6 @@ struct CORTEXCORE_API FCortexBatchRollbackEntry
 	FString Description;
 	TFunction<bool()> Rollback;
 	TFunction<bool()> Verify;
-	// Package affected by this entry; verified rollback clears its dirty flag so a "successful"
-	// rollback never leaves the asset marked modified when the graph is back to its prior state.
 	TWeakObjectPtr<UPackage> Package;
 };
 
@@ -75,16 +73,24 @@ public:
 
 	/**
 	 * Execute the rollback journal in reverse registration order.
-	 * Returns whether every mutation was reverted and verified; on full verification the
-	 * affected packages' dirty flags are cleared so a later save cannot persist a no-op.
+	 * Returns whether every journaled mutation was reverted and verified. Affected packages remain
+	 * dirty because verification is scoped to journaled graph nodes and direct links.
 	 */
 	static FCortexBatchRollbackResult ExecuteRollback();
 
 	/** Discard recorded rollback entries without executing them. */
 	static void DiscardRollbackEntries();
 
-	/** Snapshot the set of packages already dirty at the start of the outermost batch. */
+	/** Snapshot packages that were already dirty before the rollback-safe batch starts. */
 	static void CaptureDirtyBaseline();
+
+	/** Whether the current batch rolls back on failure (`rollback_on_error`). Domain
+	 *  operations query this to reject mutations the rollback journal cannot undo atomically
+	 *  (e.g. graph connections that would replace existing links or create conversion nodes). */
+	static bool IsRollbackEnabled();
+
+	/** Set by HandleBatch for the current batch; the scope restores the outer value on exit. */
+	static void SetRollbackEnabled(bool bEnabled);
 
 private:
 	/** Materials that need PostEditChange when batch ends. */
@@ -99,6 +105,12 @@ private:
 	/** True once rollback has executed for the current outermost batch. */
 	static bool bRollbackExecuted;
 
-	/** Packages already dirty before the outermost batch began; a verified rollback must never clear these. */
+	/** Packages dirty before the batch; verified rollback never clears their unrelated edits. */
 	static TSet<UPackage*> PackagesDirtyBeforeBatch;
+
+	/** rollback_on_error of the current batch (set by HandleBatch). */
+	static bool bRollbackEnabled;
+
+	/** Value of bRollbackEnabled captured when this scope was created; restored on destruction. */
+	bool bRollbackEnabledBeforeBatch = false;
 };
