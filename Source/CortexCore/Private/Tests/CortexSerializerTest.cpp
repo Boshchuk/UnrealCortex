@@ -380,7 +380,7 @@ namespace CortexSerializerTagGateTest
 			return nullptr;
 		}
 		Prop->Struct = StructType;
-		Prop->ElementSize = StructType->GetStructureSize();
+		Prop->SetElementSize(StructType->GetStructureSize());
 		Prop->PropertyFlags = CPF_Edit;
 		return Prop;
 	}
