@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Callable
+from typing import Annotated, Any, Callable
+
+from mcp.server.fastmcp.utilities.func_metadata import ArgModelBase
+from pydantic import ConfigDict, WithJsonSchema, create_model
 
 from cortex_mcp.capabilities import CORE_DOMAINS
 from cortex_mcp.pagination import PaginationCache, decode_cursor
@@ -120,6 +123,15 @@ def _format_ue_command_error(exc: UECommandError) -> str:
 _CANONICAL_ROUTER_SHAPE = {"command": "string", "params": "object"}
 
 
+class _StrictRouterArguments(ArgModelBase):
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
+
+    def model_dump_one_level(self) -> dict[str, Any]:
+        arguments = super().model_dump_one_level()
+        arguments.update(self.model_extra or {})
+        return arguments
+
+
 def _invalid_invocation_shape(message: str) -> str:
     return json.dumps({
         "_error": "INVALID_INVOCATION_SHAPE",
@@ -130,10 +142,12 @@ def _invalid_invocation_shape(message: str) -> str:
 
 def _batch_has_zero_commands(params) -> bool:
     if not isinstance(params, dict):
-        return False
-    commands = params.get("commands", params.get("steps"))
+        return True
+    commands = params.get("commands")
     if commands is None:
-        return False
+        commands = params.get("steps")
+    if commands is None:
+        return True
     return not isinstance(commands, list) or len(commands) == 0
 
 
@@ -260,12 +274,24 @@ def _register_strict_router(mcp, domain: str, strict_router) -> None:
     """
     docstring = strict_router.__doc__ or ""
 
-    def registered(command: str, params: dict | None = None) -> str:
-        return strict_router(command, params)
+    def registered(command: str, params: dict | None = None, **extra) -> str:
+        return strict_router(command, params, **extra)
 
     registered.__name__ = f"{domain}_cmd"
     registered.__doc__ = docstring
     mcp.tool(name=f"{domain}_cmd", description=docstring)(registered)
+
+    tool_manager = getattr(mcp, "_tool_manager", None)
+    tool = tool_manager.get_tool(f"{domain}_cmd") if tool_manager is not None else None
+    if tool is not None:
+        argument_model = create_model(
+            f"{domain.title()}RouterArguments",
+            __base__=_StrictRouterArguments,
+            command=(str, ...),
+            params=(Annotated[Any, WithJsonSchema({"type": "object"})], None),
+        )
+        tool.fn_metadata.arg_model = argument_model
+        tool.parameters = argument_model.model_json_schema(by_alias=True)
 
 
 def _qualify_command(domain: str, command: str) -> str:

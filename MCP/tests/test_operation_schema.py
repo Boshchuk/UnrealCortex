@@ -66,6 +66,11 @@ def test_editor_missing_command_reports_restart_guidance():
         payload = json.loads(build_profile_operation_schema(connection, "UMGAuthoring", "graph", "describe_node"))
     assert payload["editor_available"] is False
     assert payload["policy_allowed"] is False
+    assert payload["unreal_error"] == {
+        "code": "CAPABILITY_COMMAND_NOT_FOUND",
+        "message": "Command not registered by live editor",
+        "details": {"cache_advertised": True, "restart_or_reload_required": True},
+    }
     assert payload["restart_or_reload_required"] is True
     assert payload["suggested_next_action"].startswith("Restart")
 
@@ -86,3 +91,8 @@ def test_retry_budget_exhausted_after_declared_corrections():
     assert "budget_remaining" in first
     assert "budget_remaining" in second
     assert third.get("_error") == RETRY_BUDGET_EXHAUSTED
+    assert third["unreal_error"] == {
+        "code": "CAPABILITY_COMMAND_NOT_FOUND",
+        "message": "missing",
+        "details": {"cache_advertised": False, "restart_or_reload_required": False},
+    }

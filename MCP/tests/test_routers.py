@@ -1,5 +1,6 @@
 """Unit tests for consolidated domain routers."""
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -33,6 +34,15 @@ def _editor(port: int, pid: int, started_at: str) -> EditorConnection:
         started_at=started_at,
         port_file=Path(f"CortexPort-{pid}.txt"),
     )
+
+
+def _call_tool_payload(mcp, name: str, arguments: dict) -> dict:
+    content = asyncio.run(mcp.call_tool(name, arguments))
+    if isinstance(content, tuple):
+        content = content[0]
+    if isinstance(content, list):
+        content = content[0]
+    return json.loads(content.text)
 
 
 def test_make_router_dispatches_domain_command():
@@ -558,12 +568,70 @@ def test_router_rejects_top_level_operation_fields():
     connection.send_command.assert_not_called()
 
 
+def test_registered_router_rejects_top_level_operation_fields_locally():
+    from mcp.server.fastmcp import FastMCP
+
+    connection = MagicMock()
+    mcp = FastMCP("router-contract-test")
+    register_router_tools(mcp, connection, {"graph": "graph docs"}, domains=("graph",))
+
+    payload = _call_tool_payload(mcp, "graph_cmd", {
+        "command": "add_node",
+        "node_class": "UK2Node_VariableGet",
+        "asset_path": "/Game/BP_X",
+    })
+
+    assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    assert payload["canonical_shape"] == {"command": "string", "params": "object"}
+    connection.send_command.assert_not_called()
+
+
+def test_registered_router_rejects_non_object_params_locally():
+    from mcp.server.fastmcp import FastMCP
+
+    connection = MagicMock()
+    mcp = FastMCP("router-contract-test")
+    register_router_tools(mcp, connection, {"graph": "graph docs"}, domains=("graph",))
+
+    payload = _call_tool_payload(mcp, "graph_cmd", {
+        "command": "add_node",
+        "params": ["not", "an", "object"],
+    })
+
+    assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    assert payload["canonical_shape"] == {"command": "string", "params": "object"}
+    connection.send_command.assert_not_called()
+
+
 def test_batch_query_rejects_empty_commands_locally():
     connection = MagicMock()
     router = make_router("core", connection, "core docs")
     strict = strict_router_tool(router, "core")
     payload = json.loads(strict("batch_query", {"commands": []}))
     assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    connection.send_command.assert_not_called()
+
+
+def test_batch_query_rejects_missing_commands_locally():
+    connection = MagicMock()
+    router = make_router("core", connection, "core docs")
+    strict = strict_router_tool(router, "core")
+    payload = json.loads(strict("batch_query", {}))
+    assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    connection.send_command.assert_not_called()
+
+
+def test_registered_batch_query_rejects_missing_commands_locally():
+    from mcp.server.fastmcp import FastMCP
+
+    connection = MagicMock()
+    mcp = FastMCP("router-contract-test")
+    register_router_tools(mcp, connection, {"core": "core docs"}, domains=("core",))
+
+    payload = _call_tool_payload(mcp, "core_cmd", {"command": "batch_query", "params": {}})
+
+    assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    assert payload["canonical_shape"] == {"command": "string", "params": "object"}
     connection.send_command.assert_not_called()
 
 

@@ -80,6 +80,33 @@ bool FCortexOperationSchemaTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("has suggested_action"), Missing.ErrorDetails->HasField(TEXT("suggested_action")));
 	}
 
+	TSharedPtr<FJsonObject> BatchParams = MakeShared<FJsonObject>();
+	BatchParams->SetStringField(TEXT("domain"), TEXT("core"));
+	BatchParams->SetStringField(TEXT("command"), TEXT("batch_query"));
+	FCortexCommandResult BatchSchema = Router.Execute(TEXT("core.get_operation_schema"), BatchParams);
+	TestTrue(TEXT("batch_query schema must succeed"), BatchSchema.bSuccess);
+	if (BatchSchema.bSuccess && BatchSchema.Data.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* BatchParamList = nullptr;
+		TestTrue(TEXT("batch params array present"), BatchSchema.Data->TryGetArrayField(TEXT("params"), BatchParamList));
+		if (BatchParamList)
+		{
+			for (const TSharedPtr<FJsonValue>& ParamValue : *BatchParamList)
+			{
+				const TSharedPtr<FJsonObject>* ParamObject = nullptr;
+				if (ParamValue.IsValid() && ParamValue->TryGetObject(ParamObject) && ParamObject != nullptr)
+				{
+					const FString Name = (*ParamObject)->GetStringField(TEXT("name"));
+					if (Name == TEXT("commands") || Name == TEXT("steps"))
+					{
+						TestFalse(*FString::Printf(TEXT("%s alias must not be independently required"), *Name),
+							(*ParamObject)->GetBoolField(TEXT("required")));
+					}
+				}
+			}
+		}
+	}
+
 	TSharedPtr<FJsonObject> NoDomain = MakeShared<FJsonObject>();
 	NoDomain->SetStringField(TEXT("command"), TEXT("add_node"));
 	FCortexCommandResult BadParams = Router.Execute(TEXT("core.get_operation_schema"), NoDomain);

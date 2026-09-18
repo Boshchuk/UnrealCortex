@@ -1369,7 +1369,11 @@ async def test_profile_operation_schema_returns_live_contract(tcp_connection):
     result = await test_mcp.call_tool("profile_operation_schema", {
         "profile": "UMGAuthoring", "domain": "core", "command": "save_asset"
     })
-    content = result[0] if isinstance(result, tuple) else result
+    content = result
+    if isinstance(content, tuple):
+        content = content[0]
+    if isinstance(content, list):
+        content = content[0]
     payload = json.loads(content.text)
     assert payload["source"] == "live_editor"
     assert payload["policy_allowed"] is True

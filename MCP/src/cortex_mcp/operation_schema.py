@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 
-from . import capabilities as _capabilities_module
 from .tcp_client import UECommandError
 
 RETRY_BUDGET_EXHAUSTED = "RETRY_BUDGET_EXHAUSTED"
@@ -50,27 +49,30 @@ def _live_schema(connection, domain: str, command: str) -> dict | None:
         )
         return response.get("data")
     except UECommandError as exc:
-        cache = _capabilities_module.load_capabilities_cache() or {}
-        cache_advertised = False
-        try:
-            cache_advertised = command in {
-                cmd.get("name")
-                for cmd in cache["domains"][domain].get("commands", [])
-            }
-        except (KeyError, TypeError):
-            cache_advertised = False
+        unreal_error = {
+            "code": exc.code,
+            "message": exc.message,
+            "details": dict(exc.details),
+        }
+        cache_advertised = bool(exc.details.get("cache_advertised"))
         return {
             "editor_available": False,
             "error_code": exc.code,
             "error_message": exc.message,
+            "unreal_error": unreal_error,
             "cache_advertised": cache_advertised,
-            "restart_or_reload_required": cache_advertised,
+            "restart_or_reload_required": bool(
+                exc.details.get("restart_or_reload_required", cache_advertised)
+            ),
             "suggested_next_action": (
-                "Restart the Unreal Editor with the rebuilt UnrealCortex plugin, or reload the "
-                "plugin, then re-verify with profile_operation_schema."
-                if cache_advertised
-                else "The connected editor does not register this command; verify the plugin "
-                "build before calling it."
+                exc.details.get("suggested_action")
+                or (
+                    "Restart the Unreal Editor with the rebuilt UnrealCortex plugin, or reload the "
+                    "plugin, then re-verify with profile_operation_schema."
+                    if cache_advertised
+                    else "The connected editor does not register this command; verify the plugin "
+                    "build before calling it."
+                )
             ),
         }
 
@@ -98,7 +100,7 @@ def build_profile_operation_schema(connection, profile: str, domain: str, comman
         corrections = _record_correction(profile, domain, command)
         budget_remaining = max(0, _STATIC_ERROR_BUDGET - corrections)
         if corrections > _STATIC_ERROR_BUDGET:
-            return json.dumps({
+            exhausted = {
                 "_error": RETRY_BUDGET_EXHAUSTED,
                 "_message": (
                     f"{profile}/{domain}.{command} has exhausted its correction budget of "
@@ -106,8 +108,11 @@ def build_profile_operation_schema(connection, profile: str, domain: str, comman
                     "rather than guessing again."
                 ),
                 "budget_remaining": 0,
-            })
-        return json.dumps({
+            }
+            if "unreal_error" in schema:
+                exhausted["unreal_error"] = schema["unreal_error"]
+            return json.dumps(exhausted)
+        blocked = {
             "source": "live_editor" if editor_available else "facade",
             "profile": profile,
             "domain": domain,
@@ -128,7 +133,10 @@ def build_profile_operation_schema(connection, profile: str, domain: str, comman
                 else (schema or {}).get("suggested_next_action", "Verify the plugin build and re-check the live capabilities.")
             ),
             "budget_remaining": budget_remaining,
-        })
+        }
+        if "unreal_error" in schema:
+            blocked["unreal_error"] = schema["unreal_error"]
+        return json.dumps(blocked)
 
     budget_remaining = max(0, _STATIC_ERROR_BUDGET - _correction_counts[(profile, domain, command)])
     return json.dumps({

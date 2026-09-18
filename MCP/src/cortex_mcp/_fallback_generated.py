@@ -259,7 +259,7 @@ FALLBACK_COMMANDS: dict[str, list[dict]] = {   'blueprint': [   {   'name': 'cre
                 {   'name': 'shutdown',
                     'params': [{'name': 'force', 'required': False, 'type': 'boolean'}]},
                 {   'name': 'batch_query',
-                    'params': [   {'name': 'commands', 'required': True, 'type': 'array'},
+                    'params': [   {'name': 'commands', 'required': False, 'type': 'array'},
                                   {'name': 'steps', 'required': False, 'type': 'array'},
                                   {'name': 'stop_on_error', 'required': False, 'type': 'boolean'},
                                   {   'name': 'rollback_on_error',
