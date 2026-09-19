@@ -1,5 +1,6 @@
 #include "Operations/CortexGraphConnectionOps.h"
 #include "Operations/CortexGraphNodeOps.h"
+#include "CortexBatchScope.h"
 #include "CortexEditorUtils.h"
 #include "CortexGraphModule.h"
 #include "Engine/Blueprint.h"
@@ -67,6 +68,40 @@ bool ResolveMutableConnectionGraph(
 
 	OutGraph = Entry.Graph;
 	return true;
+}
+
+UEdGraph* ResolveRollbackGraph(
+	UBlueprint* Blueprint,
+	const FString& GraphName,
+	const FString& SubgraphPath)
+{
+	if (Blueprint == nullptr)
+	{
+		return nullptr;
+	}
+	FCortexCommandResult ResolveError;
+	UEdGraph* Graph = FCortexGraphNodeOps::FindGraph(Blueprint, GraphName, ResolveError);
+	if (Graph != nullptr && !SubgraphPath.IsEmpty())
+	{
+		Graph = FCortexGraphNodeOps::ResolveSubgraph(Graph, SubgraphPath, ResolveError);
+	}
+	return Graph;
+}
+
+UEdGraphNode* ResolveRollbackNode(UEdGraph* Graph, const FGuid& NodeGuid, const FString& NodeId)
+{
+	if (Graph == nullptr)
+	{
+		return nullptr;
+	}
+	for (UEdGraphNode* Node : Graph->Nodes)
+	{
+		if (Node != nullptr && (Node->NodeGuid == NodeGuid || Node->GetName() == NodeId))
+		{
+			return Node;
+		}
+	}
+	return nullptr;
 }
 }
 
@@ -186,6 +221,20 @@ FCortexCommandResult FCortexGraphConnectionOps::Connect(const TSharedPtr<FJsonOb
 			return FCortexCommandRouter::Error(CortexErrorCodes::PinTypeMismatch,
 				FString::Printf(TEXT("Cannot connect: %s"), *Response.Message.ToString()));
 		}
+		// Inside a rollback-enabled batch the journal can only undo direct links. A connection
+		// that would displace an existing link or spawn conversion/promotion nodes cannot be
+		// restored or verified atomically, so reject it up front instead of reporting a clean
+		// rollback while the displaced topology remains. Non-rollback batches keep the schema
+		// default (break-others / conversion are normal editor behavior).
+		if (FCortexCommandRouter::IsInBatch() && FCortexBatchScope::IsRollbackEnabled()
+			&& Response.Response != CONNECT_RESPONSE_MAKE)
+		{
+			return FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidOperation,
+				FString::Printf(
+					TEXT("Connection requires replacing an existing link or creating a conversion node (%s); not supported inside rollback-enabled batches"),
+					*Response.Message.ToString()));
+		}
 	}
 
 	// Create transaction only after validation passes
@@ -195,11 +244,67 @@ FCortexCommandResult FCortexGraphConnectionOps::Connect(const TSharedPtr<FJsonOb
 	// Make the connection (schema handles breaking existing connections if needed)
 	if (Schema != nullptr)
 	{
-		Schema->TryCreateConnection(SourcePin, TargetPin);
+		if (!Schema->TryCreateConnection(SourcePin, TargetPin))
+		{
+			return FCortexCommandRouter::Error(CortexErrorCodes::PinTypeMismatch,
+				TEXT("Schema rejected the connection attempt"));
+		}
 	}
 	else
 	{
 		SourcePin->MakeLinkTo(TargetPin);
+	}
+
+	// Record the mutation for failure-atomic batch rollback: a failing batch breaks every
+	// connection it created (reverse journal order) and verifies the link is gone.
+	// All early-return error paths above already ran, so the link is established here.
+	if (FCortexCommandRouter::IsInBatch())
+	{
+		const TWeakObjectPtr<UBlueprint> WeakBlueprint = Blueprint;
+		const FString RootGraphName = GraphName;
+		const FString JournalSubgraphPath = SubgraphPath;
+		const FGuid SourceNodeGuid = SourceNode->NodeGuid;
+		const FGuid TargetNodeGuid = TargetNode->NodeGuid;
+		FCortexBatchScope::RegisterRollbackEntry(
+			TEXT("connect"),
+			TEXT(""),
+			FString::Printf(TEXT("connect %s -> %s"), *SourcePin->PinName.ToString(), *TargetPin->PinName.ToString()),
+			[WeakBlueprint, RootGraphName, JournalSubgraphPath, SourceNodeGuid, TargetNodeGuid,
+				SourceNodeId, TargetNodeId, SourcePinName, TargetPinName]() -> bool
+			{
+				UEdGraph* CurrentGraph = ResolveRollbackGraph(
+					WeakBlueprint.Get(), RootGraphName, JournalSubgraphPath);
+				UEdGraphNode* CurrentSourceNode = ResolveRollbackNode(CurrentGraph, SourceNodeGuid, SourceNodeId);
+				UEdGraphNode* CurrentTargetNode = ResolveRollbackNode(CurrentGraph, TargetNodeGuid, TargetNodeId);
+				UEdGraphPin* CurrentSourcePin = CurrentSourceNode
+					? CurrentSourceNode->FindPin(FName(*SourcePinName)) : nullptr;
+				UEdGraphPin* CurrentTargetPin = CurrentTargetNode
+					? CurrentTargetNode->FindPin(FName(*TargetPinName)) : nullptr;
+				if (CurrentSourcePin == nullptr || CurrentTargetPin == nullptr)
+				{
+					return false;
+				}
+				if (CurrentSourcePin->LinkedTo.Contains(CurrentTargetPin))
+				{
+					CurrentSourcePin->BreakLinkTo(CurrentTargetPin);
+				}
+				return true;
+			},
+			[WeakBlueprint, RootGraphName, JournalSubgraphPath, SourceNodeGuid, TargetNodeGuid,
+				SourceNodeId, TargetNodeId, SourcePinName, TargetPinName]() -> bool
+			{
+				UEdGraph* CurrentGraph = ResolveRollbackGraph(
+					WeakBlueprint.Get(), RootGraphName, JournalSubgraphPath);
+				UEdGraphNode* CurrentSourceNode = ResolveRollbackNode(CurrentGraph, SourceNodeGuid, SourceNodeId);
+				UEdGraphNode* CurrentTargetNode = ResolveRollbackNode(CurrentGraph, TargetNodeGuid, TargetNodeId);
+				UEdGraphPin* CurrentSourcePin = CurrentSourceNode
+					? CurrentSourceNode->FindPin(FName(*SourcePinName)) : nullptr;
+				UEdGraphPin* CurrentTargetPin = CurrentTargetNode
+					? CurrentTargetNode->FindPin(FName(*TargetPinName)) : nullptr;
+				return CurrentSourcePin != nullptr && CurrentTargetPin != nullptr
+					&& !CurrentSourcePin->LinkedTo.Contains(CurrentTargetPin);
+			},
+			SourcePin ? Cast<UPackage>(SourcePin->GetOwningNode()->GetOutermost()) : nullptr);
 	}
 
 	Graph->NotifyGraphChanged();

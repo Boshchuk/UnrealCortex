@@ -1,4 +1,5 @@
 #include "Operations/CortexGraphNodeOps.h"
+#include "Operations/CortexGraphNodeContract.h"
 #include "CortexAssetFingerprint.h"
 #include "CortexBatchMutation.h"
 #include "CortexGraphModule.h"
@@ -38,9 +39,12 @@
 #include "K2Node_ClearDelegate.h"
 #include "K2Node_CreateDelegate.h"
 #include "UObject/UnrealType.h"
+#include "WidgetBlueprint.h"
 #include "ScopedTransaction.h"
 #include "PackageTools.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "GameFramework/Actor.h"
 #include "Misc/PackageName.h"
 #include "Editor.h"
 #include "Engine/World.h"
@@ -245,87 +249,43 @@ bool ReloadBlueprintPackage(UPackage* Package)
 		EReloadPackagesInteractionMode::AssumePositive);
 }
 
-UClass* ResolveGraphNodeClassIdentifier(const FString& ClassIdentifier)
+TSharedPtr<FJsonObject> AllocateProbePins(
+	UBlueprint* Blueprint,
+	const FString& NodeClassName,
+	const TSharedPtr<FJsonObject>& NodeParams)
 {
-	if (ClassIdentifier.IsEmpty())
+	UClass* NodeClass = FCortexGraphNodeOps::ResolveNodeClass(NodeClassName);
+	if (NodeClass == nullptr)
 	{
 		return nullptr;
 	}
+	UEdGraph* ProbeGraph = NewObject<UEdGraph>(Blueprint, UEdGraph::StaticClass());
+	// K2 nodes dereference the graph schema during AllocateDefaultPins/ReconstructNode; a null
+	// schema here would crash describe_node when construction params are provided.
+	ProbeGraph->Schema = UEdGraphSchema_K2::StaticClass();
+	UEdGraphNode* ProbeNode = NewObject<UEdGraphNode>(ProbeGraph, NodeClass);
+	FString ApplyError;
+	FCortexGraphNodeContract::ApplyNodeConstructionParams(ProbeGraph, ProbeNode, Blueprint, NodeParams, ApplyError);
+	ProbeNode->AllocateDefaultPins();
 
-	if (UClass* FoundClass = FindObject<UClass>(nullptr, *ClassIdentifier))
+	TSharedPtr<FJsonObject> Pins = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> PinArray;
+	for (const UEdGraphPin* Pin : ProbeNode->Pins)
 	{
-		return FoundClass;
-	}
-
-	if (UBlueprint* FoundBP = FindObject<UBlueprint>(nullptr, *ClassIdentifier))
-	{
-		return FoundBP->GeneratedClass;
-	}
-
-	if (!ClassIdentifier.StartsWith(TEXT("/")))
-	{
-		if (UClass* FoundClass = FindFirstObject<UClass>(*ClassIdentifier, EFindFirstObjectOptions::NativeFirst))
-		{
-			return FoundClass;
-		}
-
-		const FString EnginePath = FString::Printf(TEXT("/Script/Engine.%s"), *ClassIdentifier);
-		if (UClass* EngineClass = FindObject<UClass>(nullptr, *EnginePath))
-		{
-			return EngineClass;
-		}
-	}
-
-	for (TObjectIterator<UClass> It; It; ++It)
-	{
-		UClass* Candidate = *It;
-		if (!IsValid(Candidate))
+		if (Pin == nullptr || Pin->bHidden)
 		{
 			continue;
 		}
-
-		if (Candidate->GetName() == ClassIdentifier || Candidate->GetPathName() == ClassIdentifier)
-		{
-			return Candidate;
-		}
+		TSharedRef<FJsonObject> PinObj = MakeShared<FJsonObject>();
+		PinObj->SetStringField(TEXT("name"), Pin->PinName.ToString());
+		PinObj->SetStringField(TEXT("direction"), Pin->Direction == EGPD_Input ? TEXT("input") : TEXT("output"));
+		PinObj->SetStringField(TEXT("type"), Pin->PinType.PinCategory.ToString());
+		PinArray.Add(MakeShared<FJsonValueObject>(PinObj));
 	}
-
-	if (!ClassIdentifier.StartsWith(TEXT("/")))
-	{
-		return nullptr;
-	}
-
-	const FString PackageName = FPackageName::ObjectPathToPackageName(ClassIdentifier);
-	const bool bPackageExists =
-		PackageName.StartsWith(TEXT("/"))
-		&& (FindPackage(nullptr, *PackageName) || FPackageName::DoesPackageExist(PackageName));
-	if (!bPackageExists)
-	{
-		return nullptr;
-	}
-
-	if (ClassIdentifier.EndsWith(TEXT("_C")))
-	{
-		if (UClass* LoadedClass = LoadObject<UClass>(nullptr, *ClassIdentifier))
-		{
-			return LoadedClass;
-		}
-	}
-	else
-	{
-		if (UBlueprint* BlueprintAsset = LoadObject<UBlueprint>(nullptr, *ClassIdentifier))
-		{
-			return BlueprintAsset->GeneratedClass;
-		}
-
-		if (UClass* LoadedClass = LoadObject<UClass>(nullptr, *ClassIdentifier))
-		{
-			return LoadedClass;
-		}
-	}
-
-	return nullptr;
+	Pins->SetArrayField(TEXT("pins"), PinArray);
+	return Pins;
 }
+
 }
 
 UBlueprint* FCortexGraphNodeOps::LoadBlueprint(const FString& AssetPath, FCortexCommandResult& OutError)
@@ -1050,163 +1010,27 @@ FCortexCommandResult FCortexGraphNodeOps::AddNode(const TSharedPtr<FJsonObject>&
 		}
 	}
 
-	// Resolve node class
-	// For well-known classes, use StaticClass (faster, no dynamic loading)
-	// Other classes use dynamic loading from /Script/BlueprintGraph or /Script/Engine
-	UClass* NodeClass = nullptr;
-	if (NodeClassName == TEXT("UK2Node_CallFunction"))
-	{
-		NodeClass = UK2Node_CallFunction::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_IfThenElse"))
-	{
-		NodeClass = UK2Node_IfThenElse::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_VariableSet"))
-	{
-		NodeClass = UK2Node_VariableSet::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_VariableGet"))
-	{
-		NodeClass = UK2Node_VariableGet::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_Event") || NodeClassName == TEXT("Event"))
-	{
-		NodeClass = UK2Node_Event::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_ExecutionSequence"))
-	{
-		NodeClass = UK2Node_ExecutionSequence::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_CustomEvent"))
-	{
-		NodeClass = UK2Node_CustomEvent::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_Self"))
-	{
-		NodeClass = UK2Node_Self::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_Knot"))
-	{
-		NodeClass = UK2Node_Knot::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_MakeArray"))
-	{
-		NodeClass = UK2Node_MakeArray::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_Timeline"))
-	{
-		// Timeline requires a UTimelineTemplate in Blueprint->Timelines with matching name/guid.
-		// Adding without one produces a compile error.
-		const TSharedPtr<FJsonObject>* NodeParams = nullptr;
-		FString TimelineName;
-		if (!Params->TryGetObjectField(TEXT("params"), NodeParams) ||
-			!(*NodeParams)->TryGetStringField(TEXT("timeline_name"), TimelineName) ||
-			TimelineName.IsEmpty())
-		{
-			return FCortexCommandRouter::Error(
-				CortexErrorCodes::InvalidField,
-				TEXT("TimelineNameRequired: timeline_name param is required for Timeline nodes")
-			);
-		}
-		NodeClass = UK2Node_Timeline::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_SpawnActorFromClass"))
-	{
-		NodeClass = UK2Node_SpawnActorFromClass::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_DynamicCast"))
-	{
-		NodeClass = UK2Node_DynamicCast::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_MacroInstance"))
-	{
-		// MacroInstance requires SetMacroGraph(); adding without macro_path produces a node with no pins.
-		const TSharedPtr<FJsonObject>* NodeParams = nullptr;
-		FString MacroPath;
-		if (!Params->TryGetObjectField(TEXT("params"), NodeParams) ||
-			!(*NodeParams)->TryGetStringField(TEXT("macro_path"), MacroPath) ||
-			MacroPath.IsEmpty())
-		{
-			return FCortexCommandRouter::Error(
-				CortexErrorCodes::InvalidField,
-				TEXT("MacroPathRequired: macro_path param is required for MacroInstance nodes")
-			);
-		}
-		NodeClass = UK2Node_MacroInstance::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_SwitchEnum"))
-	{
-		NodeClass = UK2Node_SwitchEnum::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_SwitchString"))
-	{
-		NodeClass = UK2Node_SwitchString::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_SwitchInteger"))
-	{
-		NodeClass = UK2Node_SwitchInteger::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_AddDelegate"))
-	{
-		const TSharedPtr<FJsonObject>* NodeParams = nullptr;
-		FString DelegateName;
-		if (!Params->TryGetObjectField(TEXT("params"), NodeParams) ||
-			!(*NodeParams)->TryGetStringField(TEXT("delegate_name"), DelegateName) ||
-			DelegateName.IsEmpty())
-		{
-			return FCortexCommandRouter::Error(
-				CortexErrorCodes::InvalidField,
-				TEXT("DelegateNameRequired: delegate_name param is required for AddDelegate nodes")
-			);
-		}
-		NodeClass = UK2Node_AddDelegate::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_RemoveDelegate"))
-	{
-		const TSharedPtr<FJsonObject>* NodeParams = nullptr;
-		FString DelegateName;
-		if (!Params->TryGetObjectField(TEXT("params"), NodeParams) ||
-			!(*NodeParams)->TryGetStringField(TEXT("delegate_name"), DelegateName) ||
-			DelegateName.IsEmpty())
-		{
-			return FCortexCommandRouter::Error(
-				CortexErrorCodes::InvalidField,
-				TEXT("DelegateNameRequired: delegate_name param is required for RemoveDelegate nodes")
-			);
-		}
-		NodeClass = UK2Node_RemoveDelegate::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_ClearDelegate"))
-	{
-		const TSharedPtr<FJsonObject>* NodeParams = nullptr;
-		FString DelegateName;
-		if (!Params->TryGetObjectField(TEXT("params"), NodeParams) ||
-			!(*NodeParams)->TryGetStringField(TEXT("delegate_name"), DelegateName) ||
-			DelegateName.IsEmpty())
-		{
-			return FCortexCommandRouter::Error(
-				CortexErrorCodes::InvalidField,
-				TEXT("DelegateNameRequired: delegate_name param is required for ClearDelegate nodes")
-			);
-		}
-		NodeClass = UK2Node_ClearDelegate::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_CreateDelegate"))
-	{
-		NodeClass = UK2Node_CreateDelegate::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_Composite") || NodeClassName == TEXT("Composite"))
-	{
-		NodeClass = UK2Node_Composite::StaticClass();
-	}
-
+	UClass* NodeClass = ResolveNodeClass(NodeClassName);
 	if (NodeClass == nullptr)
 	{
 		return FCortexCommandRouter::Error(
 			CortexErrorCodes::InvalidField,
 			FString::Printf(TEXT("Node class not found: %s"), *NodeClassName)
 		);
+	}
+
+	// Node-specific construction params live under the top-level "params" key.
+	const TSharedPtr<FJsonObject>* InnerNodeParams = nullptr;
+	const bool bHasInnerParams = Params.IsValid()
+		&& Params->TryGetObjectField(TEXT("params"), InnerNodeParams)
+		&& InnerNodeParams != nullptr;
+	const TSharedPtr<FJsonObject> NodeConstructionParams = bHasInnerParams
+		? *InnerNodeParams : MakeShared<FJsonObject>();
+
+	FCortexCommandResult ContractError;
+	if (!FCortexGraphNodeContract::Validate(NodeClassName, Blueprint, NodeConstructionParams, ContractError))
+	{
+		return ContractError;
 	}
 
 	FScopedTransaction Transaction(FText::FromString(
@@ -1221,236 +1045,11 @@ FCortexCommandResult FCortexGraphNodeOps::AddNode(const TSharedPtr<FJsonObject>&
 	NewNode->NodePosY = PosY;
 	Graph->AddNode(NewNode, true, false);
 
-	// Handle type-specific setup
-	// NodeParams = node-specific parameters (nested object), distinct from outer Params
-	const TSharedPtr<FJsonObject>* NodeParams = nullptr;
-	if (Params->TryGetObjectField(TEXT("params"), NodeParams) && NodeParams)
+	FString ApplyError;
+	if (!FCortexGraphNodeContract::ApplyNodeConstructionParams(Graph, NewNode, Blueprint, NodeConstructionParams, ApplyError))
 	{
-		UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(NewNode);
-		if (CallNode)
-		{
-			FString FunctionName;
-			if ((*NodeParams)->TryGetStringField(TEXT("function_name"), FunctionName))
-			{
-				// Parse "ClassName.FunctionName" format
-				FString ClassName;
-				FString FuncName;
-				if (FunctionName.Split(TEXT("."), &ClassName, &FuncName))
-				{
-					UClass* FuncClass = FindFirstObject<UClass>(*ClassName);
-					if (FuncClass == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							FString::Printf(TEXT("Function owner class not found: %s"), *ClassName)
-						);
-					}
-
-					UFunction* Func = FuncClass->FindFunctionByName(FName(*FuncName));
-					if (Func == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							FString::Printf(TEXT("Function not found: %s on class %s"), *FuncName, *ClassName)
-						);
-					}
-
-					CallNode->SetFromFunction(Func);
-				}
-			}
-		}
-
-		UK2Node_Variable* VarNode = Cast<UK2Node_Variable>(NewNode);
-		if (VarNode)
-		{
-			FString VariableName;
-			if ((*NodeParams)->TryGetStringField(TEXT("variable_name"), VariableName))
-			{
-				FString VariableClass;
-				if ((*NodeParams)->TryGetStringField(TEXT("variable_class"), VariableClass))
-				{
-					// External class property (e.g., PlayerController.bShowMouseCursor)
-					UClass* VarClass = FindFirstObject<UClass>(*VariableClass);
-					if (VarClass == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							FString::Printf(TEXT("Variable owner class not found: %s"), *VariableClass)
-						);
-					}
-
-					FProperty* Prop = VarClass->FindPropertyByName(FName(*VariableName));
-					if (Prop == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							FString::Printf(TEXT("Property not found: %s on class %s"), *VariableName, *VariableClass)
-						);
-					}
-
-					VarNode->SetFromProperty(Prop, false, VarClass);
-				}
-				else
-				{
-					// Self-context property (on the Blueprint's own class)
-					UClass* SelfClass = Blueprint->SkeletonGeneratedClass
-						? Blueprint->SkeletonGeneratedClass
-						: Blueprint->GeneratedClass;
-					if (SelfClass)
-					{
-						FProperty* SelfProp = SelfClass->FindPropertyByName(FName(*VariableName));
-						if (SelfProp == nullptr)
-						{
-							Graph->RemoveNode(NewNode);
-							return FCortexCommandRouter::Error(
-								CortexErrorCodes::InvalidField,
-								FString::Printf(TEXT("Self property not found: %s"), *VariableName)
-							);
-						}
-					}
-					VarNode->VariableReference.SetSelfMember(FName(*VariableName));
-				}
-			}
-		}
-
-		UK2Node_DynamicCast* CastNode = Cast<UK2Node_DynamicCast>(NewNode);
-		if (CastNode)
-		{
-			FString TargetClassIdentifier;
-			const bool bHasClass =
-				(*NodeParams)->TryGetStringField(TEXT("class"), TargetClassIdentifier)
-				|| (*NodeParams)->TryGetStringField(TEXT("target_class"), TargetClassIdentifier);
-			if (bHasClass)
-			{
-				UClass* TargetClass = ResolveGraphNodeClassIdentifier(TargetClassIdentifier);
-				if (TargetClass == nullptr)
-				{
-					Graph->RemoveNode(NewNode);
-					return FCortexCommandRouter::Error(
-						CortexErrorCodes::InvalidField,
-						FString::Printf(TEXT("Cast target class not found: %s"), *TargetClassIdentifier)
-					);
-				}
-
-				CastNode->TargetType = TargetClass;
-				CastNode->ReconstructNode();
-			}
-		}
-
-		UK2Node_Event* EventNode = Cast<UK2Node_Event>(NewNode);
-		if (EventNode)
-		{
-			FString FunctionName;
-			if ((*NodeParams)->TryGetStringField(TEXT("function_name"), FunctionName))
-			{
-				FString ClassName;
-				FString FuncName;
-				if (FunctionName.Split(TEXT("."), &ClassName, &FuncName))
-				{
-					UClass* FuncClass = FindFirstObject<UClass>(*ClassName);
-					if (FuncClass == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							FString::Printf(TEXT("Event owner class not found: %s"), *ClassName)
-						);
-					}
-
-					UFunction* Func = FuncClass->FindFunctionByName(FName(*FuncName));
-					if (Func == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							FString::Printf(TEXT("Event function not found: %s on class %s"), *FuncName, *ClassName)
-						);
-					}
-
-					EventNode->EventReference.SetExternalMember(FName(*FuncName), FuncClass);
-					EventNode->bOverrideFunction = true;
-				}
-			}
-		}
-
-		UK2Node_BaseMCDelegate* DelegateNode = Cast<UK2Node_BaseMCDelegate>(NewNode);
-		if (DelegateNode)
-		{
-			FString DelegateName;
-			if ((*NodeParams)->TryGetStringField(TEXT("delegate_name"), DelegateName))
-			{
-				FString DelegateClass;
-				if ((*NodeParams)->TryGetStringField(TEXT("delegate_class"), DelegateClass))
-				{
-					// External class delegate
-					UClass* OwnerClass = FindFirstObject<UClass>(*DelegateClass);
-					if (OwnerClass == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							FString::Printf(TEXT("Delegate owner class not found: %s"), *DelegateClass)
-						);
-					}
-
-					FMulticastDelegateProperty* DelegateProp = CastField<FMulticastDelegateProperty>(
-						OwnerClass->FindPropertyByName(FName(*DelegateName)));
-					if (DelegateProp == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							FString::Printf(TEXT("Multicast delegate property not found: %s on class %s"),
-								*DelegateName, *DelegateClass)
-						);
-					}
-
-					DelegateNode->SetFromProperty(DelegateProp, false, OwnerClass);
-				}
-				else
-				{
-					// Self-context delegate (Blueprint's own event dispatcher)
-					UClass* SelfClass = Blueprint->SkeletonGeneratedClass
-						? Blueprint->SkeletonGeneratedClass
-						: Blueprint->GeneratedClass;
-					if (SelfClass == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							TEXT("Blueprint has no generated class for self-context delegate lookup")
-						);
-					}
-
-					FMulticastDelegateProperty* DelegateProp = CastField<FMulticastDelegateProperty>(
-						SelfClass->FindPropertyByName(FName(*DelegateName)));
-					if (DelegateProp == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							FString::Printf(TEXT("Self delegate property not found: %s"), *DelegateName)
-						);
-					}
-
-					DelegateNode->SetFromProperty(DelegateProp, true, SelfClass);
-				}
-			}
-		}
-
-		UK2Node_CreateDelegate* CreateDelegateNode = Cast<UK2Node_CreateDelegate>(NewNode);
-		if (CreateDelegateNode)
-		{
-			FString FunctionName;
-			if ((*NodeParams)->TryGetStringField(TEXT("function_name"), FunctionName))
-			{
-				CreateDelegateNode->SetFunction(FName(*FunctionName));
-			}
-		}
+		Graph->RemoveNode(NewNode);
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ApplyError);
 	}
 
 	NewNode->AllocateDefaultPins();
@@ -1464,6 +1063,93 @@ FCortexCommandResult FCortexGraphNodeOps::AddNode(const TSharedPtr<FJsonObject>&
 		CompositeNewNode->PostPlacedNewNode();
 		// Re-allocate pins after PostPlacedNewNode so the entry/exit tunnel pins are present
 		CompositeNewNode->AllocateDefaultPins();
+	}
+
+	// Record the mutation for failure-atomic batch rollback: a failing batch removes every
+	// node it created (reverse journal order) and verifies the graph is back to its prior state.
+	if (FCortexCommandRouter::IsInBatch())
+	{
+		const TWeakObjectPtr<UBlueprint> WeakBlueprint = Blueprint;
+		const FString RootGraphName = GraphName;
+		const FString JournalSubgraphPath = SubgraphPath;
+		const FGuid NodeGuid = NewNode->NodeGuid;
+		const FString NodeId = NewNode->GetName();
+		const UK2Node_Composite* JournalComposite = Cast<UK2Node_Composite>(NewNode);
+		const FString BoundGraphName = JournalComposite && JournalComposite->BoundGraph
+			? JournalComposite->BoundGraph->GetName() : FString();
+		FCortexBatchScope::RegisterRollbackEntry(
+			TEXT("add_node"),
+			NodeId,
+			FString::Printf(TEXT("add_node %s"), *NodeClassName),
+			[WeakBlueprint, RootGraphName, JournalSubgraphPath, NodeGuid, NodeId]() -> bool
+			{
+				UBlueprint* CurrentBlueprint = WeakBlueprint.Get();
+				if (CurrentBlueprint == nullptr)
+				{
+					return false;
+				}
+				FCortexCommandResult ResolveError;
+				UEdGraph* CurrentGraph = FCortexGraphNodeOps::FindGraph(CurrentBlueprint, RootGraphName, ResolveError);
+				if (CurrentGraph != nullptr && !JournalSubgraphPath.IsEmpty())
+				{
+					CurrentGraph = FCortexGraphNodeOps::ResolveSubgraph(CurrentGraph, JournalSubgraphPath, ResolveError);
+				}
+				if (CurrentGraph == nullptr)
+				{
+					return false;
+				}
+				UEdGraphNode* CurrentNode = nullptr;
+				for (UEdGraphNode* Candidate : CurrentGraph->Nodes)
+				{
+					if (Candidate != nullptr && (Candidate->NodeGuid == NodeGuid || Candidate->GetName() == NodeId))
+					{
+						CurrentNode = Candidate;
+						break;
+					}
+				}
+				if (CurrentNode != nullptr)
+				{
+					CurrentNode->DestroyNode();
+				}
+				return true;
+			},
+			[WeakBlueprint, RootGraphName, JournalSubgraphPath, NodeGuid, NodeId, BoundGraphName]() -> bool
+			{
+				UBlueprint* CurrentBlueprint = WeakBlueprint.Get();
+				if (CurrentBlueprint == nullptr)
+				{
+					return false;
+				}
+				FCortexCommandResult ResolveError;
+				UEdGraph* CurrentGraph = FCortexGraphNodeOps::FindGraph(CurrentBlueprint, RootGraphName, ResolveError);
+				if (CurrentGraph != nullptr && !JournalSubgraphPath.IsEmpty())
+				{
+					CurrentGraph = FCortexGraphNodeOps::ResolveSubgraph(CurrentGraph, JournalSubgraphPath, ResolveError);
+				}
+				if (CurrentGraph == nullptr)
+				{
+					return false;
+				}
+				for (UEdGraphNode* Node : CurrentGraph->Nodes)
+				{
+					if (Node != nullptr && (Node->NodeGuid == NodeGuid || Node->GetName() == NodeId))
+					{
+						return false;
+					}
+				}
+				if (!BoundGraphName.IsEmpty())
+				{
+					for (const UEdGraph* SubGraph : CurrentGraph->SubGraphs)
+					{
+						if (SubGraph != nullptr && SubGraph->GetName() == BoundGraphName)
+						{
+							return false;
+						}
+					}
+				}
+				return true;
+			},
+			Cast<UPackage>(Graph->GetOutermost()));
 	}
 
 	Graph->NotifyGraphChanged();
@@ -1499,6 +1185,152 @@ FCortexCommandResult FCortexGraphNodeOps::AddNode(const TSharedPtr<FJsonObject>&
 		PinsArray.Add(MakeShared<FJsonValueObject>(SerializePin(Pin, false)));
 	}
 	Data->SetArrayField(TEXT("pins"), PinsArray);
+
+	return FCortexCommandRouter::Success(Data);
+}
+
+UClass* FCortexGraphNodeOps::ResolveNodeClass(const FString& NodeClassName)
+{
+	if (NodeClassName == TEXT("UK2Node_CallFunction"))
+	{
+		return UK2Node_CallFunction::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_IfThenElse"))
+	{
+		return UK2Node_IfThenElse::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_VariableSet"))
+	{
+		return UK2Node_VariableSet::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_VariableGet"))
+	{
+		return UK2Node_VariableGet::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_Event") || NodeClassName == TEXT("Event"))
+	{
+		return UK2Node_Event::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_ExecutionSequence"))
+	{
+		return UK2Node_ExecutionSequence::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_CustomEvent"))
+	{
+		return UK2Node_CustomEvent::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_Self"))
+	{
+		return UK2Node_Self::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_Knot"))
+	{
+		return UK2Node_Knot::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_MakeArray"))
+	{
+		return UK2Node_MakeArray::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_Timeline"))
+	{
+		return UK2Node_Timeline::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_SpawnActorFromClass"))
+	{
+		return UK2Node_SpawnActorFromClass::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_DynamicCast"))
+	{
+		return UK2Node_DynamicCast::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_MacroInstance"))
+	{
+		return UK2Node_MacroInstance::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_SwitchEnum"))
+	{
+		return UK2Node_SwitchEnum::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_SwitchString"))
+	{
+		return UK2Node_SwitchString::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_SwitchInteger"))
+	{
+		return UK2Node_SwitchInteger::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_AddDelegate"))
+	{
+		return UK2Node_AddDelegate::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_RemoveDelegate"))
+	{
+		return UK2Node_RemoveDelegate::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_ClearDelegate"))
+	{
+		return UK2Node_ClearDelegate::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_CreateDelegate"))
+	{
+		return UK2Node_CreateDelegate::StaticClass();
+	}
+	else if (NodeClassName == TEXT("UK2Node_Composite") || NodeClassName == TEXT("Composite"))
+	{
+		return UK2Node_Composite::StaticClass();
+	}
+
+	return nullptr;
+}
+
+FCortexCommandResult FCortexGraphNodeOps::DescribeNode(const TSharedPtr<FJsonObject>& Params)
+{
+	FString NodeClassName;
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("node_class"), NodeClassName) || NodeClassName.IsEmpty())
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("Missing required param: node_class"));
+	}
+
+	const FCortexNodeConstructionContract Contract = FCortexGraphNodeContract::Describe(NodeClassName);
+	if (!Contract.bSupported)
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidField,
+			FString::Printf(TEXT("Node class not supported: %s"), *NodeClassName));
+	}
+
+	TSharedPtr<FJsonObject> Data = Contract.ToJson();
+
+	const TSharedPtr<FJsonObject>* NodeParams = nullptr;
+	if (Params->TryGetObjectField(TEXT("params"), NodeParams) && NodeParams != nullptr)
+	{
+		// The probe Blueprint must have a valid ParentClass (and generated/skeleton classes) or
+		// AllocateDefaultPins on class-dependent nodes (CallFunction, Variable*, Event) will
+		// dereference null class context. Build a properly rooted transient Blueprint instead of a
+		// bare UBlueprint::StaticClass() instance; pins_allocated=false is reported for node types
+		// that still cannot allocate pins without a real graph (e.g. composite/custom events).
+		UBlueprint* ProbeOwner = NewObject<UBlueprint>(GetTransientPackage(), UBlueprint::StaticClass());
+		// Root the probe: it lives in the GC-eligible transient package and is referenced only by
+		// a raw pointer; CompileBlueprint can trigger a GC pass (reinstancing cleanup), which
+		// previously collected it and crashed MakeUniqueObjectName on the dangling outer when the
+		// probe graph was allocated.
+		ProbeOwner->AddToRoot();
+		ProbeOwner->ParentClass = AActor::StaticClass();
+		// Force generated/skeleton class recompile so class-aware pin allocation has valid context.
+		FKismetEditorUtilities::CompileBlueprint(ProbeOwner);
+		if (TSharedPtr<FJsonObject> Pins = AllocateProbePins(ProbeOwner, NodeClassName, *NodeParams))
+		{
+			// expected_pins must keep its stable array shape (the no-params contract serializes an
+			// array); the probe allocator wraps pins in { "pins": [...] }, so flatten it back.
+			const TArray<TSharedPtr<FJsonValue>>* PinArray = nullptr;
+			if (Pins->TryGetArrayField(TEXT("pins"), PinArray) && PinArray != nullptr)
+			{
+				Data->SetArrayField(TEXT("expected_pins"), *PinArray);
+				Data->SetBoolField(TEXT("pins_allocated"), true);
+			}
+		}
+		ProbeOwner->RemoveFromRoot();
+	}
 
 	return FCortexCommandRouter::Success(Data);
 }

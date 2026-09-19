@@ -35,6 +35,8 @@ public:
 	static FCortexCommandResult RemoveNode(const TSharedPtr<FJsonObject>& Params);
 	static FCortexCommandResult SetPinValue(const TSharedPtr<FJsonObject>& Params);
 	static FCortexCommandResult AutoLayout(const TSharedPtr<FJsonObject>& Params);
+	static FCortexCommandResult DescribeNode(const TSharedPtr<FJsonObject>& Params);
+	static UClass* ResolveNodeClass(const FString& NodeClassName);
 
 	// Shared helpers for reuse across CortexGraph operations
 	static UBlueprint* LoadBlueprint(const FString& AssetPath, FCortexCommandResult& OutError);

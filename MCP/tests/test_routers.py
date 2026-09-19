@@ -59,6 +59,62 @@ def test_make_router_dispatches_domain_command():
     )
 
 
+def test_core_router_handles_batch_query_without_controls():
+    """batch_query must still work with commands only."""
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {"ok": True}}
+
+    router = make_router("core", connection, "core docs")
+    commands = [{"command": "data.list_datatables", "params": {}}]
+    payload = json.loads(router("batch_query", {"commands": commands}))
+
+    assert payload["ok"] is True
+    connection.send_command.assert_called_once_with("batch", {"commands": commands})
+
+
+def test_core_router_batch_query_forwards_rollback_controls():
+    """The failure-atomic batch contract must survive the Python facade: stop_on_error,
+    rollback_on_error, and verify_rollback are forwarded to the editor unchanged."""
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {"ok": True}}
+
+    router = make_router("core", connection, "core docs")
+    commands = [{"command": "graph.add_node", "params": {"asset_path": "/Game/Test"}}]
+    payload = json.loads(router("batch_query", {
+        "commands": commands,
+        "stop_on_error": True,
+        "rollback_on_error": True,
+        "verify_rollback": True,
+    }))
+
+    assert payload["ok"] is True
+    connection.send_command.assert_called_once_with(
+        "batch",
+        {
+            "commands": commands,
+            "stop_on_error": True,
+            "rollback_on_error": True,
+            "verify_rollback": True,
+        },
+    )
+
+
+def test_core_router_batch_query_accepts_steps_alias_and_json_string():
+    """steps is a first-class alias for commands, and string commands are parsed."""
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {"ok": True}}
+
+    router = make_router("core", connection, "core docs")
+    commands = [{"command": "data.list_datatables", "params": {}}]
+    commands_json = json.dumps(commands)
+    router("batch_query", {"steps": commands_json, "rollback_on_error": True})
+
+    connection.send_command.assert_called_once_with(
+        "batch",
+        {"commands": commands, "rollback_on_error": True},
+    )
+
+
 def test_core_router_handles_switch_editor_locally():
     connection = MagicMock()
     connection.port = 8742

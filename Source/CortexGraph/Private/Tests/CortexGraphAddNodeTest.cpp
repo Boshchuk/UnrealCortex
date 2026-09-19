@@ -140,6 +140,44 @@ bool FCortexGraphAddNodeTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Error should be INVALID_FIELD"), Result.ErrorCode, CortexErrorCodes::InvalidField);
 	}
 
+	// Test: pre-mutation validation — invalid add must not change the node count
+	// and the error must embed the matching describe_node contract.
+	{
+		FCortexCommandResult Before = Router.Execute(TEXT("graph.get_subgraph"), ListParams);
+		int32 CountBefore = -1;
+		if (Before.bSuccess && Before.Data.IsValid())
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
+			if (Before.Data->TryGetArrayField(TEXT("nodes"), Nodes))
+			{
+				CountBefore = Nodes->Num();
+			}
+		}
+
+		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("asset_path"), AssetPath);
+		Params->SetStringField(TEXT("node_class"), TEXT("UK2Node_CallFunction"));
+		TSharedPtr<FJsonObject> NParams = MakeShared<FJsonObject>();
+		NParams->SetStringField(TEXT("function_name"), TEXT("Missing.Owner"));
+		Params->SetObjectField(TEXT("params"), NParams);
+
+		FCortexCommandResult BadResult = Router.Execute(TEXT("graph.add_node"), Params);
+		TestFalse(TEXT("add_node with invalid function must fail"), BadResult.bSuccess);
+		TestTrue(TEXT("invalid-field error embeds describe_node contract"),
+			BadResult.ErrorDetails.IsValid() && BadResult.ErrorDetails->HasField(TEXT("describe_node")));
+
+		FCortexCommandResult After = Router.Execute(TEXT("graph.get_subgraph"), ListParams);
+		TestTrue(TEXT("get_subgraph after failed add succeeds"), After.bSuccess);
+		if (After.bSuccess && After.Data.IsValid())
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
+			if (After.Data->TryGetArrayField(TEXT("nodes"), Nodes))
+			{
+				TestEqual(TEXT("node count unchanged after invalid add"), Nodes->Num(), CountBefore);
+			}
+		}
+	}
+
 	// Test: invalid function name on valid class should return error
 	{
 		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();

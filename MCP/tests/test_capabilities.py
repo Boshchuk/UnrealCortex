@@ -142,6 +142,30 @@ def test_fallback_editor_has_python_and_cvars_without_defer():
     assert "defer" not in run_python_params
 
 
+def test_fallback_batch_query_exposes_rollback_controls():
+    """Fallback core batch_query metadata must advertise the failure-atomic controls so a
+    no-cache session can still invoke rollback-enabled batches."""
+    fallback_commands = {cmd["name"]: cmd for cmd in _FALLBACK_STRUCTURED["core"]}
+    batch_params = {param["name"] for param in fallback_commands["batch_query"].get("params", [])}
+    assert "commands" in batch_params
+    assert "steps" in batch_params
+    assert "stop_on_error" in batch_params
+    assert "rollback_on_error" in batch_params
+    assert "verify_rollback" in batch_params
+
+
+def test_fallback_graph_includes_describe_node():
+    """Fallback graph metadata must expose describe_node alongside the authoring commands."""
+    command_names = {cmd["name"] for cmd in _FALLBACK_STRUCTURED["graph"]}
+    assert "describe_node" in command_names
+
+
+def test_fallback_umg_includes_set_widget_variable():
+    """Fallback umg metadata must expose the is_variable repair command."""
+    command_names = {cmd["name"] for cmd in _FALLBACK_STRUCTURED["umg"]}
+    assert "set_widget_variable" in command_names
+
+
 def test_anim_absent_from_fallback_fixture_until_promoted():
     """Phase A anim is live-capabilities only; fallback promotion needs an explicit fixture update."""
     fixture = json.loads((FIXTURES_DIR / "capabilities_cache_full.json").read_text(encoding="utf-8"))

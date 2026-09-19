@@ -23,6 +23,7 @@ struct CORTEXCORE_API FCortexCommandInfo
 	FString Name;
 	FString Description;
 	TArray<FCortexParamInfo> Params;
+	bool bRollbackSafe = false;
 
 	FCortexCommandInfo& Param(
 		const FString& ParamName,
@@ -59,6 +60,13 @@ struct CORTEXCORE_API FCortexCommandInfo
 		const FString& ParamDescription = TEXT("Optional stale-write guard for single-target mode"))
 	{
 		return Optional(TEXT("expected_fingerprint"), TEXT("object"), ParamDescription);
+	}
+
+	/** Opt in commands that are safe inside graph rollback-enabled batches. */
+	FCortexCommandInfo& RollbackSafe()
+	{
+		bRollbackSafe = true;
+		return *this;
 	}
 };
 
