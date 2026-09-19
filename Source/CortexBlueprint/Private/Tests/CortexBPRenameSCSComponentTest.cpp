@@ -4,6 +4,7 @@
 #include "CortexEditorUtils.h"
 #include "CortexTypes.h"
 #include "Components/TimelineComponent.h"
+#include "Containers/Ticker.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraphSchema_K2.h"
 #include "Editor.h"
@@ -15,7 +16,6 @@
 #include "K2Node_VariableGet.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
-#include "Misc/EngineVersionComparison.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -69,11 +69,19 @@ namespace
 				UPackage* Package = *It;
 				if (Package && RenameIsPackageUnderRoot(Package->GetName(), Root))
 				{
+					Package->SetDirtyFlag(false);
 					FAssetRegistryModule::PackageDeleted(Package);
 					Package->MarkAsGarbage();
 				}
 			}
 			CollectGarbage(RF_NoFlags);
+
+			IAssetRegistry& AssetRegistry =
+				FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+			AssetRegistry.WaitForCompletion();
+			FlushAsyncLoading();
+			FTSTicker::GetCoreTicker().Tick(0.0f);
+
 			FPackageName::UnRegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
 			IFileManager::Get().DeleteDirectory(*PhysicalDir, false, true);
 		}
@@ -118,11 +126,19 @@ namespace
 				UPackage* Package = *It;
 				if (Package && RenameIsPackageUnderRoot(Package->GetName(), Root))
 				{
+					Package->SetDirtyFlag(false);
 					FAssetRegistryModule::PackageDeleted(Package);
 					Package->MarkAsGarbage();
 				}
 			}
 			CollectGarbage(RF_NoFlags);
+
+			IAssetRegistry& AssetRegistry =
+				FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+			AssetRegistry.WaitForCompletion();
+			FlushAsyncLoading();
+			FTSTicker::GetCoreTicker().Tick(0.0f);
+
 			FCortexEditorUtils::RemoveTestWritableContentRoot(Root);
 			FPackageName::UnRegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
 			IFileManager::Get().DeleteDirectory(*PhysicalDir, false, true);
@@ -685,9 +701,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPRenameSCSComponentRejectsNonWritableDependentTest::RunTest(const FString& Parameters)
 {
-#if !UE_VERSION_OLDER_THAN(5, 8, 0)
-	AddExpectedError(TEXT("is not a child of an existing mount point"), EAutomationExpectedErrorFlags::Contains, 1);
-#endif
 	FScopedRenameReadOnlyMountedRoot ReadOnlyRoot;
 
 	UBlueprint* ParentBP = RenameCreateLiftBP(TEXT("BP_RenameSCS_ReadOnlyDepParent"));
@@ -730,8 +743,6 @@ bool FCortexBPRenameSCSComponentRejectsNonWritableDependentTest::RunTest(const F
 	TestFalse(TEXT("Parent was not renamed"), RenameHasSCSNode(ParentBP, TEXT("NewComp")));
 	TestEqual(TEXT("Child was not compiled"), ChildBP->Status, EBlueprintStatus::BS_Dirty);
 
-	FAssetRegistryModule::AssetDeleted(ChildBP);
-	ChildBP->MarkAsGarbage();
 	ParentBP->MarkAsGarbage();
 	return true;
 }

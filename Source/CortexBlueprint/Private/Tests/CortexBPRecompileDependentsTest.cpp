@@ -1,11 +1,11 @@
 #include "Misc/AutomationTest.h"
 #include "Operations/CortexBPCleanupOps.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "Containers/Ticker.h"
 #include "Dom/JsonObject.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Kismet2/KismetEditorUtilities.h"
-#include "Misc/EngineVersionComparison.h"
 #include "GameFramework/Actor.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
@@ -67,11 +67,19 @@ namespace
 				UPackage* Package = *It;
 				if (Package && IsPackageUnderRoot(Package->GetName(), Root))
 				{
+					Package->SetDirtyFlag(false);
 					FAssetRegistryModule::PackageDeleted(Package);
 					Package->MarkAsGarbage();
 				}
 			}
 			CollectGarbage(RF_NoFlags);
+
+			IAssetRegistry& AssetRegistry =
+				FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+			AssetRegistry.WaitForCompletion();
+			FlushAsyncLoading();
+			FTSTicker::GetCoreTicker().Tick(0.0f);
+
 			FPackageName::UnRegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
 			IFileManager::Get().DeleteDirectory(*PhysicalDir, false, true);
 		}
@@ -153,9 +161,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPRecompileDependentsRejectsNonWritableDependentTest::RunTest(const FString& Parameters)
 {
-#if !UE_VERSION_OLDER_THAN(5, 8, 0)
-	AddExpectedError(TEXT("is not a child of an existing mount point"), EAutomationExpectedErrorFlags::Contains, 1);
-#endif
 	FScopedReadOnlyMountedRoot ReadOnlyRoot;
 
 	UBlueprint* ParentBP = FKismetEditorUtilities::CreateBlueprint(
@@ -196,8 +201,6 @@ bool FCortexBPRecompileDependentsRejectsNonWritableDependentTest::RunTest(const 
 	TestEqual(TEXT("Error code is INVALID_FIELD"), Result.ErrorCode, CortexErrorCodes::InvalidField);
 	TestEqual(TEXT("Child was not compiled"), ChildBP->Status, EBlueprintStatus::BS_Dirty);
 
-	FAssetRegistryModule::AssetDeleted(ChildBP);
-	ChildBP->MarkAsGarbage();
 	ParentBP->MarkAsGarbage();
 	return true;
 }
