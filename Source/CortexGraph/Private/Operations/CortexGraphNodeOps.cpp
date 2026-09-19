@@ -285,6 +285,7 @@ TSharedPtr<FJsonObject> AllocateProbePins(
 	Pins->SetArrayField(TEXT("pins"), PinArray);
 	return Pins;
 }
+
 }
 
 UBlueprint* FCortexGraphNodeOps::LoadBlueprint(const FString& AssetPath, FCortexCommandResult& OutError)

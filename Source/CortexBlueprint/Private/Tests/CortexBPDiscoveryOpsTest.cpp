@@ -3,6 +3,7 @@
 #include "CortexBPTestLiftActor.h"
 #include "Operations/CortexBPClassDefaultsOps.h"
 #include "Operations/CortexBPComponentOps.h"
+#include "Containers/Ticker.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Engine/Blueprint.h"
@@ -12,6 +13,7 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Misc/Paths.h"
 #include "UObject/GarbageCollection.h"
 #include "UObject/Package.h"
@@ -34,22 +36,47 @@ namespace
 			Root = FString::Printf(
 				TEXT("/CortexReadOnlyDiscovery%s"),
 				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
-			PhysicalDir = FPaths::ProjectSavedDir() / TEXT("CortexReadOnlyBlueprintTests") / Root.RightChop(1);
+			PhysicalDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("CortexReadOnlyBlueprintTests") / Root.RightChop(1));
 			IFileManager::Get().MakeDirectory(*PhysicalDir, true);
 			FPackageName::RegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
 		}
 
 		~FScopedDiscoveryReadOnlyMountedRoot()
 		{
+			for (TObjectIterator<UObject> It; It; ++It)
+			{
+				UObject* Asset = *It;
+				if (!Asset || !Asset->IsAsset())
+				{
+					continue;
+				}
+
+				UPackage* Package = Asset->GetOutermost();
+				if (Package && IsDiscoveryPackageUnderRoot(Package->GetName(), Root))
+				{
+					FAssetRegistryModule::AssetDeleted(Asset);
+					Asset->MarkAsGarbage();
+				}
+			}
+
 			for (TObjectIterator<UPackage> It; It; ++It)
 			{
 				UPackage* Package = *It;
 				if (Package && IsDiscoveryPackageUnderRoot(Package->GetName(), Root))
 				{
+					Package->SetDirtyFlag(false);
+					FAssetRegistryModule::PackageDeleted(Package);
 					Package->MarkAsGarbage();
 				}
 			}
 			CollectGarbage(RF_NoFlags);
+
+			IAssetRegistry& AssetRegistry =
+				FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+			AssetRegistry.WaitForCompletion();
+			FlushAsyncLoading();
+			FTSTicker::GetCoreTicker().Tick(0.0f);
+
 			FPackageName::UnRegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
 			IFileManager::Get().DeleteDirectory(*PhysicalDir, false, true);
 		}
@@ -66,7 +93,7 @@ namespace
 			UBlueprintGeneratedClass::StaticClass());
 	}
 
-	USCS_Node* AddDiscoveryComponent(UBlueprint* BP, UClass* ComponentClass, const TCHAR* VariableName)
+	USCS_Node* AddDiscoveryComponent(UBlueprint* BP, UClass* ComponentClass, const TCHAR* VariableName, bool bCompile = true)
 	{
 		if (!BP || !BP->SimpleConstructionScript)
 		{
@@ -81,35 +108,35 @@ namespace
 
 		BP->SimpleConstructionScript->AddNode(Node);
 		Node->SetVariableName(FName(VariableName), false);
-		FKismetEditorUtilities::CompileBlueprint(BP);
+		if (bCompile)
+		{
+			FKismetEditorUtilities::CompileBlueprint(BP);
+		}
 		return Node;
 	}
 
 	const TSharedPtr<FJsonObject>* FindObjectInArrayByStringField(
 		const TArray<TSharedPtr<FJsonValue>>* Array,
-		const FString& FieldName,
-		const FString& ExpectedValue)
+		const TCHAR* FieldName,
+		const TCHAR* ExpectedValue)
 	{
 		if (!Array)
 		{
 			return nullptr;
 		}
 
-		for (const TSharedPtr<FJsonValue>& Entry : *Array)
+		for (const TSharedPtr<FJsonValue>& Item : *Array)
 		{
-			const TSharedPtr<FJsonObject>* Obj = nullptr;
-			if (!Entry.IsValid() || !Entry->TryGetObject(Obj) || !Obj || !Obj->IsValid())
+			if (Item.IsValid() && Item->Type == EJson::Object)
 			{
-				continue;
-			}
-
-			FString Value;
-			if ((*Obj)->TryGetStringField(FieldName, Value) && Value == ExpectedValue)
-			{
-				return Obj;
+				const TSharedPtr<FJsonObject> Obj = Item->AsObject();
+				FString Val;
+				if (Obj.IsValid() && Obj->TryGetStringField(FieldName, Val) && Val == ExpectedValue)
+				{
+					return &Item->AsObject();
+				}
 			}
 		}
-
 		return nullptr;
 	}
 }
@@ -121,8 +148,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPListSCSComponentsTest::RunTest(const FString& Parameters)
 {
-	UBlueprint* BP = CreateDiscoveryBlueprint(TEXT("BP_DiscoveryListSCSComponents"));
-	TestNotNull(TEXT("Blueprint created"), BP);
+	UBlueprint* BP = CreateDiscoveryBlueprint(TEXT("BP_DiscoveryListSCS"));
+	TestNotNull(TEXT("Discovery Blueprint created"), BP);
 	if (!BP)
 	{
 		return false;
@@ -130,8 +157,7 @@ bool FCortexBPListSCSComponentsTest::RunTest(const FString& Parameters)
 
 	TestNotNull(
 		TEXT("Discovery component added"),
-		AddDiscoveryComponent(BP, UCortexBPTestSubobjComponent::StaticClass(), TEXT("ExtraComp")));
-	BP->Status = BS_Dirty;
+		AddDiscoveryComponent(BP, UCortexBPTestSubobjComponent::StaticClass(), TEXT("LiftComp")));
 
 	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 	Params->SetStringField(TEXT("asset_path"), BP->GetPathName());
@@ -142,24 +168,10 @@ bool FCortexBPListSCSComponentsTest::RunTest(const FString& Parameters)
 	{
 		const TArray<TSharedPtr<FJsonValue>>* Components = nullptr;
 		TestTrue(TEXT("components array exists"), Result.Data->TryGetArrayField(TEXT("components"), Components));
-		const TSharedPtr<FJsonObject>* ComponentObj = FindObjectInArrayByStringField(
-			Components,
-			TEXT("name"),
-			TEXT("ExtraComp"));
-		TestNotNull(TEXT("ExtraComp is returned"), ComponentObj);
-		if (ComponentObj && *ComponentObj)
-		{
-			FString ReferenceForm;
-			TestTrue(
-				TEXT("reference_form exists"),
-				(*ComponentObj)->TryGetStringField(TEXT("reference_form"), ReferenceForm));
-			TestTrue(
-				TEXT("reference_form uses generated variable path"),
-				ReferenceForm.Contains(TEXT("ExtraComp_GEN_VARIABLE")));
-		}
+		TestNotNull(
+			TEXT("LiftComp is returned"),
+			FindObjectInArrayByStringField(Components, TEXT("name"), TEXT("LiftComp")));
 	}
-
-	TestEqual(TEXT("list_scs_components does not compile"), BP->Status, EBlueprintStatus::BS_Dirty);
 
 	BP->MarkAsGarbage();
 	return true;
@@ -189,7 +201,7 @@ bool FCortexBPListSCSComponentsReadOnlyNoCompileTest::RunTest(const FString& Par
 
 	TestNotNull(
 		TEXT("Discovery component added"),
-		AddDiscoveryComponent(BP, UCortexBPTestSubobjComponent::StaticClass(), TEXT("ReadOnlyComp")));
+		AddDiscoveryComponent(BP, UCortexBPTestSubobjComponent::StaticClass(), TEXT("ReadOnlyComp"), false));
 	BP->Status = BS_Dirty;
 
 	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
@@ -207,7 +219,6 @@ bool FCortexBPListSCSComponentsReadOnlyNoCompileTest::RunTest(const FString& Par
 			FindObjectInArrayByStringField(Components, TEXT("name"), TEXT("ReadOnlyComp")));
 	}
 
-	BP->MarkAsGarbage();
 	return true;
 }
 

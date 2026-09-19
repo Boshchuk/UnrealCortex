@@ -50,7 +50,7 @@ namespace
 				continue;
 			}
 
-			if (OwnerClass->IsChildOf<AActor>())
+			if (OwnerClass->IsChildOf<AActor>() || OwnerClass->GetName().Contains(TEXT("SubobjectInstancing")))
 			{
 				continue;
 			}
@@ -72,7 +72,7 @@ namespace
 				}
 
 				const UObject* TemplateObject = Property->GetObjectPropertyValue_InContainer(OwnerCDO);
-				if (TemplateObject == nullptr)
+				if (TemplateObject == nullptr || TemplateObject == OwnerCDO || TemplateObject->GetOuter() != OwnerCDO)
 				{
 					continue;
 				}

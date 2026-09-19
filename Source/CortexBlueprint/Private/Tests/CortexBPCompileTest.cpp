@@ -220,6 +220,8 @@ bool FCortexBPCompileWarningContractTest::RunTest(const FString& Parameters)
 	{
 		UFunction* Function = *It;
 		if (!Function
+			|| Function->HasAnyFlags(RF_MirroredGarbage | RF_NewerVersionExists)
+			|| !IsValid(Function)
 			|| !Function->HasAllFunctionFlags(FUNC_BlueprintCallable | FUNC_Static)
 			|| !Function->HasMetaData(TEXT("DeprecatedFunction")))
 		{
@@ -227,7 +229,11 @@ bool FCortexBPCompileWarningContractTest::RunTest(const FString& Parameters)
 		}
 
 		UClass* OwnerClass = Function->GetOwnerClass();
-		if (!OwnerClass || !OwnerClass->IsChildOf(UBlueprintFunctionLibrary::StaticClass()))
+		if (!OwnerClass
+			|| OwnerClass->HasAnyFlags(RF_MirroredGarbage | RF_NewerVersionExists)
+			|| !IsValid(OwnerClass)
+			|| !OwnerClass->IsNative()
+			|| !OwnerClass->IsChildOf(UBlueprintFunctionLibrary::StaticClass()))
 		{
 			continue;
 		}
@@ -239,6 +245,8 @@ bool FCortexBPCompileWarningContractTest::RunTest(const FString& Parameters)
 	{
 		UFunction* Function = *It;
 		if (!Function
+			|| Function->HasAnyFlags(RF_MirroredGarbage | RF_NewerVersionExists)
+			|| !IsValid(Function)
 			|| !Function->HasAllFunctionFlags(FUNC_BlueprintCallable)
 			|| Function->HasAnyFunctionFlags(FUNC_Static)
 			|| !Function->HasMetaData(TEXT("DeprecatedFunction")))
@@ -247,7 +255,11 @@ bool FCortexBPCompileWarningContractTest::RunTest(const FString& Parameters)
 		}
 
 		UClass* OwnerClass = Function->GetOwnerClass();
-		if (!OwnerClass || !OwnerClass->IsChildOf(AActor::StaticClass()))
+		if (!OwnerClass
+			|| OwnerClass->HasAnyFlags(RF_MirroredGarbage | RF_NewerVersionExists)
+			|| !IsValid(OwnerClass)
+			|| !OwnerClass->IsNative()
+			|| !OwnerClass->IsChildOf(AActor::StaticClass()))
 		{
 			continue;
 		}
@@ -296,6 +308,7 @@ bool FCortexBPCompileWarningContractTest::RunTest(const FString& Parameters)
 		}
 
 		EventGraph->RemoveNode(Node);
+		Node->MarkAsGarbage();
 		FBlueprintEditorUtils::MarkBlueprintAsModified(TestBP);
 		FTSTicker::GetCoreTicker().Tick(0.0f);
 	}

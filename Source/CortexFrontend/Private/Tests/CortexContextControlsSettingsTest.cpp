@@ -1,5 +1,21 @@
 #include "Misc/AutomationTest.h"
 #include "CortexFrontendSettings.h"
+#include "HAL/FileManager.h"
+#include "Misc/Guid.h"
+#include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
+
+namespace
+{
+    FString MakeIsolatedSettingsFilePath(const TCHAR* TestName)
+    {
+        return FPaths::Combine(
+            FPaths::ProjectSavedDir(),
+            TEXT("CortexFrontend"),
+            TEXT("Test"),
+            FString::Printf(TEXT("%s-%s.json"), TestName, *FGuid::NewGuid().ToString(EGuidFormats::Digits)));
+    }
+}
 
 // --- Task 2 tests: New field defaults and round-trips ---
 
@@ -92,7 +108,16 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexSettingsProjectContextDefaultTest,
 bool FCortexSettingsProjectContextDefaultTest::RunTest(const FString& Parameters)
 {
     (void)Parameters;
+    const FString SettingsFilePath = MakeIsolatedSettingsFilePath(TEXT("ProjectContextDefault"));
+    FCortexFrontendSettings::SetSettingsFilePathOverrideForTests(SettingsFilePath);
     FCortexFrontendSettings& Settings = FCortexFrontendSettings::Get();
+    Settings.Load();
+    ON_SCOPE_EXIT
+    {
+        FCortexFrontendSettings::ClearSettingsFilePathOverrideForTests();
+        IFileManager::Get().Delete(*SettingsFilePath, false, true, true);
+        Settings.Load();
+    };
     TestTrue(TEXT("Project context on by default"), Settings.GetProjectContext());
     return true;
 }
@@ -104,14 +129,22 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexSettingsProjectContextRoundTripTest,
 bool FCortexSettingsProjectContextRoundTripTest::RunTest(const FString& Parameters)
 {
     (void)Parameters;
+    const FString SettingsFilePath = MakeIsolatedSettingsFilePath(TEXT("ProjectContextRoundTrip"));
+    FCortexFrontendSettings::SetSettingsFilePathOverrideForTests(SettingsFilePath);
     FCortexFrontendSettings& Settings = FCortexFrontendSettings::Get();
-    const bool bOriginal = Settings.GetProjectContext();
+    Settings.Load();
+    ON_SCOPE_EXIT
+    {
+        FCortexFrontendSettings::ClearSettingsFilePathOverrideForTests();
+        IFileManager::Get().Delete(*SettingsFilePath, false, true, true);
+        Settings.Load();
+    };
 
     Settings.SetProjectContext(false);
     Settings.Load();
     TestFalse(TEXT("False persists"), Settings.GetProjectContext());
 
-    Settings.SetProjectContext(bOriginal);
+    Settings.SetProjectContext(true);
     Settings.ClearPendingChanges();
     return true;
 }
@@ -123,7 +156,16 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexSettingsDirectiveDefaultTest,
 bool FCortexSettingsDirectiveDefaultTest::RunTest(const FString& Parameters)
 {
     (void)Parameters;
+    const FString SettingsFilePath = MakeIsolatedSettingsFilePath(TEXT("DirectiveDefault"));
+    FCortexFrontendSettings::SetSettingsFilePathOverrideForTests(SettingsFilePath);
     FCortexFrontendSettings& Settings = FCortexFrontendSettings::Get();
+    Settings.Load();
+    ON_SCOPE_EXIT
+    {
+        FCortexFrontendSettings::ClearSettingsFilePathOverrideForTests();
+        IFileManager::Get().Delete(*SettingsFilePath, false, true, true);
+        Settings.Load();
+    };
     TestTrue(TEXT("Directive empty by default"), Settings.GetCustomDirective().IsEmpty());
     return true;
 }
@@ -135,14 +177,22 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexSettingsDirectiveRoundTripTest,
 bool FCortexSettingsDirectiveRoundTripTest::RunTest(const FString& Parameters)
 {
     (void)Parameters;
+    const FString SettingsFilePath = MakeIsolatedSettingsFilePath(TEXT("DirectiveRoundTrip"));
+    FCortexFrontendSettings::SetSettingsFilePathOverrideForTests(SettingsFilePath);
     FCortexFrontendSettings& Settings = FCortexFrontendSettings::Get();
-    const FString Original = Settings.GetCustomDirective();
+    Settings.Load();
+    ON_SCOPE_EXIT
+    {
+        FCortexFrontendSettings::ClearSettingsFilePathOverrideForTests();
+        IFileManager::Get().Delete(*SettingsFilePath, false, true, true);
+        Settings.Load();
+    };
 
     Settings.SetCustomDirective(TEXT("Focus on Blueprints"));
     Settings.Load();
     TestEqual(TEXT("Directive persists"), Settings.GetCustomDirective(), TEXT("Focus on Blueprints"));
 
-    Settings.SetCustomDirective(Original);
+    Settings.SetCustomDirective(FString());
     Settings.ClearPendingChanges();
     return true;
 }
@@ -158,7 +208,16 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexSettingsAutoContextDefaultTest,
 bool FCortexSettingsAutoContextDefaultTest::RunTest(const FString& Parameters)
 {
     (void)Parameters;
+    const FString SettingsFilePath = MakeIsolatedSettingsFilePath(TEXT("AutoContextDefault"));
+    FCortexFrontendSettings::SetSettingsFilePathOverrideForTests(SettingsFilePath);
     FCortexFrontendSettings& Settings = FCortexFrontendSettings::Get();
+    Settings.Load();
+    ON_SCOPE_EXIT
+    {
+        FCortexFrontendSettings::ClearSettingsFilePathOverrideForTests();
+        IFileManager::Get().Delete(*SettingsFilePath, false, true, true);
+        Settings.Load();
+    };
     TestTrue(TEXT("Auto-context on by default"), Settings.GetAutoContext());
     return true;
 }
@@ -170,14 +229,22 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexSettingsAutoContextRoundTripTest,
 bool FCortexSettingsAutoContextRoundTripTest::RunTest(const FString& Parameters)
 {
     (void)Parameters;
+    const FString SettingsFilePath = MakeIsolatedSettingsFilePath(TEXT("AutoContextRoundTrip"));
+    FCortexFrontendSettings::SetSettingsFilePathOverrideForTests(SettingsFilePath);
     FCortexFrontendSettings& Settings = FCortexFrontendSettings::Get();
-    const bool bOriginal = Settings.GetAutoContext();
+    Settings.Load();
+    ON_SCOPE_EXIT
+    {
+        FCortexFrontendSettings::ClearSettingsFilePathOverrideForTests();
+        IFileManager::Get().Delete(*SettingsFilePath, false, true, true);
+        Settings.Load();
+    };
 
     Settings.SetAutoContext(false);
     Settings.Load();
     TestFalse(TEXT("False persists"), Settings.GetAutoContext());
 
-    Settings.SetAutoContext(bOriginal);
+    Settings.SetAutoContext(true);
     Settings.ClearPendingChanges();
     return true;
 }

@@ -2,6 +2,7 @@
 #include "CortexCommandRouter.h"
 #include "CortexBatchScope.h"
 #include "CortexCoreModule.h"
+#include "CortexEngineCompat.h"
 #include "CortexFileUtils.h"
 #include "ICortexDomainHandler.h"
 #include "Misc/EngineVersion.h"
@@ -103,7 +104,7 @@ FString BuildSerializationErrorResponse(const FString& RequestId)
 TSharedPtr<FJsonObject> BuildCapabilitiesData(const TArray<FCortexRegisteredDomain>& RegisteredDomains)
 {
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
-	Data->SetStringField(TEXT("plugin_version"), TEXT("0.1.13"));
+	Data->SetStringField(TEXT("plugin_version"), TEXT("0.1.16"));
 
 	TSharedPtr<FJsonObject> Domains = MakeShared<FJsonObject>();
 
@@ -545,7 +546,7 @@ TSharedPtr<FJsonObject> FCortexCommandRouter::DeepCopyJsonObject(const TSharedPt
 	TSharedPtr<FJsonObject> Copy = MakeShared<FJsonObject>();
 	for (const auto& Pair : Source->Values)
 	{
-		Copy->SetField(Pair.Key, DeepCopyJsonValue(Pair.Value));
+		Copy->SetField(CortexEngineCompat::JsonKeyToString(Pair.Key), DeepCopyJsonValue(Pair.Value));
 	}
 	return Copy;
 }
@@ -620,11 +621,15 @@ bool FCortexCommandRouter::ResolveObjectRefs(
 
 	// Iterate over all fields and resolve refs
 	TArray<FString> Keys;
-	Params->Values.GetKeys(Keys);
+	Keys.Reserve(Params->Values.Num());
+	for (const auto& Pair : Params->Values)
+	{
+		Keys.Add(CortexEngineCompat::JsonKeyToString(Pair.Key));
+	}
 
 	for (const FString& Key : Keys)
 	{
-		TSharedPtr<FJsonValue> Value = Params->Values[Key];
+		TSharedPtr<FJsonValue> Value = Params->TryGetField(Key);
 		if (!ResolveValueRefs(Value, Key, StepResults, CurrentStepIndex, OutError, 0))
 		{
 			return false;
@@ -1134,7 +1139,7 @@ FCortexCommandResult FCortexCommandRouter::HandleGetStatus(const TSharedPtr<FJso
 {
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetBoolField(TEXT("connected"), true);
-	Data->SetStringField(TEXT("plugin_version"), TEXT("0.1.13"));
+	Data->SetStringField(TEXT("plugin_version"), TEXT("0.1.16"));
 
 	// Engine version
 	Data->SetStringField(TEXT("engine_version"), FEngineVersion::Current().ToString());

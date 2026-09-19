@@ -1,6 +1,7 @@
 #include "CoreMinimal.h"
 #include "CortexCommandRouter.h"
 #include "CortexDataCommandHandler.h"
+#include "CortexEngineCompat.h"
 #include "CortexSafeFileContract.h"
 #include "CortexSerializer.h"
 #include "CortexTypes.h"
@@ -226,7 +227,8 @@ namespace
 
 		FString MakeSavedOutputPath(const FString& FileName) const
 		{
-			return FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexImportQueueTests"), RunId, FileName);
+			return FPaths::ConvertRelativePathToFull(
+				FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexImportQueueTests"), RunId, FileName));
 		}
 
 		void WriteQueueFile(const FString& FilePath, const FString& QueueId, const TArray<TSharedRef<FJsonObject>>& Operations) const
@@ -1416,7 +1418,8 @@ bool FCortexDataImportQueueHelperParityUpdateStringTableRejectsMalformedOperatio
 		return false;
 	}
 
-	StringTable->GetMutableStringTable()->SetSourceString(TEXT("existing"), TEXT("Original"));
+	CortexEngineCompat::SetStringTableSourceString(
+		*StringTable->GetMutableStringTable(), TEXT("existing"), TEXT("Original"));
 
 	TSharedRef<FJsonObject> ValidSetOperation = MakeShared<FJsonObject>();
 	ValidSetOperation->SetStringField(TEXT("type"), TEXT("set"));

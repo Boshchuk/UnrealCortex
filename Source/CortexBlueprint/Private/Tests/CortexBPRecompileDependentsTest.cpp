@@ -1,5 +1,7 @@
 #include "Misc/AutomationTest.h"
 #include "Operations/CortexBPCleanupOps.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Containers/Ticker.h"
 #include "Dom/JsonObject.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
@@ -37,22 +39,47 @@ namespace
 			Root = FString::Printf(
 				TEXT("/CortexReadOnly%s"),
 				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
-			PhysicalDir = FPaths::ProjectSavedDir() / TEXT("CortexReadOnlyBlueprintTests") / Root.RightChop(1);
+			PhysicalDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("CortexReadOnlyBlueprintTests") / Root.RightChop(1));
 			IFileManager::Get().MakeDirectory(*PhysicalDir, true);
 			FPackageName::RegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
 		}
 
 		~FScopedReadOnlyMountedRoot()
 		{
+			for (TObjectIterator<UObject> It; It; ++It)
+			{
+				UObject* Asset = *It;
+				if (!Asset || !Asset->IsAsset())
+				{
+					continue;
+				}
+
+				UPackage* Package = Asset->GetOutermost();
+				if (Package && IsPackageUnderRoot(Package->GetName(), Root))
+				{
+					FAssetRegistryModule::AssetDeleted(Asset);
+					Asset->MarkAsGarbage();
+				}
+			}
+
 			for (TObjectIterator<UPackage> It; It; ++It)
 			{
 				UPackage* Package = *It;
 				if (Package && IsPackageUnderRoot(Package->GetName(), Root))
 				{
+					Package->SetDirtyFlag(false);
+					FAssetRegistryModule::PackageDeleted(Package);
 					Package->MarkAsGarbage();
 				}
 			}
 			CollectGarbage(RF_NoFlags);
+
+			IAssetRegistry& AssetRegistry =
+				FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+			AssetRegistry.WaitForCompletion();
+			FlushAsyncLoading();
+			FTSTicker::GetCoreTicker().Tick(0.0f);
+
 			FPackageName::UnRegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
 			IFileManager::Get().DeleteDirectory(*PhysicalDir, false, true);
 		}
@@ -174,7 +201,6 @@ bool FCortexBPRecompileDependentsRejectsNonWritableDependentTest::RunTest(const 
 	TestEqual(TEXT("Error code is INVALID_FIELD"), Result.ErrorCode, CortexErrorCodes::InvalidField);
 	TestEqual(TEXT("Child was not compiled"), ChildBP->Status, EBlueprintStatus::BS_Dirty);
 
-	ChildBP->MarkAsGarbage();
 	ParentBP->MarkAsGarbage();
 	return true;
 }

@@ -1,6 +1,7 @@
 #include "CoreMinimal.h"
 #include "CortexCommandRouter.h"
 #include "CortexDataCommandHandler.h"
+#include "CortexEngineCompat.h"
 #include "CortexTypes.h"
 #include "Tests/CortexDataLocalizationTestTypes.h"
 #include "Tests/CortexTestDataAsset.h"
@@ -210,10 +211,14 @@ namespace
 			}
 
 			Table->GetMutableStringTable()->SetNamespace(TEXT("CortexExportTests"));
-			Table->GetMutableStringTable()->SetSourceString(TEXT("zeta.key"), TEXT("Zeta text"));
-			Table->GetMutableStringTable()->SetSourceString(TEXT("alpha.key"), TEXT("Alpha text"));
-			Table->GetMutableStringTable()->SetSourceString(TEXT("middle.key"), TEXT("Middle text"));
-			Table->GetMutableStringTable()->SetSourceString(TEXT("ignored.other"), TEXT("Ignored text"));
+			CortexEngineCompat::SetStringTableSourceString(
+				*Table->GetMutableStringTable(), TEXT("zeta.key"), TEXT("Zeta text"));
+			CortexEngineCompat::SetStringTableSourceString(
+				*Table->GetMutableStringTable(), TEXT("alpha.key"), TEXT("Alpha text"));
+			CortexEngineCompat::SetStringTableSourceString(
+				*Table->GetMutableStringTable(), TEXT("middle.key"), TEXT("Middle text"));
+			CortexEngineCompat::SetStringTableSourceString(
+				*Table->GetMutableStringTable(), TEXT("ignored.other"), TEXT("Ignored text"));
 			return Table;
 		}
 
@@ -352,7 +357,8 @@ namespace
 	private:
 		FString GetSavedRunDir() const
 		{
-			return FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexExportTests"), RunId);
+			return FPaths::ConvertRelativePathToFull(
+				FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexExportTests"), RunId));
 		}
 
 		template <typename AssetType>
@@ -806,6 +812,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCortexDataExportFixtureSmokeTest::RunTest(const FString& Parameters)
 {
 	FCortexDataExportTestFixture Fixture;
+	TestFalse(
+		TEXT("Export run directory is absolute"),
+		FPaths::IsRelative(Fixture.MakeSavedOutputPath(TEXT("probe.json"))));
 
 	UDataTable* RegularTable = Fixture.CreateRegularDataTable();
 	TestNotNull(TEXT("regular DataTable fixture is created"), RegularTable);
@@ -895,7 +904,8 @@ bool FCortexDataExportCommandsRegisteredTest::RunTest(const FString& Parameters)
 	FCortexCommandRouter Router = CreateDataExportTestRouter();
 	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 	Params->SetStringField(TEXT("table_path"), TEXT("/Game/CortexExportTests/Missing.Missing"));
-	Params->SetStringField(TEXT("out_path"), FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexExportTests"), TEXT("registered.json")));
+	Params->SetStringField(TEXT("out_path"), FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexExportTests"), TEXT("registered.json"))));
 
 	const FCortexCommandResult Result = Router.Execute(TEXT("data.export_datatable_json"), Params);
 	TestFalse(TEXT("export_datatable_json is registered and validates the missing table"), Result.bSuccess);

@@ -4,6 +4,7 @@
 #include "CortexEditorUtils.h"
 #include "CortexTypes.h"
 #include "Components/TimelineComponent.h"
+#include "Containers/Ticker.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraphSchema_K2.h"
 #include "Editor.h"
@@ -17,6 +18,7 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Misc/Paths.h"
 #include "UObject/GarbageCollection.h"
 #include "UObject/Package.h"
@@ -39,22 +41,47 @@ namespace
 			Root = FString::Printf(
 				TEXT("/CortexReadOnlyRename%s"),
 				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
-			PhysicalDir = FPaths::ProjectSavedDir() / TEXT("CortexReadOnlyBlueprintTests") / Root.RightChop(1);
+			PhysicalDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("CortexReadOnlyBlueprintTests") / Root.RightChop(1));
 			IFileManager::Get().MakeDirectory(*PhysicalDir, true);
 			FPackageName::RegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
 		}
 
 		~FScopedRenameReadOnlyMountedRoot()
 		{
+			for (TObjectIterator<UObject> It; It; ++It)
+			{
+				UObject* Asset = *It;
+				if (!Asset || !Asset->IsAsset())
+				{
+					continue;
+				}
+
+				UPackage* Package = Asset->GetOutermost();
+				if (Package && RenameIsPackageUnderRoot(Package->GetName(), Root))
+				{
+					FAssetRegistryModule::AssetDeleted(Asset);
+					Asset->MarkAsGarbage();
+				}
+			}
+
 			for (TObjectIterator<UPackage> It; It; ++It)
 			{
 				UPackage* Package = *It;
 				if (Package && RenameIsPackageUnderRoot(Package->GetName(), Root))
 				{
+					Package->SetDirtyFlag(false);
+					FAssetRegistryModule::PackageDeleted(Package);
 					Package->MarkAsGarbage();
 				}
 			}
 			CollectGarbage(RF_NoFlags);
+
+			IAssetRegistry& AssetRegistry =
+				FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+			AssetRegistry.WaitForCompletion();
+			FlushAsyncLoading();
+			FTSTicker::GetCoreTicker().Tick(0.0f);
+
 			FPackageName::UnRegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
 			IFileManager::Get().DeleteDirectory(*PhysicalDir, false, true);
 		}
@@ -70,7 +97,7 @@ namespace
 			Root = FString::Printf(
 				TEXT("/CortexRename%s"),
 				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
-			PhysicalDir = FPaths::ProjectSavedDir() / TEXT("CortexRenameBlueprintTests") / Root.RightChop(1);
+			PhysicalDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("CortexRenameBlueprintTests") / Root.RightChop(1));
 			IFileManager::Get().MakeDirectory(*PhysicalDir, true);
 			FPackageName::RegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
 			FCortexEditorUtils::AddTestWritableContentRoot(Root);
@@ -78,15 +105,40 @@ namespace
 
 		~FScopedRenameWritableMountedRoot()
 		{
+			for (TObjectIterator<UObject> It; It; ++It)
+			{
+				UObject* Asset = *It;
+				if (!Asset || !Asset->IsAsset())
+				{
+					continue;
+				}
+
+				UPackage* Package = Asset->GetOutermost();
+				if (Package && RenameIsPackageUnderRoot(Package->GetName(), Root))
+				{
+					FAssetRegistryModule::AssetDeleted(Asset);
+					Asset->MarkAsGarbage();
+				}
+			}
+
 			for (TObjectIterator<UPackage> It; It; ++It)
 			{
 				UPackage* Package = *It;
 				if (Package && RenameIsPackageUnderRoot(Package->GetName(), Root))
 				{
+					Package->SetDirtyFlag(false);
+					FAssetRegistryModule::PackageDeleted(Package);
 					Package->MarkAsGarbage();
 				}
 			}
 			CollectGarbage(RF_NoFlags);
+
+			IAssetRegistry& AssetRegistry =
+				FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+			AssetRegistry.WaitForCompletion();
+			FlushAsyncLoading();
+			FTSTicker::GetCoreTicker().Tick(0.0f);
+
 			FCortexEditorUtils::RemoveTestWritableContentRoot(Root);
 			FPackageName::UnRegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
 			IFileManager::Get().DeleteDirectory(*PhysicalDir, false, true);
@@ -691,7 +743,6 @@ bool FCortexBPRenameSCSComponentRejectsNonWritableDependentTest::RunTest(const F
 	TestFalse(TEXT("Parent was not renamed"), RenameHasSCSNode(ParentBP, TEXT("NewComp")));
 	TestEqual(TEXT("Child was not compiled"), ChildBP->Status, EBlueprintStatus::BS_Dirty);
 
-	ChildBP->MarkAsGarbage();
 	ParentBP->MarkAsGarbage();
 	return true;
 }

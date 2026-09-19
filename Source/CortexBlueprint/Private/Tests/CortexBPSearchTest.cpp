@@ -1,6 +1,7 @@
 #include "Misc/AutomationTest.h"
 #include "CortexBPCommandHandler.h"
 #include "CortexCommandRouter.h"
+#include "CortexEngineCompat.h"
 #include "CortexGraphCommandHandler.h"
 #include "CortexTypes.h"
 #include "Misc/Guid.h"
@@ -54,7 +55,10 @@ namespace
 		UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *AssetPath);
 		if (Blueprint)
 		{
-			Blueprint->GetOutermost()->MarkAsGarbage();
+			if (UPackage* Package = Blueprint->GetOutermost())
+			{
+				Package->MarkAsGarbage();
+			}
 		}
 	}
 }
@@ -519,7 +523,8 @@ bool FCortexBPSearchWidgetStringTableMatchTest::RunTest(const FString& Parameter
 		GetTransientPackage(),
 		FName(TEXT("TestStringTable_BPSearchWidget")));
 	TestTable->GetMutableStringTable()->SetNamespace(TEXT("BPWidgetTest"));
-	TestTable->GetMutableStringTable()->SetSourceString(TEXT("WidgetSearchKey"), TEXT("Widget Search Value"));
+	CortexEngineCompat::SetStringTableSourceString(
+		*TestTable->GetMutableStringTable(), TEXT("WidgetSearchKey"), TEXT("Widget Search Value"));
 
 	void* ValuePtr = TextProperty->ContainerPtrToValuePtr<void>(TextWidget);
 	TextProperty->SetPropertyValue(ValuePtr,
@@ -618,11 +623,15 @@ bool FCortexBPSearchPinTypedTextStringTableMatchTest::RunTest(const FString& Par
 	}
 	TestFalse(TEXT("Added node should have node_id"), TextNodeId.IsEmpty());
 
+	const FString TablePackageName = FString::Printf(TEXT("/Game/Temp/TestTable_%s"), *Suffix);
+	UPackage* TablePackage = CreatePackage(*TablePackageName);
 	UStringTable* TestTable = NewObject<UStringTable>(
-		GetTransientPackage(),
-		FName(TEXT("TestStringTable_BPSearchPinTypedText")));
+		TablePackage,
+		FName(TEXT("TestStringTable_BPSearchPinTypedText")),
+		RF_Public | RF_Standalone);
 	TestTable->GetMutableStringTable()->SetNamespace(TEXT("BPPinSearch"));
-	TestTable->GetMutableStringTable()->SetSourceString(TEXT("Mail.Button.Pay"), TEXT("Pay"));
+	CortexEngineCompat::SetStringTableSourceString(
+		*TestTable->GetMutableStringTable(), TEXT("Mail.Button.Pay"), TEXT("Pay"));
 
 	TSharedPtr<FJsonObject> StringTablePayload = MakeShared<FJsonObject>();
 	StringTablePayload->SetStringField(TEXT("table_id"), TestTable->GetStringTableId().ToString());
@@ -691,7 +700,7 @@ bool FCortexBPSearchPinTypedTextStringTableMatchTest::RunTest(const FString& Par
 
 	TestTrue(TEXT("search should match typed text pin StringTable key"), bFoundPinMatch);
 
-	TestTable->MarkAsGarbage();
+	TablePackage->MarkAsGarbage();
 	CleanupSearchTestBlueprint(AssetPath);
 	return true;
 }
