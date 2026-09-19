@@ -1,5 +1,6 @@
 #include "Misc/AutomationTest.h"
 #include "CortexCommandRouter.h"
+#include "CortexEngineCompat.h"
 #include "CortexGraphCommandHandler.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -86,7 +87,8 @@ bool FCortexGraphSetTextPinValueStringTableTest::RunTest(const FString& Paramete
 		GetTransientPackage(),
 		FName(TEXT("TestStringTable_GraphTextMutation")));
 	TestTable->GetMutableStringTable()->SetNamespace(TEXT("TestNS"));
-	TestTable->GetMutableStringTable()->SetSourceString(TEXT("Mail.Button.Pay"), TEXT("Pay"));
+	CortexEngineCompat::SetStringTableSourceString(
+		*TestTable->GetMutableStringTable(), TEXT("Mail.Button.Pay"), TEXT("Pay"));
 
 	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
 	const FString PackageName = FString::Printf(TEXT("/Game/Temp/CortexGraphSetTextPinValueStringTable_%s"), *Suffix);

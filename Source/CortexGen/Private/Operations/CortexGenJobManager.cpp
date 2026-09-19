@@ -1,4 +1,5 @@
 #include "Operations/CortexGenJobManager.h"
+#include "CortexEngineCompat.h"
 #include "CortexGenModule.h"
 #include "CortexGenSettings.h"
 #include "Providers/ICortexGenProvider.h"
@@ -861,7 +862,7 @@ void FCortexGenJobManager::LoadTimingData()
             continue;
         }
 
-        TArray<float>& Samples = TimingData.FindOrAdd(Pair.Key);
+        TArray<float>& Samples = TimingData.FindOrAdd(CortexEngineCompat::JsonKeyToString(Pair.Key));
         for (const auto& Val : *SamplesArray)
         {
             double D;

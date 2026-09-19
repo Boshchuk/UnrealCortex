@@ -1,6 +1,7 @@
 #include "Misc/AutomationTest.h"
 #include "CortexBPCommandHandler.h"
 #include "CortexCommandRouter.h"
+#include "CortexEngineCompat.h"
 #include "CortexGraphCommandHandler.h"
 #include "CortexTypes.h"
 #include "Misc/Guid.h"
@@ -519,7 +520,8 @@ bool FCortexBPSearchWidgetStringTableMatchTest::RunTest(const FString& Parameter
 		GetTransientPackage(),
 		FName(TEXT("TestStringTable_BPSearchWidget")));
 	TestTable->GetMutableStringTable()->SetNamespace(TEXT("BPWidgetTest"));
-	TestTable->GetMutableStringTable()->SetSourceString(TEXT("WidgetSearchKey"), TEXT("Widget Search Value"));
+	CortexEngineCompat::SetStringTableSourceString(
+		*TestTable->GetMutableStringTable(), TEXT("WidgetSearchKey"), TEXT("Widget Search Value"));
 
 	void* ValuePtr = TextProperty->ContainerPtrToValuePtr<void>(TextWidget);
 	TextProperty->SetPropertyValue(ValuePtr,
@@ -622,7 +624,8 @@ bool FCortexBPSearchPinTypedTextStringTableMatchTest::RunTest(const FString& Par
 		GetTransientPackage(),
 		FName(TEXT("TestStringTable_BPSearchPinTypedText")));
 	TestTable->GetMutableStringTable()->SetNamespace(TEXT("BPPinSearch"));
-	TestTable->GetMutableStringTable()->SetSourceString(TEXT("Mail.Button.Pay"), TEXT("Pay"));
+	CortexEngineCompat::SetStringTableSourceString(
+		*TestTable->GetMutableStringTable(), TEXT("Mail.Button.Pay"), TEXT("Pay"));
 
 	TSharedPtr<FJsonObject> StringTablePayload = MakeShared<FJsonObject>();
 	StringTablePayload->SetStringField(TEXT("table_id"), TestTable->GetStringTableId().ToString());

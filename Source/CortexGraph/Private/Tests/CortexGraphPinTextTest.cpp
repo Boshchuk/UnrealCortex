@@ -1,4 +1,5 @@
 #include "Misc/AutomationTest.h"
+#include "CortexEngineCompat.h"
 #include "Operations/CortexGraphNodeOps.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
@@ -57,7 +58,8 @@ bool FCortexGraphPinTextStringTableTest::RunTest(const FString& Parameters)
 		GetTransientPackage(),
 		FName(TEXT("TestStringTable_PinText")));
 	TestTable->GetMutableStringTable()->SetNamespace(TEXT("TestNS"));
-	TestTable->GetMutableStringTable()->SetSourceString(TEXT("PinKey"), TEXT("Pin Table Value"));
+	CortexEngineCompat::SetStringTableSourceString(
+		*TestTable->GetMutableStringTable(), TEXT("PinKey"), TEXT("Pin Table Value"));
 
 	UEdGraph* TestGraph = NewObject<UEdGraph>(GetTransientPackage());
 	TestGraph->Schema = UEdGraphSchema_K2::StaticClass();
