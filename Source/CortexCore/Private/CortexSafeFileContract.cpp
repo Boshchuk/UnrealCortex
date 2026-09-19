@@ -7,6 +7,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
 #include "Misc/Paths.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "Serialization/JsonWriter.h"
 
 #if PLATFORM_WINDOWS
@@ -63,7 +64,7 @@ FString NormalizeCortexSafePathForComparison(const FString& InPath)
 	{
 		if (FPaths::IsRelative(Path))
 		{
-			Path = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), Path);
+			Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(), Path));
 		}
 		else
 		{
@@ -228,7 +229,7 @@ bool ResolvePathForContract(
 	FString Candidate = SlashPath;
 	if (FPaths::IsRelative(Candidate))
 	{
-		Candidate = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), Candidate);
+		Candidate = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(), Candidate));
 	}
 	else
 	{
@@ -294,9 +295,11 @@ bool ResolvePathForContract(
 	return true;
 }
 
-void WriteCanonicalValue(const TSharedPtr<FJsonValue>& Value, TJsonWriter<>& Writer);
+template <typename CharType, typename PrintPolicy>
+void WriteCanonicalValue(const TSharedPtr<FJsonValue>& Value, TJsonWriter<CharType, PrintPolicy>& Writer);
 
-void WriteCanonicalObject(const TSharedPtr<FJsonObject>& Object, TJsonWriter<>& Writer)
+template <typename CharType, typename PrintPolicy>
+void WriteCanonicalObject(const TSharedPtr<FJsonObject>& Object, TJsonWriter<CharType, PrintPolicy>& Writer)
 {
 	Writer.WriteObjectStart();
 	if (Object.IsValid())
@@ -324,7 +327,8 @@ void WriteCanonicalObject(const TSharedPtr<FJsonObject>& Object, TJsonWriter<>& 
 	Writer.WriteObjectEnd();
 }
 
-void WriteCanonicalValue(const TSharedPtr<FJsonValue>& Value, TJsonWriter<>& Writer)
+template <typename CharType, typename PrintPolicy>
+void WriteCanonicalValue(const TSharedPtr<FJsonValue>& Value, TJsonWriter<CharType, PrintPolicy>& Writer)
 {
 	if (!Value.IsValid() || Value->Type == EJson::Null)
 	{
@@ -600,7 +604,8 @@ bool FCortexSafeFileContract::HashFileBytesSha256(
 FString FCortexSafeFileContract::SerializeCanonicalJson(const TSharedRef<FJsonObject>& Payload)
 {
 	FString Output;
-	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Output);
+	TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+		TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Output);
 	WriteCanonicalObject(Payload, *Writer);
 	Writer->Close();
 	return Output;

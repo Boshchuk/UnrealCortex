@@ -1,7 +1,9 @@
 #pragma once
 
 #include "Dom/JsonObject.h"
+#include "Internationalization/StringTable.h"
 #include "Internationalization/StringTableCore.h"
+#include "Internationalization/StringTableRegistry.h"
 #include "Misc/EngineVersionComparison.h"
 
 namespace CortexEngineCompat
@@ -27,6 +29,14 @@ namespace CortexEngineCompat
 		StringTable.SetSourceString(Key, SourceString);
 #else
 		StringTable.SetSourceString(Key, SourceString, FString());
+		if (UStringTable* OwnerAsset = StringTable.GetOwnerAsset())
+		{
+			const FName TableId = OwnerAsset->GetStringTableId();
+			if (!FStringTableRegistry::Get().FindStringTable(TableId).IsValid())
+			{
+				FStringTableRegistry::Get().RegisterStringTable(TableId, StringTable.AsShared());
+			}
+		}
 #endif
 	}
 }

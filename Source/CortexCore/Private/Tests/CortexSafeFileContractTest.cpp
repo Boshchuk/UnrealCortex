@@ -13,7 +13,8 @@ namespace
 {
 FString GetSafeFileContractTestRoot()
 {
-	return FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexSafeFileContract"));
+	return FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexSafeFileContract")));
 }
 
 void CleanupSafeFileContractTestRoot()
