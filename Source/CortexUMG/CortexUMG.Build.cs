@@ -24,6 +24,7 @@ public class CortexUMG : ModuleRules
             "Slate",
             "SlateCore",
             "MovieScene",
+            "MovieSceneTracks",
         });
     }
 }

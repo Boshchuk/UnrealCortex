@@ -104,6 +104,10 @@ FCortexCommandResult FCortexUMGCommandHandler::Execute(
     {
         return FCortexUMGWidgetAnimationOps::RemoveAnimation(Params);
     }
+    if (Command == TEXT("list_animation_bindings"))
+    {
+        return FCortexUMGWidgetAnimationOps::ListAnimationBindings(Params);
+    }
 
     if (Command == TEXT("set_widget_variable"))
     {
@@ -227,5 +231,11 @@ TArray<FCortexCommandInfo> FCortexUMGCommandHandler::GetSupportedCommands() cons
         FCortexCommandInfo{ TEXT("remove_animation"), TEXT("Remove an animation") }
             .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
             .Required(TEXT("animation_name"), TEXT("string"), TEXT("Animation to remove")),
+        FCortexCommandInfo{ TEXT("list_animation_bindings"), TEXT("List canonical UMG animation bindings and correlated MovieScene data") }
+            .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
+            .Required(TEXT("animation_name"), TEXT("string"), TEXT("Animation name to inspect"))
+            .Optional(TEXT("offset"), TEXT("number"), TEXT("0-based pagination offset"))
+            .Optional(TEXT("limit"), TEXT("number"), TEXT("Maximum bindings to return (1-200, default: 50)"))
+            .Optional(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Optional content guard fingerprint")),
     };
 }

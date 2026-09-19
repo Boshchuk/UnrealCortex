@@ -1,9 +1,19 @@
 #include "Operations/CortexUMGWidgetAnimationOps.h"
+#include "Operations/CortexUMGAnimationBindingUtils.h"
 #include "CortexUMGUtils.h"
 #include "WidgetBlueprint.h"
 #include "Blueprint/WidgetTree.h"
 #include "Animation/WidgetAnimation.h"
 #include "MovieScene.h"
+#include "MovieSceneBinding.h"
+#include "MovieSceneTrack.h"
+#include "MovieSceneSection.h"
+#include "Tracks/MovieSceneFloatTrack.h"
+#include "Tracks/MovieSceneBoolTrack.h"
+#include "Sections/MovieSceneFloatSection.h"
+#include "Sections/MovieSceneBoolSection.h"
+#include "Channels/MovieSceneFloatChannel.h"
+#include "Channels/MovieSceneBoolChannel.h"
 #include "ScopedTransaction.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Dom/JsonObject.h"
@@ -90,7 +100,8 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::ListAnimations(
                 const FFrameNumber Delta = Range.GetUpperBoundValue() - Range.GetLowerBoundValue();
                 Length = TickRes.AsSeconds(Delta);
             }
-            TrackCount = Anim->MovieScene->GetBindings().Num();
+            const UMovieScene* ConstMS = Anim->MovieScene;
+            TrackCount = ConstMS->GetBindings().Num();
         }
 
         Entry->SetNumberField(TEXT("length"), Length);
@@ -143,5 +154,356 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::RemoveAnimation(
     TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
     Data->SetBoolField(TEXT("removed"), true);
     Data->SetStringField(TEXT("animation_name"), AnimName);
+    return FCortexCommandRouter::Success(Data);
+}
+
+FCortexCommandResult FCortexUMGWidgetAnimationOps::ListAnimationBindings(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    if (!Params.IsValid())
+    {
+        return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("Params object is null"));
+    }
+
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
+    {
+        return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("asset_path is required"));
+    }
+
+    FString AnimName;
+    if (!Params->TryGetStringField(TEXT("animation_name"), AnimName) || AnimName.TrimStartAndEnd().IsEmpty())
+    {
+        return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("animation_name is required"));
+    }
+
+    int32 Offset = 0;
+    if (Params->HasField(TEXT("offset")))
+    {
+        if (!Params->TryGetNumberField(TEXT("offset"), Offset) || Offset < 0)
+        {
+            return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("offset must be an integer >= 0"));
+        }
+    }
+
+    int32 Limit = 50;
+    if (Params->HasField(TEXT("limit")))
+    {
+        if (!Params->TryGetNumberField(TEXT("limit"), Limit) || Limit < 1 || Limit > 200)
+        {
+            return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("limit must be an integer between 1 and 200"));
+        }
+    }
+
+    FCortexCommandResult LoadError;
+    UWidgetBlueprint* WBP = CortexUMGUtils::LoadWidgetBlueprint(AssetPath, LoadError);
+    if (!WBP)
+    {
+        return LoadError;
+    }
+
+    UWidgetAnimation* FoundAnim = nullptr;
+    for (UWidgetAnimation* Anim : WBP->Animations)
+    {
+        if (Anim && Anim->GetName() == AnimName)
+        {
+            FoundAnim = Anim;
+            break;
+        }
+    }
+
+    if (!FoundAnim)
+    {
+        return FCortexCommandRouter::Error(
+            CortexErrorCodes::AnimationNotFound,
+            FString::Printf(TEXT("Animation not found: %s"), *AnimName));
+    }
+
+    FCortexUMGAnimationBindingFingerprint LiveFingerprint =
+        CortexUMGAnimationBindingUtils::ComputeFingerprint(WBP, FoundAnim);
+
+    const TSharedPtr<FJsonObject>* ExpectedFingerprint = nullptr;
+    if (Params->TryGetObjectField(TEXT("expected_fingerprint"), ExpectedFingerprint) && ExpectedFingerprint && ExpectedFingerprint->IsValid())
+    {
+        FString VerifyError;
+        if (!CortexUMGAnimationBindingUtils::VerifyFingerprint(*ExpectedFingerprint, LiveFingerprint, AssetPath, AnimName, VerifyError))
+        {
+            return FCortexCommandRouter::Error(CortexErrorCodes::StalePrecondition, VerifyError);
+        }
+    }
+
+    TArray<TSharedPtr<FJsonValue>> DiagnosticsArray;
+
+    if (!FoundAnim->MovieScene)
+    {
+        DiagnosticsArray.Add(MakeShared<FJsonValueString>(
+            FString::Printf(TEXT("MovieScene is null for animation '%s'"), *AnimName)));
+    }
+
+    UMovieScene* MS = FoundAnim->MovieScene;
+    const UMovieScene* ConstMS = MS;
+
+    int32 TotalBindings = FoundAnim->AnimationBindings.Num();
+    int32 MSBindingCount = ConstMS ? ConstMS->GetBindings().Num() : 0;
+    int32 TotalTrackCount = 0;
+
+    if (ConstMS)
+    {
+        for (const FMovieSceneBinding& MSB : ConstMS->GetBindings())
+        {
+            TotalTrackCount += MSB.GetTracks().Num();
+        }
+        TotalTrackCount += ConstMS->GetTracks().Num();
+
+        if (ConstMS->GetTracks().Num() > 0)
+        {
+            DiagnosticsArray.Add(MakeShared<FJsonValueString>(
+                FString::Printf(TEXT("Animation contains %d master/unbound track(s)"), ConstMS->GetTracks().Num())));
+        }
+
+        for (const FMovieSceneBinding& MSB : ConstMS->GetBindings())
+        {
+            bool bFoundInUMG = false;
+            for (const FWidgetAnimationBinding& UMB : FoundAnim->AnimationBindings)
+            {
+                if (UMB.AnimationGuid == MSB.GetObjectGuid())
+                {
+                    bFoundInUMG = true;
+                    break;
+                }
+            }
+            if (!bFoundInUMG)
+            {
+                DiagnosticsArray.Add(MakeShared<FJsonValueString>(
+                    FString::Printf(TEXT("MovieScene contains binding '%s' with no corresponding UMG animation binding record"),
+                        *MSB.GetObjectGuid().ToString(EGuidFormats::DigitsWithHyphensInBraces))));
+            }
+        }
+    }
+
+    TMap<FGuid, int32> GuidCounts;
+    for (const FWidgetAnimationBinding& UMB : FoundAnim->AnimationBindings)
+    {
+        GuidCounts.FindOrAdd(UMB.AnimationGuid, 0)++;
+    }
+
+    for (int32 i = 0; i < FoundAnim->AnimationBindings.Num(); ++i)
+    {
+        for (int32 j = 0; j < i; ++j)
+        {
+            if (FoundAnim->AnimationBindings[i] == FoundAnim->AnimationBindings[j])
+            {
+                DiagnosticsArray.Add(MakeShared<FJsonValueString>(
+                    FString::Printf(TEXT("Duplicate animation binding record detected at index %d for widget '%s'"),
+                        i, *FoundAnim->AnimationBindings[i].WidgetName.ToString())));
+                break;
+            }
+        }
+    }
+
+    TArray<TSharedPtr<FJsonValue>> BindingsArray;
+    int32 ReturnedCount = 0;
+    if (Offset < TotalBindings)
+    {
+        ReturnedCount = FMath::Min(TotalBindings - Offset, Limit);
+        for (int32 i = Offset; i < Offset + ReturnedCount; ++i)
+        {
+            const FWidgetAnimationBinding& UMB = FoundAnim->AnimationBindings[i];
+            TSharedPtr<FJsonObject> B = MakeShared<FJsonObject>();
+
+            B->SetNumberField(TEXT("index"), i);
+            B->SetStringField(TEXT("binding_guid"), UMB.AnimationGuid.ToString(EGuidFormats::DigitsWithHyphensInBraces));
+            B->SetStringField(TEXT("widget_name"), UMB.WidgetName.ToString());
+            B->SetStringField(TEXT("slot_widget_name"), UMB.SlotWidgetName == NAME_None ? TEXT("") : UMB.SlotWidgetName.ToString());
+            B->SetBoolField(TEXT("is_root_widget"), UMB.bIsRootWidget);
+
+            if (UMB.DynamicBinding.Function)
+            {
+                B->SetStringField(TEXT("dynamic_binding_function"), UMB.DynamicBinding.Function->GetPathName());
+                DiagnosticsArray.Add(MakeShared<FJsonValueString>(
+                    FString::Printf(TEXT("Binding at index %d: dynamic binding is unsupported"), i)));
+            }
+            else
+            {
+                B->SetField(TEXT("dynamic_binding_function"), MakeShared<FJsonValueNull>());
+            }
+
+            bool bTargetExists = false;
+            bool bSlotExists = false;
+            if (UMB.bIsRootWidget)
+            {
+                bTargetExists = true;
+            }
+            else
+            {
+                UWidget* FoundWidget = CortexUMGUtils::FindWidgetByName(WBP->WidgetTree, UMB.WidgetName.ToString());
+                bTargetExists = (FoundWidget != nullptr);
+                if (FoundWidget && UMB.SlotWidgetName != NAME_None)
+                {
+                    bSlotExists = (FoundWidget->Slot != nullptr);
+                }
+            }
+
+            if (!bTargetExists)
+            {
+                DiagnosticsArray.Add(MakeShared<FJsonValueString>(
+                    FString::Printf(TEXT("Binding at index %d: target widget '%s' does not exist in WidgetTree"),
+                        i, *UMB.WidgetName.ToString())));
+            }
+            if (UMB.SlotWidgetName != NAME_None && !bSlotExists)
+            {
+                DiagnosticsArray.Add(MakeShared<FJsonValueString>(
+                    FString::Printf(TEXT("Binding at index %d: slot widget '%s' does not exist"),
+                        i, *UMB.SlotWidgetName.ToString())));
+            }
+
+            B->SetBoolField(TEXT("target_exists"), bTargetExists);
+            B->SetBoolField(TEXT("slot_exists"), bSlotExists);
+
+            bool bPossessableExists = MS && (MS->FindPossessable(UMB.AnimationGuid) != nullptr);
+            if (!bPossessableExists && MS)
+            {
+                DiagnosticsArray.Add(MakeShared<FJsonValueString>(
+                    FString::Printf(TEXT("Binding at index %d: MovieScene possessable '%s' does not exist"),
+                        i, *UMB.AnimationGuid.ToString(EGuidFormats::DigitsWithHyphensInBraces))));
+            }
+            B->SetBoolField(TEXT("possessable_exists"), bPossessableExists);
+
+            int32 SharingCount = GuidCounts.FindRef(UMB.AnimationGuid);
+            B->SetNumberField(TEXT("guid_sharing_count"), SharingCount);
+            if (SharingCount > 1)
+            {
+                DiagnosticsArray.Add(MakeShared<FJsonValueString>(
+                    FString::Printf(TEXT("Binding at index %d: GUID '%s' is shared by %d bindings"),
+                        i, *UMB.AnimationGuid.ToString(EGuidFormats::DigitsWithHyphensInBraces), SharingCount)));
+            }
+
+            TArray<TSharedPtr<FJsonValue>> TracksArray;
+            if (ConstMS)
+            {
+                const FMovieSceneBinding* MSB = ConstMS->FindBinding(UMB.AnimationGuid);
+                if (MSB)
+                {
+                    for (UMovieSceneTrack* Track : MSB->GetTracks())
+                    {
+                        if (!Track)
+                        {
+                            continue;
+                        }
+                        TSharedPtr<FJsonObject> TrackObj = MakeShared<FJsonObject>();
+                        TrackObj->SetStringField(TEXT("track_name"), Track->GetTrackName().ToString());
+                        TrackObj->SetStringField(TEXT("track_class"), Track->GetClass()->GetPathName());
+
+                        TArray<UMovieSceneSection*> Sections = Track->GetAllSections();
+                        TrackObj->SetNumberField(TEXT("section_count"), Sections.Num());
+
+                        int32 ChannelCount = 0;
+                        int32 KeyCount = 0;
+                        for (UMovieSceneSection* Section : Sections)
+                        {
+                            if (!Section)
+                            {
+                                continue;
+                            }
+                            const FMovieSceneChannelProxy& ChannelProxy = Section->GetChannelProxy();
+                            ChannelCount += ChannelProxy.NumChannels();
+                            for (const FMovieSceneChannelEntry& Entry : ChannelProxy.GetAllEntries())
+                            {
+                                for (FMovieSceneChannel* Channel : Entry.GetChannels())
+                                {
+                                    if (Channel)
+                                    {
+                                        KeyCount += Channel->GetNumKeys();
+                                    }
+                                }
+                            }
+                        }
+                        TrackObj->SetNumberField(TEXT("channel_count"), ChannelCount);
+                        TrackObj->SetNumberField(TEXT("key_count"), KeyCount);
+                        TracksArray.Add(MakeShared<FJsonValueObject>(TrackObj));
+                    }
+                }
+            }
+
+            B->SetNumberField(TEXT("track_count"), TracksArray.Num());
+            B->SetArrayField(TEXT("tracks"), TracksArray);
+
+            BindingsArray.Add(MakeShared<FJsonValueObject>(B));
+        }
+    }
+
+    TSharedPtr<FJsonObject> PaginationObj = MakeShared<FJsonObject>();
+    PaginationObj->SetNumberField(TEXT("total"), TotalBindings);
+    PaginationObj->SetNumberField(TEXT("offset"), Offset);
+    PaginationObj->SetNumberField(TEXT("limit"), Limit);
+    PaginationObj->SetNumberField(TEXT("returned"), ReturnedCount);
+    if (Offset + ReturnedCount < TotalBindings)
+    {
+        PaginationObj->SetNumberField(TEXT("next_offset"), Offset + ReturnedCount);
+        PaginationObj->SetBoolField(TEXT("is_complete"), false);
+    }
+    else
+    {
+        PaginationObj->SetField(TEXT("next_offset"), MakeShared<FJsonValueNull>());
+        PaginationObj->SetBoolField(TEXT("is_complete"), true);
+    }
+
+    TSharedPtr<FJsonObject> PlaybackRangeObj = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> LowerBoundObj = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> UpperBoundObj = MakeShared<FJsonObject>();
+    double LengthSeconds = 0.0;
+
+    if (ConstMS)
+    {
+        TRange<FFrameNumber> Range = ConstMS->GetPlaybackRange();
+        int32 LowerVal = Range.GetLowerBound().IsOpen() ? 0 : Range.GetLowerBoundValue().Value;
+        FString LowerType = Range.GetLowerBound().IsInclusive() ? TEXT("Inclusive") : (Range.GetLowerBound().IsExclusive() ? TEXT("Exclusive") : TEXT("Open"));
+        LowerBoundObj->SetNumberField(TEXT("value"), LowerVal);
+        LowerBoundObj->SetStringField(TEXT("type"), LowerType);
+
+        int32 UpperVal = Range.GetUpperBound().IsOpen() ? 0 : Range.GetUpperBoundValue().Value;
+        FString UpperType = Range.GetUpperBound().IsInclusive() ? TEXT("Inclusive") : (Range.GetUpperBound().IsExclusive() ? TEXT("Exclusive") : TEXT("Open"));
+        UpperBoundObj->SetNumberField(TEXT("value"), UpperVal);
+        UpperBoundObj->SetStringField(TEXT("type"), UpperType);
+
+        if (Range.HasLowerBound() && Range.HasUpperBound())
+        {
+            LengthSeconds = ConstMS->GetTickResolution().AsSeconds(Range.GetUpperBoundValue() - Range.GetLowerBoundValue());
+        }
+    }
+    else
+    {
+        LowerBoundObj->SetNumberField(TEXT("value"), 0);
+        LowerBoundObj->SetStringField(TEXT("type"), TEXT("Open"));
+        UpperBoundObj->SetNumberField(TEXT("value"), 0);
+        UpperBoundObj->SetStringField(TEXT("type"), TEXT("Open"));
+    }
+
+    PlaybackRangeObj->SetObjectField(TEXT("lower_bound"), LowerBoundObj);
+    PlaybackRangeObj->SetObjectField(TEXT("upper_bound"), UpperBoundObj);
+    PlaybackRangeObj->SetNumberField(TEXT("length_seconds"), LengthSeconds);
+
+    TSharedPtr<FJsonObject> TickResObj = MakeShared<FJsonObject>();
+    TickResObj->SetNumberField(TEXT("numerator"), ConstMS ? ConstMS->GetTickResolution().Numerator : 0);
+    TickResObj->SetNumberField(TEXT("denominator"), ConstMS ? ConstMS->GetTickResolution().Denominator : 1);
+
+    TSharedPtr<FJsonObject> DispRateObj = MakeShared<FJsonObject>();
+    DispRateObj->SetNumberField(TEXT("numerator"), ConstMS ? ConstMS->GetDisplayRate().Numerator : 0);
+    DispRateObj->SetNumberField(TEXT("denominator"), ConstMS ? ConstMS->GetDisplayRate().Denominator : 1);
+
+    TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("asset_path"), AssetPath);
+    Data->SetStringField(TEXT("animation_name"), AnimName);
+    Data->SetObjectField(TEXT("fingerprint"), LiveFingerprint.ToJson());
+    Data->SetObjectField(TEXT("playback_range"), PlaybackRangeObj);
+    Data->SetObjectField(TEXT("tick_resolution"), TickResObj);
+    Data->SetObjectField(TEXT("display_rate"), DispRateObj);
+    Data->SetNumberField(TEXT("umg_binding_count"), TotalBindings);
+    Data->SetNumberField(TEXT("movie_scene_binding_count"), MSBindingCount);
+    Data->SetNumberField(TEXT("track_count"), TotalTrackCount);
+    Data->SetArrayField(TEXT("bindings"), BindingsArray);
+    Data->SetObjectField(TEXT("pagination"), PaginationObj);
+    Data->SetArrayField(TEXT("diagnostics"), DiagnosticsArray);
+
     return FCortexCommandRouter::Success(Data);
 }
