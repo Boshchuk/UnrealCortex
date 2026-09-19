@@ -553,6 +553,48 @@ bool FCortexUMGAnimationBindingInputValidationTest::RunTest(const FString& Param
         VerifyPreserved();
     }
 
+    // 7b. Ambiguous match (duplicate records)
+    {
+        UWidgetBlueprint* WBP = Fixture.Blueprint.Get();
+        UWidgetAnimation* Anim = nullptr;
+        for (UWidgetAnimation* A : WBP->Animations)
+        {
+            if (A && A->GetName() == TEXT("appearance"))
+            {
+                Anim = A;
+                break;
+            }
+        }
+        if (Anim && Anim->AnimationBindings.Num() > 0)
+        {
+            // Add exact duplicate of binding 0 (copy first to avoid TArray self-reference assert)
+            FWidgetAnimationBinding DupBinding = Anim->AnimationBindings[0];
+            Anim->AnimationBindings.Add(DupBinding);
+
+            // Re-read inspection to get updated fingerprint covering the duplicate
+            FCortexCommandResult DupRead = Fixture.Router.Execute(
+                TEXT("umg.list_animation_bindings"), Fixture.InspectParams());
+            TestTrue(TEXT("Inspection with duplicate binding succeeds"), DupRead.bSuccess);
+
+            if (DupRead.bSuccess && DupRead.Data.IsValid())
+            {
+                TSharedPtr<FJsonObject> DupParams = Fixture.RemovalParams(DupRead.Data, 0);
+                const TArray<uint8> StateBeforeDup = Fixture.CaptureAllAuthoredState();
+                FCortexCommandResult DupResult = Fixture.Router.Execute(
+                    TEXT("umg.remove_animation_binding"), DupParams);
+
+                TestFalse(TEXT("Duplicate binding removal is rejected"), DupResult.bSuccess);
+                TestEqual(TEXT("ErrorCode is ANIMATION_BINDING_AMBIGUOUS"),
+                    DupResult.ErrorCode, CortexErrorCodes::AnimationBindingAmbiguous);
+                TestTrue(TEXT("Ambiguous rejection preserves authored state"),
+                    StateBeforeDup == Fixture.CaptureAllAuthoredState());
+            }
+
+            // Remove the temporary duplicate to restore baseline
+            Anim->AnimationBindings.Pop();
+        }
+    }
+
     // 8. Explicit apply (dry_run=false) returns unsupported in Task 2
     {
         TSharedPtr<FJsonObject> P = Fixture.RemovalParams(Read.Data, 0);
@@ -658,6 +700,17 @@ bool FCortexUMGAnimationBindingPreviewSemanticsTest::RunTest(const FString& Para
         // Verify zero side effects: authored state unchanged, dirtiness unchanged
         TestTrue(TEXT("Preview preserves authored state"), BaselineState == Fixture.CaptureAllAuthoredState());
         TestEqual(TEXT("Preview preserves dirtiness"), Fixture.Blueprint->GetPackage()->IsDirty(), bDirtyBefore);
+
+        // Explicit fingerprint equality assertion before and after preview
+        const FCortexCommandResult ReadAfterPreview = Fixture.Router.Execute(
+            TEXT("umg.list_animation_bindings"), Fixture.InspectParams());
+        TestTrue(TEXT("Read after preview succeeds"), ReadAfterPreview.bSuccess);
+        if (ReadAfterPreview.bSuccess && ReadAfterPreview.Data.IsValid())
+        {
+            FString DigestBefore = Read.Data->GetObjectField(TEXT("fingerprint"))->GetObjectField(TEXT("domain_signature"))->GetStringField(TEXT("digest"));
+            FString DigestAfter = ReadAfterPreview.Data->GetObjectField(TEXT("fingerprint"))->GetObjectField(TEXT("domain_signature"))->GetStringField(TEXT("digest"));
+            TestEqual(TEXT("Fingerprint digest unchanged before and after preview"), DigestAfter, DigestBefore);
+        }
     }
 
     // 2. Preview with omitted dry_run (defaults to true)

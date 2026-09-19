@@ -886,7 +886,10 @@ namespace CortexUMGAnimationBindingUtils
         OutPreflight.AfterUMGBindingCount = OutPreflight.BeforeUMGBindingCount - 1;
         if (OutPreflight.bSceneDataRemoved)
         {
-            OutPreflight.AfterMovieSceneBindingCount = FMath::Max(0, OutPreflight.BeforeMovieSceneBindingCount - 1);
+            const bool bHasMSBinding = ConstMS && (ConstMS->FindBinding(MatchedBinding.AnimationGuid) != nullptr);
+            OutPreflight.AfterMovieSceneBindingCount = bHasMSBinding
+                ? FMath::Max(0, OutPreflight.BeforeMovieSceneBindingCount - 1)
+                : OutPreflight.BeforeMovieSceneBindingCount;
             OutPreflight.AfterTrackCount = FMath::Max(0, OutPreflight.BeforeTrackCount - MatchedBindingTracks);
         }
         else
