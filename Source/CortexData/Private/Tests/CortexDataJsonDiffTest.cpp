@@ -1,6 +1,7 @@
 #include "CoreMinimal.h"
 #include "CortexCommandRouter.h"
 #include "CortexDataCommandHandler.h"
+#include "CortexEngineCompat.h"
 #include "CortexTypes.h"
 #include "Tests/CortexDataLocalizationTestTypes.h"
 
@@ -152,8 +153,10 @@ namespace
 			}
 
 			Table->GetMutableStringTable()->SetNamespace(TEXT("CortexJsonDiffTests"));
-			Table->GetMutableStringTable()->SetSourceString(TEXT("alpha.key"), TEXT("Alpha text"));
-			Table->GetMutableStringTable()->SetSourceString(TEXT("beta.key"), TEXT("Beta text"));
+			CortexEngineCompat::SetStringTableSourceString(
+				*Table->GetMutableStringTable(), TEXT("alpha.key"), TEXT("Alpha text"));
+			CortexEngineCompat::SetStringTableSourceString(
+				*Table->GetMutableStringTable(), TEXT("beta.key"), TEXT("Beta text"));
 			return Table;
 		}
 
@@ -161,7 +164,8 @@ namespace
 		{
 			if (Table != nullptr)
 			{
-				Table->GetMutableStringTable()->SetSourceString(Key, Value);
+				CortexEngineCompat::SetStringTableSourceString(
+					*Table->GetMutableStringTable(), Key, Value);
 			}
 		}
 
