@@ -115,6 +115,11 @@ bool FCortexSafeFileContractWritesCanonicalJsonTest::RunTest(const FString& Para
 	Payload->SetStringField(TEXT("zeta"), TEXT("last"));
 	Payload->SetStringField(TEXT("alpha"), TEXT("first"));
 
+	TestEqual(
+		TEXT("Canonical JSON owns and sorts object keys"),
+		FCortexSafeFileContract::SerializeCanonicalJson(Payload),
+		FString(TEXT("{\"alpha\":\"first\",\"zeta\":\"last\"}")));
+
 	const FCortexJsonFileWriteResult WriteResult = FCortexSafeFileContract::WriteJsonReportAtomic(ResolvedPath, Payload);
 	TestTrue(TEXT("Write succeeds"), WriteResult.bWritten);
 	TestTrue(TEXT("Bytes written is populated"), WriteResult.BytesWritten > 0);

@@ -1,4 +1,5 @@
 #include "Misc/AutomationTest.h"
+#include "CortexEngineCompat.h"
 #include "CortexSerializer.h"
 #include "CortexSerializerTextTestTypes.h"
 #include "Dom/JsonValue.h"
@@ -41,7 +42,8 @@ bool FCortexSerializerTextToJsonStringTableTest::RunTest(const FString& Paramete
 		GetTransientPackage(),
 		FName(TEXT("TestStringTable_TextToJson")));
 	TestTable->GetMutableStringTable()->SetNamespace(TEXT("TestNS"));
-	TestTable->GetMutableStringTable()->SetSourceString(TEXT("TestKey"), TEXT("Test Value"));
+	CortexEngineCompat::SetStringTableSourceString(
+		*TestTable->GetMutableStringTable(), TEXT("TestKey"), TEXT("Test Value"));
 
 	const FText TableText = FText::FromStringTable(TestTable->GetStringTableId(), TEXT("TestKey"));
 	const TSharedPtr<FJsonObject> Result = FCortexSerializer::TextToJson(TableText);
@@ -135,7 +137,8 @@ bool FCortexSerializerJsonToTextStringTableTest::RunTest(const FString& Paramete
 		GetTransientPackage(),
 		FName(TEXT("TestStringTable_JsonToText")));
 	TestTable->GetMutableStringTable()->SetNamespace(TEXT("TestNS"));
-	TestTable->GetMutableStringTable()->SetSourceString(TEXT("TestKey"), TEXT("Test Value"));
+	CortexEngineCompat::SetStringTableSourceString(
+		*TestTable->GetMutableStringTable(), TEXT("TestKey"), TEXT("Test Value"));
 
 	TSharedPtr<FJsonObject> StringTableObject = MakeShared<FJsonObject>();
 	StringTableObject->SetStringField(TEXT("table_id"), TestTable->GetStringTableId().ToString());

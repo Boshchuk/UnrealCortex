@@ -1,4 +1,5 @@
 #include "CortexSafeFileContract.h"
+#include "CortexEngineCompat.h"
 
 #include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
@@ -301,19 +302,23 @@ void WriteCanonicalObject(const TSharedPtr<FJsonObject>& Object, TJsonWriter<>& 
 	if (Object.IsValid())
 	{
 		TArray<FString> Keys;
-		Object->Values.GetKeys(Keys);
+		Keys.Reserve(Object->Values.Num());
+		for (const auto& Pair : Object->Values)
+		{
+			Keys.Add(CortexEngineCompat::JsonKeyToString(Pair.Key));
+		}
 		Keys.Sort();
 
 		for (const FString& Key : Keys)
 		{
-			const TSharedPtr<FJsonValue>* Value = Object->Values.Find(Key);
-			if (Value == nullptr)
+			const TSharedPtr<FJsonValue> Value = Object->TryGetField(Key);
+			if (!Value.IsValid())
 			{
 				continue;
 			}
 
 			Writer.WriteIdentifierPrefix(Key);
-			WriteCanonicalValue(*Value, Writer);
+			WriteCanonicalValue(Value, Writer);
 		}
 	}
 	Writer.WriteObjectEnd();
