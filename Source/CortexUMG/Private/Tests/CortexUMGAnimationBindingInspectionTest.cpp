@@ -325,3 +325,261 @@ bool FCortexUMGAnimationBindingInspectTableCasesTest::RunTest(const FString& Par
     NoTreeWBP->MarkAsGarbage();
     return true;
 }
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingPaginationScalesTest,
+    "Cortex.UMG.AnimationBinding.PaginationScales",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationBindingPaginationScalesTest::RunTest(const FString& Parameters)
+{
+    FCortexUMGAnimationBindingFixture Fixture(*this);
+    UWidgetBlueprint* WBP = Fixture.Blueprint.Get();
+
+    // 1. 3 records: Page-by-page walk and continuation fingerprint
+    {
+        TSharedPtr<FJsonObject> P1 = Fixture.InspectParams();
+        P1->SetNumberField(TEXT("offset"), 0);
+        P1->SetNumberField(TEXT("limit"), 1);
+        FCortexCommandResult R1 = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), P1);
+        TestTrue(TEXT("3-rec Page 1 succeeds"), R1.bSuccess);
+        TestEqual(TEXT("3-rec Page 1 returned"), R1.Data->GetObjectField(TEXT("pagination"))->GetIntegerField(TEXT("returned")), 1);
+        TestEqual(TEXT("3-rec Page 1 next_offset"), R1.Data->GetObjectField(TEXT("pagination"))->GetIntegerField(TEXT("next_offset")), 1);
+
+        TSharedPtr<FJsonObject> FP = R1.Data->GetObjectField(TEXT("fingerprint"));
+
+        // Page 2 with expected_fingerprint continuation
+        TSharedPtr<FJsonObject> P2 = Fixture.InspectParams();
+        P2->SetNumberField(TEXT("offset"), 1);
+        P2->SetNumberField(TEXT("limit"), 1);
+        P2->SetObjectField(TEXT("expected_fingerprint"), FP);
+        FCortexCommandResult R2 = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), P2);
+        TestTrue(TEXT("3-rec Page 2 with valid continuation fingerprint succeeds"), R2.bSuccess);
+        TestEqual(TEXT("3-rec Page 2 next_offset"), R2.Data->GetObjectField(TEXT("pagination"))->GetIntegerField(TEXT("next_offset")), 2);
+
+        // Page 3 with expected_fingerprint continuation
+        TSharedPtr<FJsonObject> P3 = Fixture.InspectParams();
+        P3->SetNumberField(TEXT("offset"), 2);
+        P3->SetNumberField(TEXT("limit"), 1);
+        P3->SetObjectField(TEXT("expected_fingerprint"), FP);
+        FCortexCommandResult R3 = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), P3);
+        TestTrue(TEXT("3-rec Page 3 succeeds"), R3.bSuccess);
+        TestTrue(TEXT("3-rec Page 3 is_complete"), R3.Data->GetObjectField(TEXT("pagination"))->GetBoolField(TEXT("is_complete")));
+        TestTrue(TEXT("3-rec Page 3 next_offset is null"), R3.Data->GetObjectField(TEXT("pagination"))->HasTypedField<EJson::Null>(TEXT("next_offset")));
+
+        // Stale continuation: modify key, try to read next page with old fingerprint
+        Fixture.ChangeRetainedFloatKey(777.0f);
+        FCortexCommandResult StaleR = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), P2);
+        TestFalse(TEXT("Stale continuation fingerprint fails"), StaleR.bSuccess);
+        TestEqual(TEXT("Stale continuation returns STALE_PRECONDITION"), StaleR.ErrorCode, CortexErrorCodes::StalePrecondition);
+    }
+
+    // 2. 11 records: 3 pages with limit 5, then empty page
+    {
+        UWidgetAnimation* Anim11 = NewObject<UWidgetAnimation>(WBP, TEXT("Anim11"), RF_Transactional);
+        UMovieScene* MS11 = NewObject<UMovieScene>(Anim11, TEXT("Anim11"));
+        Anim11->MovieScene = MS11;
+
+        for (int32 i = 0; i < 11; ++i)
+        {
+            FGuid Guid = MS11->AddPossessable(FString::Printf(TEXT("Widget11_%d"), i), USizeBox::StaticClass());
+            FWidgetAnimationBinding B;
+            B.WidgetName = FName(*FString::Printf(TEXT("Widget11_%d"), i));
+            B.SlotWidgetName = NAME_None;
+            B.AnimationGuid = Guid;
+            B.bIsRootWidget = false;
+            Anim11->AnimationBindings.Add(B);
+        }
+        WBP->Animations.Add(Anim11);
+
+        int32 TotalRetrieved = 0;
+        int32 Offset = 0;
+        const int32 Limit = 5;
+        bool bComplete = false;
+
+        while (!bComplete)
+        {
+            TSharedPtr<FJsonObject> P = MakeShared<FJsonObject>();
+            P->SetStringField(TEXT("asset_path"), WBP->GetPathName());
+            P->SetStringField(TEXT("animation_name"), TEXT("Anim11"));
+            P->SetNumberField(TEXT("offset"), Offset);
+            P->SetNumberField(TEXT("limit"), Limit);
+
+            FCortexCommandResult R = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), P);
+            TestTrue(FString::Printf(TEXT("11-rec page at offset %d succeeds"), Offset), R.bSuccess);
+            if (!R.bSuccess || !R.Data.IsValid()) break;
+
+            TSharedPtr<FJsonObject> Pag = R.Data->GetObjectField(TEXT("pagination"));
+            TestEqual(TEXT("11-rec total is 11"), Pag->GetIntegerField(TEXT("total")), 11);
+            int32 Returned = Pag->GetIntegerField(TEXT("returned"));
+            TotalRetrieved += Returned;
+            bComplete = Pag->GetBoolField(TEXT("is_complete"));
+
+            if (!bComplete)
+            {
+                Offset = Pag->GetIntegerField(TEXT("next_offset"));
+            }
+        }
+
+        TestEqual(TEXT("All 11 records retrieved across pages"), TotalRetrieved, 11);
+
+        // Empty page past total
+        TSharedPtr<FJsonObject> PEmpty = MakeShared<FJsonObject>();
+        PEmpty->SetStringField(TEXT("asset_path"), WBP->GetPathName());
+        PEmpty->SetStringField(TEXT("animation_name"), TEXT("Anim11"));
+        PEmpty->SetNumberField(TEXT("offset"), 11);
+        PEmpty->SetNumberField(TEXT("limit"), 5);
+        FCortexCommandResult REmpty = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), PEmpty);
+        TestTrue(TEXT("11-rec empty page succeeds"), REmpty.bSuccess);
+        if (REmpty.bSuccess && REmpty.Data.IsValid())
+        {
+            TestEqual(TEXT("11-rec empty page returned 0"),
+                REmpty.Data->GetObjectField(TEXT("pagination"))->GetIntegerField(TEXT("returned")), 0);
+            TestTrue(TEXT("11-rec empty page is_complete is true"),
+                REmpty.Data->GetObjectField(TEXT("pagination"))->GetBoolField(TEXT("is_complete")));
+        }
+    }
+
+    // 3. 201 records: Paging with limit 200 (max allowed limit)
+    {
+        UWidgetAnimation* Anim201 = NewObject<UWidgetAnimation>(WBP, TEXT("Anim201"), RF_Transactional);
+        UMovieScene* MS201 = NewObject<UMovieScene>(Anim201, TEXT("Anim201"));
+        Anim201->MovieScene = MS201;
+
+        for (int32 i = 0; i < 201; ++i)
+        {
+            FGuid Guid = MS201->AddPossessable(FString::Printf(TEXT("Widget201_%d"), i), USizeBox::StaticClass());
+            FWidgetAnimationBinding B;
+            B.WidgetName = FName(*FString::Printf(TEXT("Widget201_%d"), i));
+            B.SlotWidgetName = NAME_None;
+            B.AnimationGuid = Guid;
+            B.bIsRootWidget = false;
+            Anim201->AnimationBindings.Add(B);
+        }
+        WBP->Animations.Add(Anim201);
+
+        // Page 1: offset 0, limit 200
+        TSharedPtr<FJsonObject> P1 = MakeShared<FJsonObject>();
+        P1->SetStringField(TEXT("asset_path"), WBP->GetPathName());
+        P1->SetStringField(TEXT("animation_name"), TEXT("Anim201"));
+        P1->SetNumberField(TEXT("offset"), 0);
+        P1->SetNumberField(TEXT("limit"), 200);
+
+        FCortexCommandResult R1 = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), P1);
+        TestTrue(TEXT("201-rec Page 1 succeeds"), R1.bSuccess);
+        if (R1.bSuccess && R1.Data.IsValid())
+        {
+            TSharedPtr<FJsonObject> Pag1 = R1.Data->GetObjectField(TEXT("pagination"));
+            TestEqual(TEXT("201-rec total is 201"), Pag1->GetIntegerField(TEXT("total")), 201);
+            TestEqual(TEXT("201-rec Page 1 returned 200"), Pag1->GetIntegerField(TEXT("returned")), 200);
+            TestEqual(TEXT("201-rec Page 1 next_offset is 200"), Pag1->GetIntegerField(TEXT("next_offset")), 200);
+            TestFalse(TEXT("201-rec Page 1 is_complete is false"), Pag1->GetBoolField(TEXT("is_complete")));
+        }
+
+        // Page 2: offset 200, limit 200
+        TSharedPtr<FJsonObject> P2 = MakeShared<FJsonObject>();
+        P2->SetStringField(TEXT("asset_path"), WBP->GetPathName());
+        P2->SetStringField(TEXT("animation_name"), TEXT("Anim201"));
+        P2->SetNumberField(TEXT("offset"), 200);
+        P2->SetNumberField(TEXT("limit"), 200);
+
+        FCortexCommandResult R2 = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), P2);
+        TestTrue(TEXT("201-rec Page 2 succeeds"), R2.bSuccess);
+        if (R2.bSuccess && R2.Data.IsValid())
+        {
+            TSharedPtr<FJsonObject> Pag2 = R2.Data->GetObjectField(TEXT("pagination"));
+            TestEqual(TEXT("201-rec Page 2 returned 1"), Pag2->GetIntegerField(TEXT("returned")), 1);
+            TestTrue(TEXT("201-rec Page 2 is_complete is true"), Pag2->GetBoolField(TEXT("is_complete")));
+            TestTrue(TEXT("201-rec Page 2 next_offset is null"), Pag2->HasTypedField<EJson::Null>(TEXT("next_offset")));
+        }
+    }
+
+    // 4. Invalid offset & limit validation
+    {
+        // Negative offset
+        TSharedPtr<FJsonObject> P = Fixture.InspectParams();
+        P->SetNumberField(TEXT("offset"), -1);
+        FCortexCommandResult R = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), P);
+        TestFalse(TEXT("Negative offset fails"), R.bSuccess);
+        TestEqual(TEXT("Negative offset returns INVALID_FIELD"), R.ErrorCode, CortexErrorCodes::InvalidField);
+
+        // Limit = 0 (< 1)
+        P = Fixture.InspectParams();
+        P->SetNumberField(TEXT("limit"), 0);
+        R = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), P);
+        TestFalse(TEXT("Limit 0 fails"), R.bSuccess);
+        TestEqual(TEXT("Limit 0 returns INVALID_FIELD"), R.ErrorCode, CortexErrorCodes::InvalidField);
+
+        // Limit = 201 (> 200)
+        P = Fixture.InspectParams();
+        P->SetNumberField(TEXT("limit"), 201);
+        R = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), P);
+        TestFalse(TEXT("Limit 201 fails"), R.bSuccess);
+        TestEqual(TEXT("Limit 201 returns INVALID_FIELD"), R.ErrorCode, CortexErrorCodes::InvalidField);
+
+        // Offset as string
+        P = Fixture.InspectParams();
+        P->SetStringField(TEXT("offset"), TEXT("zero"));
+        R = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), P);
+        TestFalse(TEXT("Offset as string fails"), R.bSuccess);
+        TestEqual(TEXT("Offset as string returns INVALID_FIELD"), R.ErrorCode, CortexErrorCodes::InvalidField);
+
+        // Limit as string
+        P = Fixture.InspectParams();
+        P->SetStringField(TEXT("limit"), TEXT("fifty"));
+        R = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), P);
+        TestFalse(TEXT("Limit as string fails"), R.bSuccess);
+        TestEqual(TEXT("Limit as string returns INVALID_FIELD"), R.ErrorCode, CortexErrorCodes::InvalidField);
+
+        // expected_fingerprint as string
+        P = Fixture.InspectParams();
+        P->SetStringField(TEXT("expected_fingerprint"), TEXT("invalid_string"));
+        R = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), P);
+        TestFalse(TEXT("expected_fingerprint as string fails"), R.bSuccess);
+        TestEqual(TEXT("expected_fingerprint as string returns INVALID_FIELD"), R.ErrorCode, CortexErrorCodes::InvalidField);
+    }
+
+    // 5. Diagnostic set larger than binding set: pages canonical bindings, not diagnostics
+    {
+        UWidgetAnimation* DiagAnim = NewObject<UWidgetAnimation>(WBP, TEXT("DiagAnim"), RF_Transactional);
+        UMovieScene* DiagMS = NewObject<UMovieScene>(DiagAnim, TEXT("DiagAnim"));
+        DiagAnim->MovieScene = DiagMS;
+
+        // 2 bindings
+        FGuid G1 = FGuid::NewGuid(); // possessable missing
+        FWidgetAnimationBinding B1;
+        B1.WidgetName = TEXT("MissingW1");
+        B1.SlotWidgetName = TEXT("MissingS1");
+        B1.AnimationGuid = G1;
+        DiagAnim->AnimationBindings.Add(B1);
+
+        FWidgetAnimationBinding B2;
+        B2.WidgetName = TEXT("MissingW2");
+        B2.SlotWidgetName = NAME_None;
+        B2.AnimationGuid = G1; // shared with G1
+        DiagAnim->AnimationBindings.Add(B2);
+
+        // Add master tracks and scene-only possessables to create many diagnostics
+        DiagMS->AddTrack<UMovieSceneEventTrack>();
+        DiagMS->AddPossessable(TEXT("SceneOnly1"), USizeBox::StaticClass());
+        DiagMS->AddPossessable(TEXT("SceneOnly2"), UBorder::StaticClass());
+
+        WBP->Animations.Add(DiagAnim);
+
+        TSharedPtr<FJsonObject> DiagP = MakeShared<FJsonObject>();
+        DiagP->SetStringField(TEXT("asset_path"), WBP->GetPathName());
+        DiagP->SetStringField(TEXT("animation_name"), TEXT("DiagAnim"));
+
+        FCortexCommandResult DiagR = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), DiagP);
+        TestTrue(TEXT("DiagAnim inspection succeeds"), DiagR.bSuccess);
+        if (DiagR.bSuccess && DiagR.Data.IsValid())
+        {
+            TestEqual(TEXT("Pagination total is 2 (bindings count)"),
+                DiagR.Data->GetObjectField(TEXT("pagination"))->GetIntegerField(TEXT("total")), 2);
+            TestTrue(TEXT("Diagnostics array is larger than bindings count"),
+                DiagR.Data->GetArrayField(TEXT("diagnostics")).Num() > 2);
+        }
+    }
+
+    return true;
+}

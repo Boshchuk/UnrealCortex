@@ -8,6 +8,14 @@
 #include "MovieScene.h"
 #include "Dom/JsonObject.h"
 
+struct FCortexAnimationBindingSelector
+{
+    FGuid BindingGuid;
+    FString WidgetName;
+    FString SlotWidgetName;
+    bool bIsRootWidget = false;
+};
+
 struct FCortexAnimationBindingPreflight
 {
     UWidgetBlueprint* Blueprint = nullptr;
@@ -21,8 +29,15 @@ struct FCortexAnimationBindingPreflight
     bool bTargetExists = false;
     bool bSlotExists = false;
     bool bPossessableExists = false;
+    bool bSceneDataRemoved = false;
 
-    FCortexAssetFingerprint CurrentFingerprint;
+    int32 BeforeUMGBindingCount = 0;
+    int32 BeforeMovieSceneBindingCount = 0;
+    int32 BeforeTrackCount = 0;
+
+    int32 AfterUMGBindingCount = 0;
+    int32 AfterMovieSceneBindingCount = 0;
+    int32 AfterTrackCount = 0;
 
     TArray<FWidgetAnimationBinding> ProjectedRemainingBindings;
 };
@@ -57,4 +72,19 @@ namespace CortexUMGAnimationBindingUtils
         const FString& ExpectedAssetPath,
         const FString& ExpectedAnimName,
         FString& OutError);
+
+    /** Parses and validates selector object from request parameters */
+    bool ParseSelector(
+        const TSharedPtr<FJsonObject>& Params,
+        FCortexAnimationBindingSelector& OutSelector,
+        FCortexCommandResult& OutError);
+
+    /** Performs complete synchronous preflight for removal */
+    bool PreflightRemoval(
+        const TSharedPtr<FJsonObject>& Params,
+        FCortexAnimationBindingPreflight& OutPreflight,
+        FCortexUMGAnimationBindingFingerprint& OutLiveFingerprint,
+        bool& bOutDryRun,
+        bool& bOutSave,
+        FCortexCommandResult& OutError);
 }

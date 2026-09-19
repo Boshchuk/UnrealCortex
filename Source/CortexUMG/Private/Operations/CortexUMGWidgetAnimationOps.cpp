@@ -180,7 +180,7 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::ListAnimationBindings(
     int32 Offset = 0;
     if (Params->HasField(TEXT("offset")))
     {
-        if (!Params->TryGetNumberField(TEXT("offset"), Offset) || Offset < 0)
+        if (!Params->HasTypedField<EJson::Number>(TEXT("offset")) || !Params->TryGetNumberField(TEXT("offset"), Offset) || Offset < 0)
         {
             return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("offset must be an integer >= 0"));
         }
@@ -189,7 +189,7 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::ListAnimationBindings(
     int32 Limit = 50;
     if (Params->HasField(TEXT("limit")))
     {
-        if (!Params->TryGetNumberField(TEXT("limit"), Limit) || Limit < 1 || Limit > 200)
+        if (!Params->HasTypedField<EJson::Number>(TEXT("limit")) || !Params->TryGetNumberField(TEXT("limit"), Limit) || Limit < 1 || Limit > 200)
         {
             return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("limit must be an integer between 1 and 200"));
         }
@@ -222,13 +222,32 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::ListAnimationBindings(
     FCortexUMGAnimationBindingFingerprint LiveFingerprint =
         CortexUMGAnimationBindingUtils::ComputeFingerprint(WBP, FoundAnim);
 
-    const TSharedPtr<FJsonObject>* ExpectedFingerprint = nullptr;
-    if (Params->TryGetObjectField(TEXT("expected_fingerprint"), ExpectedFingerprint) && ExpectedFingerprint && ExpectedFingerprint->IsValid())
+    if (Params->HasField(TEXT("expected_fingerprint")))
     {
-        FString VerifyError;
-        if (!CortexUMGAnimationBindingUtils::VerifyFingerprint(*ExpectedFingerprint, LiveFingerprint, AssetPath, AnimName, VerifyError))
+        if (Params->HasTypedField<EJson::Null>(TEXT("expected_fingerprint")))
         {
-            return FCortexCommandRouter::Error(CortexErrorCodes::StalePrecondition, VerifyError);
+            // Explicit null is allowed as no-op
+        }
+        else if (!Params->HasTypedField<EJson::Object>(TEXT("expected_fingerprint")))
+        {
+            return FCortexCommandRouter::Error(
+                CortexErrorCodes::InvalidField,
+                TEXT("expected_fingerprint must be a JSON object"));
+        }
+        else
+        {
+            const TSharedPtr<FJsonObject> ExpectedFingerprint = Params->GetObjectField(TEXT("expected_fingerprint"));
+            if (!ExpectedFingerprint.IsValid())
+            {
+                return FCortexCommandRouter::Error(
+                    CortexErrorCodes::InvalidField,
+                    TEXT("expected_fingerprint must be a valid JSON object"));
+            }
+            FString VerifyError;
+            if (!CortexUMGAnimationBindingUtils::VerifyFingerprint(ExpectedFingerprint, LiveFingerprint, AssetPath, AnimName, VerifyError))
+            {
+                return FCortexCommandRouter::Error(CortexErrorCodes::StalePrecondition, VerifyError);
+            }
         }
     }
 
@@ -313,8 +332,8 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::ListAnimationBindings(
 
             B->SetNumberField(TEXT("index"), i);
             B->SetStringField(TEXT("binding_guid"), UMB.AnimationGuid.ToString(EGuidFormats::DigitsWithHyphensInBraces));
-            B->SetStringField(TEXT("widget_name"), UMB.WidgetName.ToString());
-            B->SetStringField(TEXT("slot_widget_name"), UMB.SlotWidgetName == NAME_None ? TEXT("") : UMB.SlotWidgetName.ToString());
+            B->SetStringField(TEXT("widget_name"), UMB.bIsRootWidget ? TEXT("") : (UMB.WidgetName == NAME_None ? TEXT("") : UMB.WidgetName.ToString()));
+            B->SetStringField(TEXT("slot_widget_name"), (UMB.bIsRootWidget || UMB.SlotWidgetName == NAME_None) ? TEXT("") : UMB.SlotWidgetName.ToString());
             B->SetBoolField(TEXT("is_root_widget"), UMB.bIsRootWidget);
 
             if (UMB.DynamicBinding.Function)
@@ -506,4 +525,109 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::ListAnimationBindings(
     Data->SetArrayField(TEXT("diagnostics"), DiagnosticsArray);
 
     return FCortexCommandRouter::Success(Data);
+}
+
+FCortexCommandResult FCortexUMGWidgetAnimationOps::RemoveAnimationBinding(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FCortexAnimationBindingPreflight Preflight;
+    FCortexUMGAnimationBindingFingerprint LiveFingerprint;
+    bool bDryRun = true;
+    bool bSave = false;
+    FCortexCommandResult PreflightError;
+
+    if (!CortexUMGAnimationBindingUtils::PreflightRemoval(
+            Params, Preflight, LiveFingerprint, bDryRun, bSave, PreflightError))
+    {
+        return PreflightError;
+    }
+
+    const FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+    const FString AnimName = Params->GetStringField(TEXT("animation_name"));
+
+    if (bDryRun)
+    {
+        TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+        Data->SetStringField(TEXT("asset_path"), AssetPath);
+        Data->SetStringField(TEXT("animation_name"), AnimName);
+        Data->SetBoolField(TEXT("dry_run"), true);
+        Data->SetBoolField(TEXT("changed"), false);
+        Data->SetBoolField(TEXT("save_attempted"), false);
+        Data->SetBoolField(TEXT("saved"), false);
+        Data->SetObjectField(TEXT("fingerprint"), LiveFingerprint.ToJson());
+
+        TSharedPtr<FJsonObject> MatchedSel = MakeShared<FJsonObject>();
+        MatchedSel->SetStringField(TEXT("binding_guid"),
+            Preflight.MatchedBinding.AnimationGuid.ToString(EGuidFormats::DigitsWithHyphensInBraces));
+        MatchedSel->SetStringField(TEXT("widget_name"),
+            Preflight.MatchedBinding.bIsRootWidget ? TEXT("") : (Preflight.MatchedBinding.WidgetName == NAME_None ? TEXT("") : Preflight.MatchedBinding.WidgetName.ToString()));
+        MatchedSel->SetStringField(TEXT("slot_widget_name"),
+            (Preflight.MatchedBinding.bIsRootWidget || Preflight.MatchedBinding.SlotWidgetName == NAME_None)
+                ? TEXT("") : Preflight.MatchedBinding.SlotWidgetName.ToString());
+        MatchedSel->SetBoolField(TEXT("is_root_widget"), Preflight.MatchedBinding.bIsRootWidget);
+        Data->SetObjectField(TEXT("matched_selector"), MatchedSel);
+
+        TSharedPtr<FJsonObject> BeforeObj = MakeShared<FJsonObject>();
+        BeforeObj->SetNumberField(TEXT("umg_binding_count"), Preflight.BeforeUMGBindingCount);
+        BeforeObj->SetNumberField(TEXT("movie_scene_binding_count"), Preflight.BeforeMovieSceneBindingCount);
+        BeforeObj->SetNumberField(TEXT("track_count"), Preflight.BeforeTrackCount);
+        Data->SetObjectField(TEXT("before"), BeforeObj);
+
+        TSharedPtr<FJsonObject> AfterObj = MakeShared<FJsonObject>();
+        AfterObj->SetNumberField(TEXT("umg_binding_count"), Preflight.AfterUMGBindingCount);
+        AfterObj->SetNumberField(TEXT("movie_scene_binding_count"), Preflight.AfterMovieSceneBindingCount);
+        AfterObj->SetNumberField(TEXT("track_count"), Preflight.AfterTrackCount);
+        Data->SetObjectField(TEXT("after"), AfterObj);
+
+        Data->SetBoolField(TEXT("scene_data_removed"), Preflight.bSceneDataRemoved);
+
+        TMap<FGuid, int32> RemainingGuidCounts;
+        for (const FWidgetAnimationBinding& B : Preflight.ProjectedRemainingBindings)
+        {
+            RemainingGuidCounts.FindOrAdd(B.AnimationGuid, 0)++;
+        }
+
+        const int32 TotalRemaining = Preflight.ProjectedRemainingBindings.Num();
+        const bool bTruncated = TotalRemaining > 20;
+        const int32 ReturnCount = bTruncated ? 20 : TotalRemaining;
+
+        TArray<TSharedPtr<FJsonValue>> RemBindingsArray;
+        const UMovieScene* ConstMS = Preflight.MovieScene;
+        for (int32 i = 0; i < ReturnCount; ++i)
+        {
+            const FWidgetAnimationBinding& B = Preflight.ProjectedRemainingBindings[i];
+            TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+            Entry->SetNumberField(TEXT("index"), i);
+            Entry->SetStringField(TEXT("binding_guid"), B.AnimationGuid.ToString(EGuidFormats::DigitsWithHyphensInBraces));
+            Entry->SetStringField(TEXT("widget_name"),
+                B.bIsRootWidget ? TEXT("") : (B.WidgetName == NAME_None ? TEXT("") : B.WidgetName.ToString()));
+            Entry->SetStringField(TEXT("slot_widget_name"),
+                (B.bIsRootWidget || B.SlotWidgetName == NAME_None) ? TEXT("") : B.SlotWidgetName.ToString());
+            Entry->SetBoolField(TEXT("is_root_widget"), B.bIsRootWidget);
+            Entry->SetNumberField(TEXT("guid_sharing_count"), RemainingGuidCounts.FindRef(B.AnimationGuid));
+
+            int32 TrackCount = 0;
+            if (ConstMS)
+            {
+                const FMovieSceneBinding* MSB = ConstMS->FindBinding(B.AnimationGuid);
+                if (MSB)
+                {
+                    TrackCount = MSB->GetTracks().Num();
+                }
+            }
+            Entry->SetNumberField(TEXT("track_count"), TrackCount);
+            RemBindingsArray.Add(MakeShared<FJsonValueObject>(Entry));
+        }
+
+        Data->SetArrayField(TEXT("remaining_bindings"), RemBindingsArray);
+        Data->SetBoolField(TEXT("_remaining_bindings_truncated"), bTruncated);
+        Data->SetNumberField(TEXT("_remaining_bindings_total"), TotalRemaining);
+        Data->SetField(TEXT("save_error"), MakeShared<FJsonValueNull>());
+
+        return FCortexCommandRouter::Success(Data);
+    }
+
+    return FCortexCommandRouter::Error(
+        CortexErrorCodes::AnimationBindingUnsupported,
+        TEXT("Apply is not supported in preview-only mode (Task 2)"));
 }

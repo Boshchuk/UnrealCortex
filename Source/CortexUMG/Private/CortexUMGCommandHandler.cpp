@@ -108,6 +108,10 @@ FCortexCommandResult FCortexUMGCommandHandler::Execute(
     {
         return FCortexUMGWidgetAnimationOps::ListAnimationBindings(Params);
     }
+    if (Command == TEXT("remove_animation_binding"))
+    {
+        return FCortexUMGWidgetAnimationOps::RemoveAnimationBinding(Params);
+    }
 
     if (Command == TEXT("set_widget_variable"))
     {
@@ -237,5 +241,12 @@ TArray<FCortexCommandInfo> FCortexUMGCommandHandler::GetSupportedCommands() cons
             .Optional(TEXT("offset"), TEXT("number"), TEXT("0-based pagination offset"))
             .Optional(TEXT("limit"), TEXT("number"), TEXT("Maximum bindings to return (1-200, default: 50)"))
             .Optional(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Optional content guard fingerprint")),
+        FCortexCommandInfo{ TEXT("remove_animation_binding"), TEXT("Remove a single UMG animation binding record with optimistic locking and preview") }
+            .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
+            .Required(TEXT("animation_name"), TEXT("string"), TEXT("Animation name"))
+            .Required(TEXT("selector"), TEXT("object"), TEXT("Exact binding selector"))
+            .Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Content guard fingerprint from prior read"))
+            .Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("If true, previews changes without mutating (default: true)"))
+            .Optional(TEXT("save"), TEXT("boolean"), TEXT("If true, persists package to disk after mutation (default: false)")),
     };
 }

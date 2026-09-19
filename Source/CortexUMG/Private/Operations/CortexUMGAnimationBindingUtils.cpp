@@ -1,4 +1,5 @@
 #include "Operations/CortexUMGAnimationBindingUtils.h"
+#include "CortexUMGUtils.h"
 #include "Serialization/MemoryWriter.h"
 #include "Tracks/MovieSceneFloatTrack.h"
 #include "Tracks/MovieSceneBoolTrack.h"
@@ -202,15 +203,31 @@ namespace CortexUMGAnimationBindingUtils
             TArray<FWidgetAnimationBinding> SortedBindings = Animation->AnimationBindings;
             SortedBindings.Sort([](const FWidgetAnimationBinding& A, const FWidgetAnimationBinding& B)
             {
-                return A.AnimationGuid < B.AnimationGuid;
+                if (A.AnimationGuid != B.AnimationGuid)
+                {
+                    return A.AnimationGuid < B.AnimationGuid;
+                }
+                const FString WNameA = A.WidgetName.ToString();
+                const FString WNameB = B.WidgetName.ToString();
+                if (WNameA != WNameB)
+                {
+                    return WNameA < WNameB;
+                }
+                const FString SNameA = A.SlotWidgetName.ToString();
+                const FString SNameB = B.SlotWidgetName.ToString();
+                if (SNameA != SNameB)
+                {
+                    return SNameA < SNameB;
+                }
+                return (int32)A.bIsRootWidget < (int32)B.bIsRootWidget;
             });
 
             int32 BindingNum = SortedBindings.Num();
             Ar << BindingNum;
             for (const FWidgetAnimationBinding& Binding : SortedBindings)
             {
-                FString WName = Binding.WidgetName.ToString();
-                FString SName = Binding.SlotWidgetName.ToString();
+                FString WName = Binding.bIsRootWidget ? FString() : (Binding.WidgetName == NAME_None ? FString() : Binding.WidgetName.ToString());
+                FString SName = (Binding.bIsRootWidget || Binding.SlotWidgetName == NAME_None) ? FString() : Binding.SlotWidgetName.ToString();
                 FGuid AGuid = Binding.AnimationGuid;
                 bool bRoot = Binding.bIsRootWidget;
                 FString DynFunc = Binding.DynamicBinding.Function ? Binding.DynamicBinding.Function->GetPathName() : FString();
@@ -375,6 +392,16 @@ namespace CortexUMGAnimationBindingUtils
                 }
 
                 TArray<UMovieSceneTrack*> MasterTracks = ConstMS->GetTracks();
+                MasterTracks.Sort([](const UMovieSceneTrack& A, const UMovieSceneTrack& B)
+                {
+                    FString ClassA = A.GetClass()->GetPathName();
+                    FString ClassB = B.GetClass()->GetPathName();
+                    if (ClassA != ClassB)
+                    {
+                        return ClassA < ClassB;
+                    }
+                    return A.GetTrackName().ToString() < B.GetTrackName().ToString();
+                });
                 int32 MasterTrackNum = MasterTracks.Num();
                 Ar << MasterTrackNum;
                 for (UMovieSceneTrack* Track : MasterTracks)
@@ -475,7 +502,7 @@ namespace CortexUMGAnimationBindingUtils
         }
 
         FString AssetPath = (*DomainSig)->GetStringField(TEXT("asset_path"));
-        if (AssetPath != ExpectedAssetPath)
+        if (!AssetPath.Equals(ExpectedAssetPath, ESearchCase::CaseSensitive))
         {
             OutError = FString::Printf(TEXT("domain_signature asset_path mismatch: expected '%s', got '%s'"),
                 *ExpectedAssetPath, *AssetPath);
@@ -483,7 +510,7 @@ namespace CortexUMGAnimationBindingUtils
         }
 
         FString AnimName = (*DomainSig)->GetStringField(TEXT("animation_name"));
-        if (AnimName != ExpectedAnimName)
+        if (!AnimName.Equals(ExpectedAnimName, ESearchCase::CaseSensitive))
         {
             OutError = FString::Printf(TEXT("domain_signature animation_name mismatch: expected '%s', got '%s'"),
                 *ExpectedAnimName, *AnimName);
@@ -496,6 +523,386 @@ namespace CortexUMGAnimationBindingUtils
             OutError = FString::Printf(TEXT("Animation content has changed: expected digest '%s', live digest '%s'"),
                 *Digest, *LiveFingerprint.Digest);
             return false;
+        }
+
+        return true;
+    }
+
+    bool ParseSelector(
+        const TSharedPtr<FJsonObject>& Params,
+        FCortexAnimationBindingSelector& OutSelector,
+        FCortexCommandResult& OutError)
+    {
+        if (!Params.IsValid())
+        {
+            OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("Params is null"));
+            return false;
+        }
+
+        if (!Params->HasField(TEXT("selector")) || !Params->HasTypedField<EJson::Object>(TEXT("selector")))
+        {
+            OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("selector must be a JSON object"));
+            return false;
+        }
+
+        TSharedPtr<FJsonObject> SelObj = Params->GetObjectField(TEXT("selector"));
+        if (!SelObj.IsValid())
+        {
+            OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("selector must be a valid JSON object"));
+            return false;
+        }
+
+        // Check for unknown fields in selector
+        for (const auto& Pair : SelObj->Values)
+        {
+            const FString FieldName = FString(Pair.Key);
+            if (FieldName != TEXT("binding_guid") &&
+                FieldName != TEXT("widget_name") &&
+                FieldName != TEXT("slot_widget_name") &&
+                FieldName != TEXT("is_root_widget"))
+            {
+                OutError = FCortexCommandRouter::Error(
+                    CortexErrorCodes::InvalidField,
+                    FString::Printf(TEXT("selector contains unknown field: '%s'"), *FieldName));
+                return false;
+            }
+        }
+
+        // binding_guid: string
+        if (!SelObj->HasTypedField<EJson::String>(TEXT("binding_guid")))
+        {
+            OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("selector.binding_guid must be a string"));
+            return false;
+        }
+        const FString GuidStr = SelObj->GetStringField(TEXT("binding_guid"));
+        if (!FGuid::Parse(GuidStr, OutSelector.BindingGuid) || !OutSelector.BindingGuid.IsValid())
+        {
+            OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("selector.binding_guid is not a valid GUID"));
+            return false;
+        }
+
+        // widget_name: string
+        if (!SelObj->HasTypedField<EJson::String>(TEXT("widget_name")))
+        {
+            OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("selector.widget_name must be a string"));
+            return false;
+        }
+        OutSelector.WidgetName = SelObj->GetStringField(TEXT("widget_name"));
+
+        // slot_widget_name: string
+        if (!SelObj->HasTypedField<EJson::String>(TEXT("slot_widget_name")))
+        {
+            OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("selector.slot_widget_name must be a string"));
+            return false;
+        }
+        OutSelector.SlotWidgetName = SelObj->GetStringField(TEXT("slot_widget_name"));
+
+        // is_root_widget: bool
+        if (!SelObj->HasTypedField<EJson::Boolean>(TEXT("is_root_widget")))
+        {
+            OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("selector.is_root_widget must be a boolean"));
+            return false;
+        }
+        OutSelector.bIsRootWidget = SelObj->GetBoolField(TEXT("is_root_widget"));
+
+        // Root widget constraints:
+        if (OutSelector.bIsRootWidget)
+        {
+            if (!OutSelector.WidgetName.IsEmpty())
+            {
+                OutError = FCortexCommandRouter::Error(
+                    CortexErrorCodes::InvalidField,
+                    TEXT("selector.widget_name must be empty string when is_root_widget is true"));
+                return false;
+            }
+            if (!OutSelector.SlotWidgetName.IsEmpty())
+            {
+                OutError = FCortexCommandRouter::Error(
+                    CortexErrorCodes::InvalidField,
+                    TEXT("selector.slot_widget_name must be empty string when is_root_widget is true"));
+                return false;
+            }
+        }
+        else
+        {
+            if (OutSelector.WidgetName.IsEmpty())
+            {
+                OutError = FCortexCommandRouter::Error(
+                    CortexErrorCodes::InvalidField,
+                    TEXT("selector.widget_name cannot be empty for ordinary widget binding"));
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool PreflightRemoval(
+        const TSharedPtr<FJsonObject>& Params,
+        FCortexAnimationBindingPreflight& OutPreflight,
+        FCortexUMGAnimationBindingFingerprint& OutLiveFingerprint,
+        bool& bOutDryRun,
+        bool& bOutSave,
+        FCortexCommandResult& OutError)
+    {
+        if (!Params.IsValid())
+        {
+            OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("Params object is null"));
+            return false;
+        }
+
+        // Forbidden pagination fields
+        if (Params->HasField(TEXT("offset")) || Params->HasField(TEXT("limit")) || Params->HasField(TEXT("cursor")))
+        {
+            OutError = FCortexCommandRouter::Error(
+                CortexErrorCodes::InvalidField,
+                TEXT("Pagination fields (offset, limit, cursor) are forbidden on remove_animation_binding"));
+            return false;
+        }
+
+        // asset_path: required string
+        FString AssetPath;
+        if (!Params->HasTypedField<EJson::String>(TEXT("asset_path")) || !Params->TryGetStringField(TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
+        {
+            OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("asset_path is required and must be a non-empty string"));
+            return false;
+        }
+
+        // animation_name: required string
+        FString AnimName;
+        if (!Params->HasTypedField<EJson::String>(TEXT("animation_name")) || !Params->TryGetStringField(TEXT("animation_name"), AnimName) || AnimName.TrimStartAndEnd().IsEmpty())
+        {
+            OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("animation_name is required and must be a non-empty string"));
+            return false;
+        }
+
+        // selector: parse and validate
+        FCortexAnimationBindingSelector Selector;
+        if (!ParseSelector(Params, Selector, OutError))
+        {
+            return false;
+        }
+
+        // expected_fingerprint: required object
+        if (!Params->HasField(TEXT("expected_fingerprint")) || !Params->HasTypedField<EJson::Object>(TEXT("expected_fingerprint")))
+        {
+            OutError = FCortexCommandRouter::Error(
+                CortexErrorCodes::InvalidField,
+                TEXT("expected_fingerprint is required and must be a non-null JSON object"));
+            return false;
+        }
+        const TSharedPtr<FJsonObject> ExpectedFingerprint = Params->GetObjectField(TEXT("expected_fingerprint"));
+        if (!ExpectedFingerprint.IsValid())
+        {
+            OutError = FCortexCommandRouter::Error(
+                CortexErrorCodes::InvalidField,
+                TEXT("expected_fingerprint must be a valid JSON object"));
+            return false;
+        }
+
+        // dry_run: optional bool, default true
+        bOutDryRun = true;
+        if (Params->HasField(TEXT("dry_run")))
+        {
+            if (!Params->HasTypedField<EJson::Boolean>(TEXT("dry_run")))
+            {
+                OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("dry_run must be a boolean"));
+                return false;
+            }
+            bOutDryRun = Params->GetBoolField(TEXT("dry_run"));
+        }
+
+        // save: optional bool, default false
+        bOutSave = false;
+        if (Params->HasField(TEXT("save")))
+        {
+            if (!Params->HasTypedField<EJson::Boolean>(TEXT("save")))
+            {
+                OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("save must be a boolean"));
+                return false;
+            }
+            bOutSave = Params->GetBoolField(TEXT("save"));
+        }
+
+        // Conflict check: dry_run=true, save=true
+        if (bOutDryRun && bOutSave)
+        {
+            OutError = FCortexCommandRouter::Error(
+                CortexErrorCodes::InvalidField,
+                TEXT("Cannot save when dry_run is true"));
+            return false;
+        }
+
+        // Load UWidgetBlueprint
+        FCortexCommandResult LoadError;
+        UWidgetBlueprint* WBP = CortexUMGUtils::LoadWidgetBlueprint(AssetPath, LoadError);
+        if (!WBP)
+        {
+            OutError = LoadError;
+            return false;
+        }
+
+        // Find UWidgetAnimation
+        UWidgetAnimation* FoundAnim = nullptr;
+        for (UWidgetAnimation* Anim : WBP->Animations)
+        {
+            if (Anim && Anim->GetName() == AnimName)
+            {
+                FoundAnim = Anim;
+                break;
+            }
+        }
+        if (!FoundAnim)
+        {
+            OutError = FCortexCommandRouter::Error(
+                CortexErrorCodes::AnimationNotFound,
+                FString::Printf(TEXT("Animation not found: %s"), *AnimName));
+            return false;
+        }
+
+        // Compute live fingerprint & verify against expected
+        OutLiveFingerprint = ComputeFingerprint(WBP, FoundAnim);
+        FString VerifyError;
+        if (!VerifyFingerprint(ExpectedFingerprint, OutLiveFingerprint, AssetPath, AnimName, VerifyError))
+        {
+            OutError = FCortexCommandRouter::Error(CortexErrorCodes::StalePrecondition, VerifyError);
+            return false;
+        }
+
+        // Locate matching FWidgetAnimationBinding
+        TArray<int32> MatchedIndices;
+        for (int32 i = 0; i < FoundAnim->AnimationBindings.Num(); ++i)
+        {
+            const FWidgetAnimationBinding& Binding = FoundAnim->AnimationBindings[i];
+            if (Binding.AnimationGuid != Selector.BindingGuid)
+            {
+                continue;
+            }
+            if (Binding.bIsRootWidget != Selector.bIsRootWidget)
+            {
+                continue;
+            }
+            if (Selector.bIsRootWidget)
+            {
+                MatchedIndices.Add(i);
+            }
+            else
+            {
+                const FString WName = Binding.WidgetName.ToString();
+                const FString SName = Binding.SlotWidgetName == NAME_None ? TEXT("") : Binding.SlotWidgetName.ToString();
+                if (WName.Equals(Selector.WidgetName, ESearchCase::CaseSensitive) &&
+                    SName.Equals(Selector.SlotWidgetName, ESearchCase::CaseSensitive))
+                {
+                    MatchedIndices.Add(i);
+                }
+            }
+        }
+
+        if (MatchedIndices.Num() == 0)
+        {
+            OutError = FCortexCommandRouter::Error(
+                CortexErrorCodes::AnimationBindingNotFound,
+                TEXT("No binding record matched the provided selector"));
+            return false;
+        }
+        if (MatchedIndices.Num() > 1)
+        {
+            OutError = FCortexCommandRouter::Error(
+                CortexErrorCodes::AnimationBindingAmbiguous,
+                FString::Printf(TEXT("Multiple binding records (%d) matched the provided selector"), MatchedIndices.Num()));
+            return false;
+        }
+
+        const int32 MatchedIndex = MatchedIndices[0];
+        const FWidgetAnimationBinding& MatchedBinding = FoundAnim->AnimationBindings[MatchedIndex];
+
+        // Dynamic bindings check
+        if (MatchedBinding.DynamicBinding.Function != nullptr)
+        {
+            OutError = FCortexCommandRouter::Error(
+                CortexErrorCodes::AnimationBindingUnsupported,
+                TEXT("Dynamic bindings are not supported for removal"));
+            return false;
+        }
+
+        // Populate OutPreflight
+        OutPreflight.Blueprint = WBP;
+        OutPreflight.Animation = FoundAnim;
+        OutPreflight.MovieScene = FoundAnim->MovieScene;
+        OutPreflight.MatchedRecordIndex = MatchedIndex;
+        OutPreflight.MatchedBinding = MatchedBinding;
+
+        // Guid sharing count
+        int32 GuidSharing = 0;
+        for (const FWidgetAnimationBinding& B : FoundAnim->AnimationBindings)
+        {
+            if (B.AnimationGuid == MatchedBinding.AnimationGuid)
+            {
+                GuidSharing++;
+            }
+        }
+        OutPreflight.GuidSharingCount = GuidSharing;
+        OutPreflight.bSceneDataRemoved = (GuidSharing <= 1);
+
+        // Target/Slot/Possessable existence
+        if (MatchedBinding.bIsRootWidget)
+        {
+            OutPreflight.bTargetExists = true;
+            OutPreflight.bSlotExists = false;
+        }
+        else
+        {
+            UWidget* FoundWidget = CortexUMGUtils::FindWidgetByName(WBP->WidgetTree, MatchedBinding.WidgetName.ToString());
+            OutPreflight.bTargetExists = (FoundWidget != nullptr);
+            if (FoundWidget && MatchedBinding.SlotWidgetName != NAME_None)
+            {
+                OutPreflight.bSlotExists = (FoundWidget->Slot != nullptr);
+            }
+        }
+        OutPreflight.bPossessableExists = OutPreflight.MovieScene &&
+            (OutPreflight.MovieScene->FindPossessable(MatchedBinding.AnimationGuid) != nullptr);
+
+        // Counts before
+        OutPreflight.BeforeUMGBindingCount = FoundAnim->AnimationBindings.Num();
+        const UMovieScene* ConstMS = OutPreflight.MovieScene;
+        OutPreflight.BeforeMovieSceneBindingCount = ConstMS ? ConstMS->GetBindings().Num() : 0;
+        int32 TotalTracks = 0;
+        int32 MatchedBindingTracks = 0;
+        if (ConstMS)
+        {
+            for (const FMovieSceneBinding& MSB : ConstMS->GetBindings())
+            {
+                TotalTracks += MSB.GetTracks().Num();
+                if (MSB.GetObjectGuid() == MatchedBinding.AnimationGuid)
+                {
+                    MatchedBindingTracks = MSB.GetTracks().Num();
+                }
+            }
+            TotalTracks += ConstMS->GetTracks().Num();
+        }
+        OutPreflight.BeforeTrackCount = TotalTracks;
+
+        // Counts after
+        OutPreflight.AfterUMGBindingCount = OutPreflight.BeforeUMGBindingCount - 1;
+        if (OutPreflight.bSceneDataRemoved)
+        {
+            OutPreflight.AfterMovieSceneBindingCount = FMath::Max(0, OutPreflight.BeforeMovieSceneBindingCount - 1);
+            OutPreflight.AfterTrackCount = FMath::Max(0, OutPreflight.BeforeTrackCount - MatchedBindingTracks);
+        }
+        else
+        {
+            OutPreflight.AfterMovieSceneBindingCount = OutPreflight.BeforeMovieSceneBindingCount;
+            OutPreflight.AfterTrackCount = OutPreflight.BeforeTrackCount;
+        }
+
+        // Projected remaining bindings
+        OutPreflight.ProjectedRemainingBindings.Empty();
+        for (int32 i = 0; i < FoundAnim->AnimationBindings.Num(); ++i)
+        {
+            if (i != MatchedIndex)
+            {
+                OutPreflight.ProjectedRemainingBindings.Add(FoundAnim->AnimationBindings[i]);
+            }
         }
 
         return true;

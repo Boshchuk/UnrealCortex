@@ -52,7 +52,23 @@ namespace CortexUMGAnimationBindingTestUtils
         }
         FilteredBindings.Sort([](const FWidgetAnimationBinding& A, const FWidgetAnimationBinding& B)
         {
-            return A.AnimationGuid < B.AnimationGuid;
+            if (A.AnimationGuid != B.AnimationGuid)
+            {
+                return A.AnimationGuid < B.AnimationGuid;
+            }
+            const FString WNameA = A.WidgetName.ToString();
+            const FString WNameB = B.WidgetName.ToString();
+            if (WNameA != WNameB)
+            {
+                return WNameA < WNameB;
+            }
+            const FString SNameA = A.SlotWidgetName.ToString();
+            const FString SNameB = B.SlotWidgetName.ToString();
+            if (SNameA != SNameB)
+            {
+                return SNameA < SNameB;
+            }
+            return (int32)A.bIsRootWidget < (int32)B.bIsRootWidget;
         });
 
         int32 BindingNum = FilteredBindings.Num();
@@ -224,6 +240,16 @@ namespace CortexUMGAnimationBindingTestUtils
 
             // Master tracks
             TArray<UMovieSceneTrack*> MasterTracks = MS->GetTracks();
+            MasterTracks.Sort([](const UMovieSceneTrack& A, const UMovieSceneTrack& B)
+            {
+                FString ClassA = A.GetClass()->GetPathName();
+                FString ClassB = B.GetClass()->GetPathName();
+                if (ClassA != ClassB)
+                {
+                    return ClassA < ClassB;
+                }
+                return A.GetTrackName().ToString() < B.GetTrackName().ToString();
+            });
             int32 MasterTrackNum = MasterTracks.Num();
             Ar << MasterTrackNum;
             for (UMovieSceneTrack* Track : MasterTracks)
@@ -506,6 +532,178 @@ struct FCortexUMGAnimationBindingFixture
                         }
                     }
                 }
+            }
+        }
+    }
+
+    void ChangeRetainedTangent(ERichCurveTangentMode NewMode, float NewTangent)
+    {
+        if (!Blueprint.IsValid()) return;
+        for (UWidgetAnimation* Anim : Blueprint->Animations)
+        {
+            if (Anim && Anim->GetName() == TEXT("appearance") && Anim->MovieScene)
+            {
+                const UMovieScene* ConstMS = Anim->MovieScene;
+                for (const FMovieSceneBinding& Binding : ConstMS->GetBindings())
+                {
+                    for (UMovieSceneTrack* Track : Binding.GetTracks())
+                    {
+                        if (UMovieSceneFloatTrack* FloatTrack = Cast<UMovieSceneFloatTrack>(Track))
+                        {
+                            for (UMovieSceneSection* Section : FloatTrack->GetAllSections())
+                            {
+                                if (UMovieSceneFloatSection* FloatSec = Cast<UMovieSceneFloatSection>(Section))
+                                {
+                                    FMovieSceneFloatChannel& Chan = FloatSec->GetChannel();
+                                    TArrayView<const FFrameNumber> TimesView = Chan.GetTimes();
+                                    TArrayView<const FMovieSceneFloatValue> ValuesView = Chan.GetValues();
+                                    if (ValuesView.Num() > 0)
+                                    {
+                                        TArray<FFrameNumber> Times;
+                                        Times.Append(TimesView.GetData(), TimesView.Num());
+                                        TArray<FMovieSceneFloatValue> Values;
+                                        Values.Append(ValuesView.GetData(), ValuesView.Num());
+                                        Values[0].TangentMode = NewMode;
+                                        Values[0].Tangent.ArriveTangent = NewTangent;
+                                        Chan.Set(Times, Values);
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    void ChangeRetainedDefault(float NewDefault)
+    {
+        if (!Blueprint.IsValid()) return;
+        for (UWidgetAnimation* Anim : Blueprint->Animations)
+        {
+            if (Anim && Anim->GetName() == TEXT("appearance") && Anim->MovieScene)
+            {
+                const UMovieScene* ConstMS = Anim->MovieScene;
+                for (const FMovieSceneBinding& Binding : ConstMS->GetBindings())
+                {
+                    for (UMovieSceneTrack* Track : Binding.GetTracks())
+                    {
+                        if (UMovieSceneFloatTrack* FloatTrack = Cast<UMovieSceneFloatTrack>(Track))
+                        {
+                            for (UMovieSceneSection* Section : FloatTrack->GetAllSections())
+                            {
+                                if (UMovieSceneFloatSection* FloatSec = Cast<UMovieSceneFloatSection>(Section))
+                                {
+                                    FloatSec->GetChannel().SetDefault(NewDefault);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    void ChangeRetainedBoolKey(bool NewValue)
+    {
+        if (!Blueprint.IsValid()) return;
+        for (UWidgetAnimation* Anim : Blueprint->Animations)
+        {
+            if (Anim && Anim->GetName() == TEXT("appearance") && Anim->MovieScene)
+            {
+                const UMovieScene* ConstMS = Anim->MovieScene;
+                for (const FMovieSceneBinding& Binding : ConstMS->GetBindings())
+                {
+                    for (UMovieSceneTrack* Track : Binding.GetTracks())
+                    {
+                        if (UMovieSceneBoolTrack* BoolTrack = Cast<UMovieSceneBoolTrack>(Track))
+                        {
+                            for (UMovieSceneSection* Section : BoolTrack->GetAllSections())
+                            {
+                                if (UMovieSceneBoolSection* BoolSec = Cast<UMovieSceneBoolSection>(Section))
+                                {
+                                    FMovieSceneBoolChannel& Chan = BoolSec->GetChannel();
+                                    TArrayView<const FFrameNumber> TimesView = Chan.GetTimes();
+                                    TArrayView<const bool> ValuesView = Chan.GetValues();
+                                    if (ValuesView.Num() > 0)
+                                    {
+                                        TArray<FFrameNumber> Times;
+                                        Times.Append(TimesView.GetData(), TimesView.Num());
+                                        TArray<bool> Values;
+                                        Values.Append(ValuesView.GetData(), ValuesView.Num());
+                                        Values[0] = NewValue;
+                                        Chan.Reset();
+                                        Chan.AddKeys(Times, Values);
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    void ChangePlaybackRange(FFrameNumber NewStart, FFrameNumber NewEnd)
+    {
+        if (!Blueprint.IsValid()) return;
+        for (UWidgetAnimation* Anim : Blueprint->Animations)
+        {
+            if (Anim && Anim->GetName() == TEXT("appearance") && Anim->MovieScene)
+            {
+                Anim->MovieScene->SetPlaybackRange(TRange<FFrameNumber>(NewStart, NewEnd));
+                return;
+            }
+        }
+    }
+
+    void ChangeBindingGuid(int32 BindingIndex, const FGuid& NewGuid)
+    {
+        if (!Blueprint.IsValid()) return;
+        for (UWidgetAnimation* Anim : Blueprint->Animations)
+        {
+            if (Anim && Anim->GetName() == TEXT("appearance"))
+            {
+                if (Anim->AnimationBindings.IsValidIndex(BindingIndex))
+                {
+                    Anim->AnimationBindings[BindingIndex].AnimationGuid = NewGuid;
+                }
+                return;
+            }
+        }
+    }
+
+    void RenameTargetWidget(int32 BindingIndex, const FName& NewName)
+    {
+        if (!Blueprint.IsValid()) return;
+        for (UWidgetAnimation* Anim : Blueprint->Animations)
+        {
+            if (Anim && Anim->GetName() == TEXT("appearance"))
+            {
+                if (Anim->AnimationBindings.IsValidIndex(BindingIndex))
+                {
+                    Anim->AnimationBindings[BindingIndex].WidgetName = NewName;
+                }
+                return;
+            }
+        }
+    }
+
+    void ReparentSlotWidget(int32 BindingIndex, const FName& NewSlotName)
+    {
+        if (!Blueprint.IsValid()) return;
+        for (UWidgetAnimation* Anim : Blueprint->Animations)
+        {
+            if (Anim && Anim->GetName() == TEXT("appearance"))
+            {
+                if (Anim->AnimationBindings.IsValidIndex(BindingIndex))
+                {
+                    Anim->AnimationBindings[BindingIndex].SlotWidgetName = NewSlotName;
+                }
+                return;
             }
         }
     }
