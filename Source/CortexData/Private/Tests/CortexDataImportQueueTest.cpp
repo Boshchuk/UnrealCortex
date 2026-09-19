@@ -227,7 +227,8 @@ namespace
 
 		FString MakeSavedOutputPath(const FString& FileName) const
 		{
-			return FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexImportQueueTests"), RunId, FileName);
+			return FPaths::ConvertRelativePathToFull(
+				FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexImportQueueTests"), RunId, FileName));
 		}
 
 		void WriteQueueFile(const FString& FilePath, const FString& QueueId, const TArray<TSharedRef<FJsonObject>>& Operations) const

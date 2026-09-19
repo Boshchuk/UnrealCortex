@@ -263,7 +263,8 @@ namespace
 
 		FString MakeSavedPath(const FString& FileName) const
 		{
-			return FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexJsonDiffTests"), RunId, FileName);
+			return FPaths::ConvertRelativePathToFull(
+				FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexJsonDiffTests"), RunId, FileName));
 		}
 
 		bool FileExists(const FString& FilePath) const
@@ -274,7 +275,7 @@ namespace
 	private:
 		void Cleanup()
 		{
-			IFileManager::Get().DeleteDirectory(*FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexJsonDiffTests"), RunId), false, true);
+			IFileManager::Get().DeleteDirectory(*FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexJsonDiffTests"), RunId)), false, true);
 			for (int32 Index = CreatedPackageNames.Num() - 1; Index >= 0; --Index)
 			{
 				JsonDiffCleanupPackageByName(CreatedPackageNames[Index]);

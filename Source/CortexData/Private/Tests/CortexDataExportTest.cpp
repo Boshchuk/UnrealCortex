@@ -904,7 +904,8 @@ bool FCortexDataExportCommandsRegisteredTest::RunTest(const FString& Parameters)
 	FCortexCommandRouter Router = CreateDataExportTestRouter();
 	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 	Params->SetStringField(TEXT("table_path"), TEXT("/Game/CortexExportTests/Missing.Missing"));
-	Params->SetStringField(TEXT("out_path"), FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexExportTests"), TEXT("registered.json")));
+	Params->SetStringField(TEXT("out_path"), FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexExportTests"), TEXT("registered.json"))));
 
 	const FCortexCommandResult Result = Router.Execute(TEXT("data.export_datatable_json"), Params);
 	TestFalse(TEXT("export_datatable_json is registered and validates the missing table"), Result.bSuccess);
