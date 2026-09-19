@@ -5,6 +5,9 @@
 #include "Internationalization/StringTableCore.h"
 #include "Internationalization/StringTableRegistry.h"
 #include "Misc/EngineVersionComparison.h"
+#include "Templates/Function.h"
+#include "UObject/Package.h"
+#include "UObject/UObjectHash.h"
 
 namespace CortexEngineCompat
 {
@@ -37,6 +40,18 @@ namespace CortexEngineCompat
 				FStringTableRegistry::Get().RegisterStringTable(TableId, StringTable.AsShared());
 			}
 		}
+#endif
+	}
+
+	inline void ForEachObjectWithPackage(
+		const UPackage* Outer,
+		TFunctionRef<bool(UObject*)> Operation,
+		bool bIncludeNestedObjects = true)
+	{
+#if UE_VERSION_OLDER_THAN(5, 8, 0)
+		::ForEachObjectWithPackage(Outer, Operation, bIncludeNestedObjects);
+#else
+		::ForEachObjectWithPackage(Outer, Operation, bIncludeNestedObjects ? EGetObjectsFlags::IncludeNestedObjects : EGetObjectsFlags::None);
 #endif
 	}
 }

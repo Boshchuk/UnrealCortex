@@ -55,7 +55,10 @@ namespace
 		UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *AssetPath);
 		if (Blueprint)
 		{
-			Blueprint->GetOutermost()->MarkAsGarbage();
+			if (UPackage* Package = Blueprint->GetOutermost())
+			{
+				Package->MarkAsGarbage();
+			}
 		}
 	}
 }
@@ -620,9 +623,12 @@ bool FCortexBPSearchPinTypedTextStringTableMatchTest::RunTest(const FString& Par
 	}
 	TestFalse(TEXT("Added node should have node_id"), TextNodeId.IsEmpty());
 
+	const FString TablePackageName = FString::Printf(TEXT("/Game/Temp/TestTable_%s"), *Suffix);
+	UPackage* TablePackage = CreatePackage(*TablePackageName);
 	UStringTable* TestTable = NewObject<UStringTable>(
-		GetTransientPackage(),
-		FName(TEXT("TestStringTable_BPSearchPinTypedText")));
+		TablePackage,
+		FName(TEXT("TestStringTable_BPSearchPinTypedText")),
+		RF_Public | RF_Standalone);
 	TestTable->GetMutableStringTable()->SetNamespace(TEXT("BPPinSearch"));
 	CortexEngineCompat::SetStringTableSourceString(
 		*TestTable->GetMutableStringTable(), TEXT("Mail.Button.Pay"), TEXT("Pay"));
@@ -694,7 +700,7 @@ bool FCortexBPSearchPinTypedTextStringTableMatchTest::RunTest(const FString& Par
 
 	TestTrue(TEXT("search should match typed text pin StringTable key"), bFoundPinMatch);
 
-	TestTable->MarkAsGarbage();
+	TablePackage->MarkAsGarbage();
 	CleanupSearchTestBlueprint(AssetPath);
 	return true;
 }

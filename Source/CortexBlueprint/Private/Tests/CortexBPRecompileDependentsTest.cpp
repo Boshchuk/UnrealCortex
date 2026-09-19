@@ -1,9 +1,11 @@
 #include "Misc/AutomationTest.h"
 #include "Operations/CortexBPCleanupOps.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Dom/JsonObject.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Misc/EngineVersionComparison.h"
 #include "GameFramework/Actor.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
@@ -37,18 +39,35 @@ namespace
 			Root = FString::Printf(
 				TEXT("/CortexReadOnly%s"),
 				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
-			PhysicalDir = FPaths::ProjectSavedDir() / TEXT("CortexReadOnlyBlueprintTests") / Root.RightChop(1);
+			PhysicalDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("CortexReadOnlyBlueprintTests") / Root.RightChop(1));
 			IFileManager::Get().MakeDirectory(*PhysicalDir, true);
 			FPackageName::RegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
 		}
 
 		~FScopedReadOnlyMountedRoot()
 		{
+			for (TObjectIterator<UObject> It; It; ++It)
+			{
+				UObject* Asset = *It;
+				if (!Asset || !Asset->IsAsset())
+				{
+					continue;
+				}
+
+				UPackage* Package = Asset->GetOutermost();
+				if (Package && IsPackageUnderRoot(Package->GetName(), Root))
+				{
+					FAssetRegistryModule::AssetDeleted(Asset);
+					Asset->MarkAsGarbage();
+				}
+			}
+
 			for (TObjectIterator<UPackage> It; It; ++It)
 			{
 				UPackage* Package = *It;
 				if (Package && IsPackageUnderRoot(Package->GetName(), Root))
 				{
+					FAssetRegistryModule::PackageDeleted(Package);
 					Package->MarkAsGarbage();
 				}
 			}
@@ -134,6 +153,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPRecompileDependentsRejectsNonWritableDependentTest::RunTest(const FString& Parameters)
 {
+#if !UE_VERSION_OLDER_THAN(5, 8, 0)
+	AddExpectedError(TEXT("is not a child of an existing mount point"), EAutomationExpectedErrorFlags::Contains, 1);
+#endif
 	FScopedReadOnlyMountedRoot ReadOnlyRoot;
 
 	UBlueprint* ParentBP = FKismetEditorUtilities::CreateBlueprint(
@@ -174,6 +196,7 @@ bool FCortexBPRecompileDependentsRejectsNonWritableDependentTest::RunTest(const 
 	TestEqual(TEXT("Error code is INVALID_FIELD"), Result.ErrorCode, CortexErrorCodes::InvalidField);
 	TestEqual(TEXT("Child was not compiled"), ChildBP->Status, EBlueprintStatus::BS_Dirty);
 
+	FAssetRegistryModule::AssetDeleted(ChildBP);
 	ChildBP->MarkAsGarbage();
 	ParentBP->MarkAsGarbage();
 	return true;

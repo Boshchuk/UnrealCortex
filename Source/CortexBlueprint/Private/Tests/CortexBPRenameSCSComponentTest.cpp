@@ -15,8 +15,10 @@
 #include "K2Node_VariableGet.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Misc/EngineVersionComparison.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Misc/Paths.h"
 #include "UObject/GarbageCollection.h"
 #include "UObject/Package.h"
@@ -39,18 +41,35 @@ namespace
 			Root = FString::Printf(
 				TEXT("/CortexReadOnlyRename%s"),
 				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
-			PhysicalDir = FPaths::ProjectSavedDir() / TEXT("CortexReadOnlyBlueprintTests") / Root.RightChop(1);
+			PhysicalDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("CortexReadOnlyBlueprintTests") / Root.RightChop(1));
 			IFileManager::Get().MakeDirectory(*PhysicalDir, true);
 			FPackageName::RegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
 		}
 
 		~FScopedRenameReadOnlyMountedRoot()
 		{
+			for (TObjectIterator<UObject> It; It; ++It)
+			{
+				UObject* Asset = *It;
+				if (!Asset || !Asset->IsAsset())
+				{
+					continue;
+				}
+
+				UPackage* Package = Asset->GetOutermost();
+				if (Package && RenameIsPackageUnderRoot(Package->GetName(), Root))
+				{
+					FAssetRegistryModule::AssetDeleted(Asset);
+					Asset->MarkAsGarbage();
+				}
+			}
+
 			for (TObjectIterator<UPackage> It; It; ++It)
 			{
 				UPackage* Package = *It;
 				if (Package && RenameIsPackageUnderRoot(Package->GetName(), Root))
 				{
+					FAssetRegistryModule::PackageDeleted(Package);
 					Package->MarkAsGarbage();
 				}
 			}
@@ -70,7 +89,7 @@ namespace
 			Root = FString::Printf(
 				TEXT("/CortexRename%s"),
 				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
-			PhysicalDir = FPaths::ProjectSavedDir() / TEXT("CortexRenameBlueprintTests") / Root.RightChop(1);
+			PhysicalDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("CortexRenameBlueprintTests") / Root.RightChop(1));
 			IFileManager::Get().MakeDirectory(*PhysicalDir, true);
 			FPackageName::RegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
 			FCortexEditorUtils::AddTestWritableContentRoot(Root);
@@ -78,11 +97,28 @@ namespace
 
 		~FScopedRenameWritableMountedRoot()
 		{
+			for (TObjectIterator<UObject> It; It; ++It)
+			{
+				UObject* Asset = *It;
+				if (!Asset || !Asset->IsAsset())
+				{
+					continue;
+				}
+
+				UPackage* Package = Asset->GetOutermost();
+				if (Package && RenameIsPackageUnderRoot(Package->GetName(), Root))
+				{
+					FAssetRegistryModule::AssetDeleted(Asset);
+					Asset->MarkAsGarbage();
+				}
+			}
+
 			for (TObjectIterator<UPackage> It; It; ++It)
 			{
 				UPackage* Package = *It;
 				if (Package && RenameIsPackageUnderRoot(Package->GetName(), Root))
 				{
+					FAssetRegistryModule::PackageDeleted(Package);
 					Package->MarkAsGarbage();
 				}
 			}
@@ -649,6 +685,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPRenameSCSComponentRejectsNonWritableDependentTest::RunTest(const FString& Parameters)
 {
+#if !UE_VERSION_OLDER_THAN(5, 8, 0)
+	AddExpectedError(TEXT("is not a child of an existing mount point"), EAutomationExpectedErrorFlags::Contains, 1);
+#endif
 	FScopedRenameReadOnlyMountedRoot ReadOnlyRoot;
 
 	UBlueprint* ParentBP = RenameCreateLiftBP(TEXT("BP_RenameSCS_ReadOnlyDepParent"));
@@ -691,6 +730,7 @@ bool FCortexBPRenameSCSComponentRejectsNonWritableDependentTest::RunTest(const F
 	TestFalse(TEXT("Parent was not renamed"), RenameHasSCSNode(ParentBP, TEXT("NewComp")));
 	TestEqual(TEXT("Child was not compiled"), ChildBP->Status, EBlueprintStatus::BS_Dirty);
 
+	FAssetRegistryModule::AssetDeleted(ChildBP);
 	ChildBP->MarkAsGarbage();
 	ParentBP->MarkAsGarbage();
 	return true;

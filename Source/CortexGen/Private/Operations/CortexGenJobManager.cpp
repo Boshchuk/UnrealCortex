@@ -404,7 +404,7 @@ void FCortexGenJobManager::TransitionJob(
          NewStatus == ECortexGenJobStatus::ImportFailed) &&
         !Job.ErrorMessage.IsEmpty())
     {
-        UE_LOG(LogCortexGen, Warning, TEXT("Job %s error: %s"), *Job.JobId, *Job.ErrorMessage);
+        UE_LOG(LogCortexGen, Log, TEXT("Job %s error: %s"), *Job.JobId, *Job.ErrorMessage);
     }
 
     JobStateChangedDelegate.Broadcast(Job);
@@ -797,6 +797,11 @@ float FCortexGenJobManager::GetAverageTime(const FString& ModelId) const
         Sum += S;
     }
     return Sum / Samples->Num();
+}
+
+void FCortexGenJobManager::ClearTimingData()
+{
+    TimingData.Empty();
 }
 
 void FCortexGenJobManager::SaveTimingData() const
