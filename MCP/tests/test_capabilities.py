@@ -644,6 +644,42 @@ def test_graph_set_pin_value_capability_includes_typed_text():
     assert params["owning_interface"]["required"] is False
 
 
+def test_live_operation_schema_commands_advertised():
+    fixture = json.loads((FIXTURES_DIR / "capabilities_cache_full.json").read_text(encoding="utf-8"))
+    core_cmds = {cmd["name"] for cmd in fixture["domains"]["core"]["commands"]}
+    graph_cmds = {cmd["name"] for cmd in fixture["domains"]["graph"]["commands"]}
+    umg_cmds = {cmd["name"] for cmd in fixture["domains"]["umg"]["commands"]}
+    assert "get_operation_schema" in core_cmds
+    assert "describe_node" in graph_cmds
+    assert "set_widget_variable" in umg_cmds
+    fallback_core = {cmd["name"] for cmd in _FALLBACK_STRUCTURED["core"]}
+    assert "get_operation_schema" in fallback_core
+
+
+def test_batch_query_aliases_are_not_independently_required():
+    fixture = json.loads((FIXTURES_DIR / "capabilities_cache_full.json").read_text(encoding="utf-8"))
+    fixture_batch = next(
+        command for command in fixture["domains"]["core"]["commands"]
+        if command["name"] == "batch_query"
+    )
+    fallback_batch = next(
+        command for command in _FALLBACK_STRUCTURED["core"]
+        if command["name"] == "batch_query"
+    )
+
+    for batch_contract in (fixture_batch, fallback_batch):
+        params = {param["name"]: param for param in batch_contract["params"]}
+        assert params["commands"]["required"] is False
+        assert params["steps"]["required"] is False
+
+
+def test_core_router_hint_requires_live_editor_proof():
+    capabilities = json.loads((FIXTURES_DIR / "capabilities_cache_full.json").read_text(encoding="utf-8"))
+    docstrings = build_router_docstrings(capabilities)
+    assert "never proves a command is executable" in docstrings["core"]
+    assert "graph.describe_node before graph.add_node" in docstrings["core"]
+
+
 class TestCompositeHints:
     """Validate that _COMPOSITE_HINTS reference real composite tools."""
 

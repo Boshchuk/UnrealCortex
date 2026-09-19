@@ -432,7 +432,7 @@ FString FCortexCommandRouter::ResultToJson(const FCortexCommandResult& Result, d
 
 	if (!IsValidJsonTree(ResponseJson))
 	{
-		UE_LOG(LogCortex, Warning,
+		UE_LOG(LogCortex, Verbose,
 			TEXT("ResultToJson: response envelope contains invalid JSON pointers (RequestId=%s); returning SERIALIZATION_ERROR fallback"),
 			*RequestId);
 		return BuildSerializationErrorResponse(RequestId);

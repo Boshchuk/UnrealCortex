@@ -71,6 +71,13 @@ FCortexCommandResult FCortexGraphCommandHandler::Execute(
 	{
 		return FCortexGraphNodeOps::AutoLayout(Params);
 	}
+	if (Command == TEXT("describe_node"))
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::UnsupportedOperation,
+			TEXT("graph.describe_node behavior is implemented by feat/safe-graph-authoring-recovery")
+		);
+	}
 
 	return FCortexCommandRouter::Error(
 		CortexErrorCodes::UnknownCommand,
