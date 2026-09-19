@@ -1,5 +1,6 @@
 #include "Providers/CortexMcpConfigTranslator.h"
 
+#include "CortexEngineCompat.h"
 #include "Dom/JsonObject.h"
 #include "Misc/FileHelper.h"
 #include "Serialization/JsonReader.h"
@@ -89,19 +90,23 @@ namespace
         }
 
         TArray<FString> EnvKeys;
-        (*EnvObject)->Values.GetKeys(EnvKeys);
+        EnvKeys.Reserve((*EnvObject)->Values.Num());
+        for (const auto& Pair : (*EnvObject)->Values)
+        {
+            EnvKeys.Add(CortexEngineCompat::JsonKeyToString(Pair.Key));
+        }
         EnvKeys.Sort();
 
         for (const FString& EnvKey : EnvKeys)
         {
-            const TSharedPtr<FJsonValue>* EnvValue = (*EnvObject)->Values.Find(EnvKey);
-            if (EnvValue == nullptr || !EnvValue->IsValid())
+            const TSharedPtr<FJsonValue> EnvValue = (*EnvObject)->TryGetField(EnvKey);
+            if (!EnvValue.IsValid())
             {
                 continue;
             }
             OutOverrideValues.Add(
                 FString::Printf(TEXT("mcp_servers.%s.env.%s"), *ServerName, *EnvKey),
-                *EnvValue);
+                EnvValue);
         }
     }
 
@@ -229,7 +234,11 @@ TMap<FString, TSharedPtr<FJsonValue>> FCortexMcpConfigTranslator::BuildCodexConf
     }
 
     TArray<FString> ServerNames;
-    (*McpServersObject)->Values.GetKeys(ServerNames);
+    ServerNames.Reserve((*McpServersObject)->Values.Num());
+    for (const auto& Pair : (*McpServersObject)->Values)
+    {
+        ServerNames.Add(CortexEngineCompat::JsonKeyToString(Pair.Key));
+    }
     ServerNames.Sort();
 
     for (const FString& ServerName : ServerNames)

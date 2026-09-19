@@ -13,7 +13,8 @@ namespace
 {
 FString GetSafeFileContractTestRoot()
 {
-	return FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexSafeFileContract"));
+	return FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexSafeFileContract")));
 }
 
 void CleanupSafeFileContractTestRoot()
@@ -114,6 +115,11 @@ bool FCortexSafeFileContractWritesCanonicalJsonTest::RunTest(const FString& Para
 	TSharedRef<FJsonObject> Payload = MakeShared<FJsonObject>();
 	Payload->SetStringField(TEXT("zeta"), TEXT("last"));
 	Payload->SetStringField(TEXT("alpha"), TEXT("first"));
+
+	TestEqual(
+		TEXT("Canonical JSON owns and sorts object keys"),
+		FCortexSafeFileContract::SerializeCanonicalJson(Payload),
+		FString(TEXT("{\"alpha\":\"first\",\"zeta\":\"last\"}")));
 
 	const FCortexJsonFileWriteResult WriteResult = FCortexSafeFileContract::WriteJsonReportAtomic(ResolvedPath, Payload);
 	TestTrue(TEXT("Write succeeds"), WriteResult.bWritten);

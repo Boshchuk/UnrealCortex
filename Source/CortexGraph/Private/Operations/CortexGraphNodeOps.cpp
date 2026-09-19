@@ -257,6 +257,11 @@ UClass* ResolveGraphNodeClassIdentifier(const FString& ClassIdentifier)
 		return FoundClass;
 	}
 
+	if (UBlueprint* FoundBP = FindObject<UBlueprint>(nullptr, *ClassIdentifier))
+	{
+		return FoundBP->GeneratedClass;
+	}
+
 	if (!ClassIdentifier.StartsWith(TEXT("/")))
 	{
 		if (UClass* FoundClass = FindFirstObject<UClass>(*ClassIdentifier, EFindFirstObjectOptions::NativeFirst))
@@ -299,14 +304,24 @@ UClass* ResolveGraphNodeClassIdentifier(const FString& ClassIdentifier)
 		return nullptr;
 	}
 
-	if (UClass* LoadedClass = LoadObject<UClass>(nullptr, *ClassIdentifier))
+	if (ClassIdentifier.EndsWith(TEXT("_C")))
 	{
-		return LoadedClass;
+		if (UClass* LoadedClass = LoadObject<UClass>(nullptr, *ClassIdentifier))
+		{
+			return LoadedClass;
+		}
 	}
-
-	if (UBlueprint* BlueprintAsset = LoadObject<UBlueprint>(nullptr, *ClassIdentifier))
+	else
 	{
-		return BlueprintAsset->GeneratedClass;
+		if (UBlueprint* BlueprintAsset = LoadObject<UBlueprint>(nullptr, *ClassIdentifier))
+		{
+			return BlueprintAsset->GeneratedClass;
+		}
+
+		if (UClass* LoadedClass = LoadObject<UClass>(nullptr, *ClassIdentifier))
+		{
+			return LoadedClass;
+		}
 	}
 
 	return nullptr;

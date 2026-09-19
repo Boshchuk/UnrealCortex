@@ -1,4 +1,5 @@
 #include "Operations/CortexGenJobManager.h"
+#include "CortexEngineCompat.h"
 #include "CortexGenModule.h"
 #include "CortexGenSettings.h"
 #include "Providers/ICortexGenProvider.h"
@@ -403,7 +404,7 @@ void FCortexGenJobManager::TransitionJob(
          NewStatus == ECortexGenJobStatus::ImportFailed) &&
         !Job.ErrorMessage.IsEmpty())
     {
-        UE_LOG(LogCortexGen, Warning, TEXT("Job %s error: %s"), *Job.JobId, *Job.ErrorMessage);
+        UE_LOG(LogCortexGen, Log, TEXT("Job %s error: %s"), *Job.JobId, *Job.ErrorMessage);
     }
 
     JobStateChangedDelegate.Broadcast(Job);
@@ -798,6 +799,11 @@ float FCortexGenJobManager::GetAverageTime(const FString& ModelId) const
     return Sum / Samples->Num();
 }
 
+void FCortexGenJobManager::ClearTimingData()
+{
+    TimingData.Empty();
+}
+
 void FCortexGenJobManager::SaveTimingData() const
 {
     FString FilePath = FPaths::ProjectSavedDir() / TEXT("CortexGen/timing.json");
@@ -861,7 +867,7 @@ void FCortexGenJobManager::LoadTimingData()
             continue;
         }
 
-        TArray<float>& Samples = TimingData.FindOrAdd(Pair.Key);
+        TArray<float>& Samples = TimingData.FindOrAdd(CortexEngineCompat::JsonKeyToString(Pair.Key));
         for (const auto& Val : *SamplesArray)
         {
             double D;
