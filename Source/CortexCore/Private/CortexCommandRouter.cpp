@@ -103,7 +103,7 @@ FString BuildSerializationErrorResponse(const FString& RequestId)
 TSharedPtr<FJsonObject> BuildCapabilitiesData(const TArray<FCortexRegisteredDomain>& RegisteredDomains)
 {
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
-	Data->SetStringField(TEXT("plugin_version"), TEXT("0.1.13"));
+	Data->SetStringField(TEXT("plugin_version"), TEXT("0.1.16"));
 
 	TSharedPtr<FJsonObject> Domains = MakeShared<FJsonObject>();
 
@@ -898,7 +898,7 @@ FCortexCommandResult FCortexCommandRouter::HandleGetStatus(const TSharedPtr<FJso
 {
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetBoolField(TEXT("connected"), true);
-	Data->SetStringField(TEXT("plugin_version"), TEXT("0.1.13"));
+	Data->SetStringField(TEXT("plugin_version"), TEXT("0.1.16"));
 
 	// Engine version
 	Data->SetStringField(TEXT("engine_version"), FEngineVersion::Current().ToString());
