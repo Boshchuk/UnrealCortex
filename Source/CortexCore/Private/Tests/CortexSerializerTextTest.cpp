@@ -217,7 +217,8 @@ bool FCortexSerializerTextDescriptorNormalizeHistoricalStringTableTest::RunTest(
 		GetTransientPackage(),
 		FName(TEXT("TestStringTable_NormalizeHistorical")));
 	TestTable->GetMutableStringTable()->SetNamespace(TEXT("TestNS"));
-	TestTable->GetMutableStringTable()->SetSourceString(TEXT("PayKey"), TEXT("Pay"));
+	CortexEngineCompat::SetStringTableSourceString(
+		*TestTable->GetMutableStringTable(), TEXT("PayKey"), TEXT("Pay"));
 
 	TSharedPtr<FJsonObject> StringTable = MakeShared<FJsonObject>();
 	StringTable->SetStringField(TEXT("table_id"), TestTable->GetStringTableId().ToString());
@@ -296,7 +297,8 @@ bool FCortexSerializerStructToJsonStringTableTextTest::RunTest(const FString& Pa
 		GetTransientPackage(),
 		FName(TEXT("TestStringTable_StructToJsonText")));
 	TestTable->GetMutableStringTable()->SetNamespace(TEXT("TestNS"));
-	TestTable->GetMutableStringTable()->SetSourceString(TEXT("TestKey"), TEXT("Test Value"));
+	CortexEngineCompat::SetStringTableSourceString(
+		*TestTable->GetMutableStringTable(), TEXT("TestKey"), TEXT("Test Value"));
 
 	UCortexSerializerTextTestObject* TestObject = NewObject<UCortexSerializerTextTestObject>();
 	TestObject->Title = FText::FromStringTable(TestTable->GetStringTableId(), TEXT("TestKey"));
