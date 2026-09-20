@@ -100,7 +100,8 @@ namespace CortexUMGAnimationBindingUtils
     {
         None,
         FailAfterUMGRemoval,
-        FailRestorationVerification
+        FailRestorationVerification,
+        FailSavePackage
     };
 
     void SetFailureInjection(EFailureInjection Injection);

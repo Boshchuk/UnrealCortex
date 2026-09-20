@@ -16,6 +16,8 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "String/BytesToHex.h"
+#include "HAL/FileManager.h"
+#include "Misc/PackageName.h"
 
 namespace
 {
@@ -1089,14 +1091,39 @@ namespace CortexUMGAnimationBindingUtils
         {
             bSaveAttempted = true;
             UPackage* Package = Blueprint->GetOutermost();
-            FSavePackageArgs SaveArgs;
-            SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
             const FString PackageFileName = FPackageName::LongPackageNameToFilename(
                 Package->GetName(), FPackageName::GetAssetPackageExtension());
-            bSaved = UPackage::SavePackage(Package, Blueprint, *PackageFileName, SaveArgs);
-            if (!bSaved)
+
+            bool bInjectedSaveFailure = false;
+            #if WITH_DEV_AUTOMATION_TESTS
+            if (GetFailureInjection() == EFailureInjection::FailSavePackage)
             {
-                SaveErrorVal = MakeShared<FJsonValueString>(TEXT("Failed to save package to disk"));
+                bInjectedSaveFailure = true;
+            }
+            #endif
+
+            if (bInjectedSaveFailure)
+            {
+                bSaved = false;
+                SaveErrorVal = MakeShared<FJsonValueString>(TEXT("Injected save package failure"));
+            }
+            else if (IFileManager::Get().FileExists(*PackageFileName) && IFileManager::Get().IsReadOnly(*PackageFileName))
+            {
+                bSaved = false;
+                SaveErrorVal = MakeShared<FJsonValueString>(
+                    FString::Printf(TEXT("Package file is read-only: %s"), *PackageFileName));
+            }
+            else
+            {
+                FSavePackageArgs SaveArgs;
+                SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+                SaveArgs.SaveFlags = SAVE_NoError;
+                bSaved = UPackage::SavePackage(Package, Blueprint, *PackageFileName, SaveArgs);
+                if (!bSaved)
+                {
+                    SaveErrorVal = MakeShared<FJsonValueString>(
+                        FString::Printf(TEXT("UPackage::SavePackage failed for package: %s"), *Package->GetName()));
+                }
             }
         }
 
