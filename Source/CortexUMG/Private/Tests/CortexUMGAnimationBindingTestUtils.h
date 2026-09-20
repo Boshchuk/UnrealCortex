@@ -22,6 +22,12 @@
 #include "Sections/MovieSceneBoolSection.h"
 #include "Channels/MovieSceneFloatChannel.h"
 #include "Channels/MovieSceneBoolChannel.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraphSchema_K2.h"
+#include "K2Node_CallFunction.h"
+#include "K2Node_Event.h"
+#include "K2Node_VariableGet.h"
+#include "Kismet2/BlueprintEditorUtils.h"
 #include "Serialization/MemoryWriter.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -388,6 +394,50 @@ namespace CortexUMGAnimationBindingTestUtils
         IdleMS->SetPlaybackRange(TRange<FFrameNumber>(FFrameNumber(0), FFrameNumber(24000)));
         WBP->Animations.Add(IdleAnim);
 
+        // Minimal generic playback invocation in the fixture so all retained tracks can be exercised
+        UEdGraph* EventGraph = FBlueprintEditorUtils::CreateNewGraph(
+            WBP, TEXT("EventGraph"), UEdGraph::StaticClass(), UEdGraphSchema_K2::StaticClass());
+        FBlueprintEditorUtils::AddUbergraphPage(WBP, EventGraph);
+
+        UFunction* PlayAnimFunc = UUserWidget::StaticClass()->FindFunctionByName(TEXT("PlayAnimation"));
+        if (PlayAnimFunc)
+        {
+            UK2Node_Event* ConstructEvent = NewObject<UK2Node_Event>(EventGraph);
+            ConstructEvent->EventReference.SetExternalMember(TEXT("Construct"), UUserWidget::StaticClass());
+            ConstructEvent->bOverrideFunction = true;
+            ConstructEvent->CreateNewGuid();
+            EventGraph->AddNode(ConstructEvent, false, false);
+            ConstructEvent->AllocateDefaultPins();
+
+            UK2Node_CallFunction* PlayNode = NewObject<UK2Node_CallFunction>(EventGraph);
+            PlayNode->CreateNewGuid();
+            PlayNode->SetFromFunction(PlayAnimFunc);
+            EventGraph->AddNode(PlayNode, false, false);
+            PlayNode->AllocateDefaultPins();
+
+            UK2Node_VariableGet* AnimVarGet = NewObject<UK2Node_VariableGet>(EventGraph);
+            AnimVarGet->CreateNewGuid();
+            AnimVarGet->VariableReference.SetSelfMember(Anim->GetFName());
+            EventGraph->AddNode(AnimVarGet, false, false);
+            AnimVarGet->AllocateDefaultPins();
+
+            // Connect Construct then pin -> PlayNode execute pin
+            UEdGraphPin* EventThenPin = ConstructEvent->FindPin(UEdGraphSchema_K2::PN_Then);
+            UEdGraphPin* PlayExecPin = PlayNode->FindPin(UEdGraphSchema_K2::PN_Execute);
+            if (EventThenPin && PlayExecPin)
+            {
+                EventThenPin->MakeLinkTo(PlayExecPin);
+            }
+
+            // Connect AnimVarGet out pin -> PlayNode InAnimation pin
+            UEdGraphPin* AnimValuePin = AnimVarGet->GetValuePin();
+            UEdGraphPin* InAnimPin = PlayNode->FindPin(TEXT("InAnimation"));
+            if (AnimValuePin && InAnimPin)
+            {
+                AnimValuePin->MakeLinkTo(InAnimPin);
+            }
+        }
+
         FKismetEditorUtilities::CompileBlueprint(WBP);
         return WBP;
     }
@@ -417,7 +467,6 @@ struct FCortexUMGAnimationBindingFixture
         {
             UWidgetBlueprint* WBP = Blueprint.Get();
             UPackage* Pkg = WBP->GetPackage();
-            WBP->MarkAsGarbage();
             if (Pkg)
             {
                 Pkg->ClearDirtyFlag();

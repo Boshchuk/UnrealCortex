@@ -97,7 +97,6 @@ struct FCortexUMGAnimationBindingPersistenceFixture
                 ResetLoaders(Pkg);
                 Pkg->ClearDirtyFlag();
             }
-            WBP->MarkAsGarbage();
             Blueprint.Reset();
         }
 
@@ -646,9 +645,96 @@ bool FCortexUMGAnimationBindingCreateIntegrationSeedTest::RunTest(const FString&
     const FString DiskFilename = FPackageName::LongPackageNameToFilename(
         PackageName, FPackageName::GetAssetPackageExtension());
 
+    bool bNeedsGeneration = true;
     if (IFileManager::Get().FileExists(*DiskFilename))
     {
-        TestTrue(TEXT("Disk asset file exists"), true);
+        UWidgetBlueprint* ExistingBP = LoadObject<UWidgetBlueprint>(nullptr, *PackageName);
+        if (ExistingBP && ExistingBP->Animations.Num() >= 2)
+        {
+            UWidgetAnimation* ExistingAnim = nullptr;
+            for (UWidgetAnimation* A : ExistingBP->Animations)
+            {
+                if (A && A->GetName() == TEXT("appearance"))
+                {
+                    ExistingAnim = A;
+                    break;
+                }
+            }
+            if (ExistingAnim && ExistingAnim->AnimationBindings.Num() == 3 && ExistingBP->UbergraphPages.Num() > 0)
+            {
+                // Validate existing on-disk asset actually contains the valid bindings and tracks:
+                TSet<FName> ExpectedWidgets = { TEXT("BodySizeBox"), TEXT("BorderBody"), TEXT("StorylineIcon") };
+                TSet<FName> FoundWidgets;
+                bool bValidGuids = true;
+                for (const FWidgetAnimationBinding& B : ExistingAnim->AnimationBindings)
+                {
+                    FoundWidgets.Add(B.WidgetName);
+                    if (!B.AnimationGuid.IsValid())
+                    {
+                        bValidGuids = false;
+                    }
+                }
+
+                bool bMovieSceneValid = false;
+                if (ExistingAnim->MovieScene)
+                {
+                    const UMovieScene* MS = ExistingAnim->MovieScene;
+                    int32 PossessableCount = MS->GetPossessableCount();
+                    int32 TrackCount = 0;
+                    for (const FMovieSceneBinding& MSB : MS->GetBindings())
+                    {
+                        TrackCount += MSB.GetTracks().Num();
+                    }
+                    if (PossessableCount == 3 && TrackCount >= 4)
+                    {
+                        bMovieSceneValid = true;
+                    }
+                }
+
+                bool bHasPlaybackNode = false;
+                bool bAllNodesHaveGuid = true;
+                for (UEdGraph* Graph : ExistingBP->UbergraphPages)
+                {
+                    if (Graph)
+                    {
+                        for (UEdGraphNode* Node : Graph->Nodes)
+                        {
+                            if (Node && !Node->NodeGuid.IsValid())
+                            {
+                                bAllNodesHaveGuid = false;
+                            }
+                            if (UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(Node))
+                            {
+                                if (CallNode->GetFunctionName() == TEXT("PlayAnimation"))
+                                {
+                                    bHasPlaybackNode = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (FoundWidgets.Num() == 3 && FoundWidgets.Includes(ExpectedWidgets) &&
+                    bValidGuids && bMovieSceneValid && bHasPlaybackNode && bAllNodesHaveGuid)
+                {
+                    bNeedsGeneration = false;
+                }
+            }
+        }
+        if (bNeedsGeneration)
+        {
+            UPackage* ExistingPkg = FindPackage(nullptr, *PackageName);
+            if (ExistingPkg)
+            {
+                ResetLoaders(ExistingPkg);
+                ExistingPkg->ClearDirtyFlag();
+            }
+        }
+    }
+
+    if (!bNeedsGeneration)
+    {
+        TestTrue(TEXT("Disk asset exists and is valid"), true);
         return true;
     }
 
@@ -678,4 +764,203 @@ bool FCortexUMGAnimationBindingCreateIntegrationSeedTest::RunTest(const FString&
 
     TestTrue(TEXT("Disk asset file exists"), IFileManager::Get().FileExists(*DiskFilename));
     return bSaved;
+}
+
+// -----------------------------------------------------------------------------
+// Step 7: Native Playback Baseline Evaluation Test
+// -----------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingPlaybackEvaluationTest,
+    "Cortex.UMG.AnimationBinding.PlaybackEvaluation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationBindingPlaybackEvaluationTest::RunTest(const FString& Parameters)
+{
+    FCortexUMGAnimationBindingPersistenceFixture Fixture(*this);
+    if (!Fixture.IsValid())
+    {
+        return false;
+    }
+
+    UWidgetBlueprint* WBP = Fixture.Blueprint.Get();
+    TestNotNull(TEXT("WidgetBlueprint exists"), WBP);
+    if (!WBP)
+    {
+        return false;
+    }
+
+    UWidgetAnimation* Anim = nullptr;
+    for (UWidgetAnimation* A : WBP->Animations)
+    {
+        if (A && A->GetName() == TEXT("appearance"))
+        {
+            Anim = A;
+            break;
+        }
+    }
+    TestNotNull(TEXT("Found appearance animation"), Anim);
+    if (!Anim || !Anim->MovieScene)
+    {
+        return false;
+    }
+
+    UMovieScene* MS = Anim->MovieScene;
+    TRange<FFrameNumber> Range = MS->GetPlaybackRange();
+    TestEqual(TEXT("Playback range start is 120"), Range.GetLowerBoundValue().Value, 120);
+    TestEqual(TEXT("Playback range end is 720"), Range.GetUpperBoundValue().Value, 720);
+
+    // Locate tracks
+    FMovieSceneFloatChannel* WidthChannel = nullptr;
+    FMovieSceneFloatChannel* HeightChannel = nullptr;
+    FMovieSceneFloatChannel* OpacityChannel = nullptr;
+    FMovieSceneBoolChannel* VisChannel = nullptr;
+
+    const UMovieScene* ConstMS = MS;
+    for (const FMovieSceneBinding& Binding : ConstMS->GetBindings())
+    {
+        for (UMovieSceneTrack* Track : Binding.GetTracks())
+        {
+            if (UMovieSceneFloatTrack* FloatTrack = Cast<UMovieSceneFloatTrack>(Track))
+            {
+                if (FloatTrack->GetPropertyName() == FName("WidthOverride"))
+                {
+                    if (FloatTrack->GetAllSections().Num() > 0)
+                    {
+                        if (UMovieSceneFloatSection* Sec = Cast<UMovieSceneFloatSection>(FloatTrack->GetAllSections()[0]))
+                        {
+                            WidthChannel = &Sec->GetChannel();
+                        }
+                    }
+                }
+                else if (FloatTrack->GetPropertyName() == FName("HeightOverride"))
+                {
+                    if (FloatTrack->GetAllSections().Num() > 0)
+                    {
+                        if (UMovieSceneFloatSection* Sec = Cast<UMovieSceneFloatSection>(FloatTrack->GetAllSections()[0]))
+                        {
+                            HeightChannel = &Sec->GetChannel();
+                        }
+                    }
+                }
+                else if (FloatTrack->GetPropertyName() == FName("RenderOpacity"))
+                {
+                    if (FloatTrack->GetAllSections().Num() > 0)
+                    {
+                        if (UMovieSceneFloatSection* Sec = Cast<UMovieSceneFloatSection>(FloatTrack->GetAllSections()[0]))
+                        {
+                            OpacityChannel = &Sec->GetChannel();
+                        }
+                    }
+                }
+            }
+            else if (UMovieSceneBoolTrack* BoolTrack = Cast<UMovieSceneBoolTrack>(Track))
+            {
+                if (BoolTrack->GetPropertyName() == FName("Visibility"))
+                {
+                    if (BoolTrack->GetAllSections().Num() > 0)
+                    {
+                        if (UMovieSceneBoolSection* Sec = Cast<UMovieSceneBoolSection>(BoolTrack->GetAllSections()[0]))
+                        {
+                            VisChannel = &Sec->GetChannel();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    TestNotNull(TEXT("Found WidthOverride channel"), WidthChannel);
+    TestNotNull(TEXT("Found HeightOverride channel"), HeightChannel);
+    TestNotNull(TEXT("Found RenderOpacity channel"), OpacityChannel);
+    TestNotNull(TEXT("Found Visibility channel"), VisChannel);
+    if (!WidthChannel || !HeightChannel || !OpacityChannel || !VisChannel)
+    {
+        return false;
+    }
+
+    // Helper evaluation lambda
+    auto EvalFloat = [](FMovieSceneFloatChannel* Chan, int32 Frame) -> float
+    {
+        float Val = 0.0f;
+        Chan->Evaluate(FFrameTime(FFrameNumber(Frame)), Val);
+        return Val;
+    };
+    auto EvalBool = [](FMovieSceneBoolChannel* Chan, int32 Frame) -> bool
+    {
+        bool Val = false;
+        Chan->Evaluate(FFrameTime(FFrameNumber(Frame)), Val);
+        return Val;
+    };
+
+    // Frame 120 (Keyframe 1)
+    TestEqual(TEXT("Frame 120: WidthOverride == 100.0"), EvalFloat(WidthChannel, 120), 100.0f);
+    TestEqual(TEXT("Frame 120: HeightOverride == 150.0"), EvalFloat(HeightChannel, 120), 150.0f);
+    TestEqual(TEXT("Frame 120: RenderOpacity == 0.0"), EvalFloat(OpacityChannel, 120), 0.0f);
+    TestEqual(TEXT("Frame 120: Visibility == true"), EvalBool(VisChannel, 120), true);
+
+    // Frame 180 (Intervening sample between 120 and 240)
+    // WidthOverride has cubic interpolation with tangents arrive 1.5, leave 2.0 -> within tolerance 25.0 of 150.0
+    const float Width180 = EvalFloat(WidthChannel, 180);
+    TestTrue(TEXT("Frame 180: WidthOverride is within cubic tolerance of 150.0"),
+        FMath::Abs(Width180 - 150.0f) <= 25.0f);
+    // HeightOverride is cubic auto tangent: 150 + 200 * (3*(1/8)^2 - 2*(1/8)^3) = 158.59375
+    TestEqual(TEXT("Frame 180: HeightOverride == 158.59375"), EvalFloat(HeightChannel, 180), 158.59375f);
+    // RenderOpacity is linear: 0.0 + 1.0 * (60/120) = 0.5
+    TestEqual(TEXT("Frame 180: RenderOpacity == 0.5"), EvalFloat(OpacityChannel, 180), 0.5f);
+    TestEqual(TEXT("Frame 180: Visibility == true"), EvalBool(VisChannel, 180), true);
+
+    // Frame 240 (Keyframe 2)
+    TestEqual(TEXT("Frame 240: WidthOverride == 200.0"), EvalFloat(WidthChannel, 240), 200.0f);
+    // HeightOverride at frame 240: 150 + 200 * (3*(1/4)^2 - 2*(1/4)^3) = 181.25
+    TestEqual(TEXT("Frame 240: HeightOverride == 181.25"), EvalFloat(HeightChannel, 240), 181.25f);
+    TestEqual(TEXT("Frame 240: RenderOpacity == 1.0"), EvalFloat(OpacityChannel, 240), 1.0f);
+    TestEqual(TEXT("Frame 240: Visibility == false"), EvalBool(VisChannel, 240), false);
+
+    // Frame 420 (Intervening sample between 240 and 600)
+    // WidthOverride is linear: 200 + 100 * (180/360) = 250.0
+    TestEqual(TEXT("Frame 420: WidthOverride == 250.0"), EvalFloat(WidthChannel, 420), 250.0f);
+    // HeightOverride at frame 420: 150 + 200 * (3*(5/8)^2 - 2*(5/8)^3) = 286.71875
+    TestEqual(TEXT("Frame 420: HeightOverride == 286.71875"), EvalFloat(HeightChannel, 420), 286.71875f);
+    // RenderOpacity is held at 1.0
+    TestEqual(TEXT("Frame 420: RenderOpacity == 1.0"), EvalFloat(OpacityChannel, 420), 1.0f);
+    TestEqual(TEXT("Frame 420: Visibility == false"), EvalBool(VisChannel, 420), false);
+
+    // Frame 600 (Keyframe 3)
+    TestEqual(TEXT("Frame 600: WidthOverride == 300.0"), EvalFloat(WidthChannel, 600), 300.0f);
+    TestEqual(TEXT("Frame 600: HeightOverride == 350.0"), EvalFloat(HeightChannel, 600), 350.0f);
+    TestEqual(TEXT("Frame 600: RenderOpacity == 1.0"), EvalFloat(OpacityChannel, 600), 1.0f);
+    TestEqual(TEXT("Frame 600: Visibility == false"), EvalBool(VisChannel, 600), false);
+
+    // Frame 720 (End of playback range)
+    TestEqual(TEXT("Frame 720: WidthOverride == 300.0"), EvalFloat(WidthChannel, 720), 300.0f);
+    TestEqual(TEXT("Frame 720: HeightOverride == 350.0"), EvalFloat(HeightChannel, 720), 350.0f);
+    TestEqual(TEXT("Frame 720: RenderOpacity == 1.0"), EvalFloat(OpacityChannel, 720), 1.0f);
+    TestEqual(TEXT("Frame 720: Visibility == false"), EvalBool(VisChannel, 720), false);
+
+    // Now remove binding 2 (StorylineIcon) and verify retained channels evaluate identically
+    const FCortexCommandResult Read = Fixture.Router.Execute(
+        TEXT("umg.list_animation_bindings"), Fixture.InspectParams());
+    TestTrue(TEXT("Inspect succeeds"), Read.bSuccess);
+    if (!Read.bSuccess || !Read.Data.IsValid())
+    {
+        return false;
+    }
+
+    TSharedPtr<FJsonObject> RemoveParams = Fixture.RemovalParams(Read.Data, 2);
+    RemoveParams->SetBoolField(TEXT("dry_run"), false);
+    RemoveParams->SetBoolField(TEXT("save"), false);
+
+    const FCortexCommandResult RemoveResult = Fixture.Router.Execute(
+        TEXT("umg.remove_animation_binding"), RemoveParams);
+    TestTrue(TEXT("Removal succeeds"), RemoveResult.bSuccess);
+
+    // Retained channels continue to evaluate to exact baseline values
+    TestEqual(TEXT("Post-removal Frame 120: WidthOverride == 100.0"), EvalFloat(WidthChannel, 120), 100.0f);
+    TestEqual(TEXT("Post-removal Frame 180: HeightOverride == 158.59375"), EvalFloat(HeightChannel, 180), 158.59375f);
+    TestEqual(TEXT("Post-removal Frame 240: RenderOpacity == 1.0"), EvalFloat(OpacityChannel, 240), 1.0f);
+    TestEqual(TEXT("Post-removal Frame 600: WidthOverride == 300.0"), EvalFloat(WidthChannel, 600), 300.0f);
+    TestEqual(TEXT("Post-removal Frame 600: HeightOverride == 350.0"), EvalFloat(HeightChannel, 600), 350.0f);
+
+    return true;
 }

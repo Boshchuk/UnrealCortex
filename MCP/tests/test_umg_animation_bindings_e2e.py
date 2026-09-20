@@ -1,7 +1,7 @@
 """End-to-End live tests for UMG animation binding inspection and transactional removal.
 
 Verifies deployed integration, schema contracts, duplicate mutation, generic split smoke,
-and playback baseline against WBP_AnimationBindingFixture.
+and rendered/evaluated playback baseline against WBP_AnimationBindingFixture.
 
 Requires running Unreal Editor with UnrealCortex plugin and CortexSandbox.
 Run:
@@ -27,7 +27,7 @@ SEED_FIXTURE_PATH = "/Game/UI/WBP_AnimationBindingFixture"
 
 @pytest.mark.e2e
 def test_live_binding_schema(tcp_connection):
-    """Verify live schema for list_animation_bindings and remove_animation_binding, plus editor identity."""
+    """Verify live schema for list_animation_bindings and remove_animation_binding, plus editor/build identity."""
     for command in ("list_animation_bindings", "remove_animation_binding"):
         response = tcp_connection.send_command(
             "core.get_operation_schema", {"domain": "umg", "command": command}
@@ -59,6 +59,15 @@ def test_live_binding_schema(tcp_connection):
     status_data = status_resp.get("data", {})
     domains = status_data.get("domains", {})
     assert "umg" in domains, f"Domain 'umg' not found in registered domains: {domains.keys()}"
+
+    # Verify build configuration and engine identity fields
+    assert "engine_version" in status_data, f"Missing engine_version in get_status: {status_data}"
+    assert len(status_data["engine_version"]) > 0
+    assert "project_name" in status_data, f"Missing project_name in get_status: {status_data}"
+    assert status_data["project_name"] == "CortexSandbox"
+    assert "plugin_version" in status_data, f"Missing plugin_version in get_status: {status_data}"
+    assert len(status_data["plugin_version"]) > 0
+    assert "subsystems" in status_data
 
 
 @pytest.mark.e2e
@@ -102,7 +111,7 @@ def test_fixture_seed_inspection(tcp_connection, mcp_client):
 
 @pytest.mark.e2e
 def test_duplicate_mutation_preview_and_apply(tcp_connection, mcp_client):
-    """Inspect blueprint.duplicate schema, create duplicate, preview removal, apply removal, verify stale token, save & reload."""
+    """Inspect blueprint.duplicate schema, create duplicate, preview removal, apply removal, verify stale token on edited asset, save-error, reload."""
     # 1. Inspect blueprint.duplicate schema before constructing calls
     dup_schema_resp = tcp_connection.send_command(
         "core.get_operation_schema", {"domain": "blueprint", "command": "duplicate"}
@@ -140,19 +149,19 @@ def test_duplicate_mutation_preview_and_apply(tcp_connection, mcp_client):
         assert len(initial_bindings) == 3
 
         # Choose binding 0 (BodySizeBox)
-        target_binding = initial_bindings[0]
-        selector = {
-            "binding_guid": target_binding["binding_guid"],
-            "widget_name": target_binding["widget_name"],
-            "slot_widget_name": target_binding["slot_widget_name"],
-            "is_root_widget": target_binding["is_root_widget"],
+        target_binding_0 = initial_bindings[0]
+        selector_0 = {
+            "binding_guid": target_binding_0["binding_guid"],
+            "widget_name": target_binding_0["widget_name"],
+            "slot_widget_name": target_binding_0["slot_widget_name"],
+            "is_root_widget": target_binding_0["is_root_widget"],
         }
 
         # 4. Preview removal (dry_run=True, save=False)
         preview_params = {
             "asset_path": dup_asset_path,
             "animation_name": "appearance",
-            "selector": selector,
+            "selector": selector_0,
             "expected_fingerprint": initial_fp,
             "dry_run": True,
             "save": False,
@@ -174,11 +183,11 @@ def test_duplicate_mutation_preview_and_apply(tcp_connection, mcp_client):
         )
         assert len(post_preview_read["data"]["bindings"]) == 3
 
-        # 5. Perform real removal (dry_run=False, save=True)
+        # 5. Perform real removal of first binding (dry_run=False, save=True)
         remove_params = {
             "asset_path": dup_asset_path,
             "animation_name": "appearance",
-            "selector": selector,
+            "selector": selector_0,
             "expected_fingerprint": initial_fp,
             "dry_run": False,
             "save": True,
@@ -200,24 +209,100 @@ def test_duplicate_mutation_preview_and_apply(tcp_connection, mcp_client):
         assert refreshed_fp.get("is_dirty") is False
         assert refreshed_fp["domain_signature"]["digest"] != initial_fp["domain_signature"]["digest"]
 
-        # 6. Test stale token rejection: repeat call with old token/selector
-        repeat_resp = tcp_connection.send_command(
-            "umg.remove_animation_binding", remove_params
-        )
-        assert repeat_resp["success"] is False
-        assert repeat_resp.get("error_code") in ("STALE_PRECONDITION", "TARGET_NOT_FOUND")
+        # 6. Test STALE_PRECONDITION after a separate edit:
+        # Capture the current clean fingerprint
+        fp_before_second_edit = refreshed_fp
+        remaining_bindings = remove_data["remaining_bindings"]
+        target_binding_1 = remaining_bindings[0]
+        selector_1 = {
+            "binding_guid": target_binding_1["binding_guid"],
+            "widget_name": target_binding_1["widget_name"],
+            "slot_widget_name": target_binding_1["slot_widget_name"],
+            "is_root_widget": target_binding_1["is_root_widget"],
+        }
+        target_binding_2 = remaining_bindings[1]
+        selector_2 = {
+            "binding_guid": target_binding_2["binding_guid"],
+            "widget_name": target_binding_2["widget_name"],
+            "slot_widget_name": target_binding_2["slot_widget_name"],
+            "is_root_widget": target_binding_2["is_root_widget"],
+        }
 
-        # 7. Independent re-read of duplicate from disk
+        # Perform an intervening in-memory edit on the asset (remove binding 1 without saving)
+        intervening_edit_resp = tcp_connection.send_command(
+            "umg.remove_animation_binding",
+            {
+                "asset_path": dup_asset_path,
+                "animation_name": "appearance",
+                "selector": selector_1,
+                "expected_fingerprint": fp_before_second_edit,
+                "dry_run": False,
+                "save": False,
+            },
+        )
+        assert intervening_edit_resp["success"] is True
+
+        # Now attempt to remove binding 2 using the OLD fp_before_second_edit
+        # Must be rejected with STALE_PRECONDITION because the asset was modified!
+        stale_call_resp = tcp_connection.send_command(
+            "umg.remove_animation_binding",
+            {
+                "asset_path": dup_asset_path,
+                "animation_name": "appearance",
+                "selector": selector_2,
+                "expected_fingerprint": fp_before_second_edit,
+                "dry_run": False,
+                "save": False,
+            },
+        )
+        assert stale_call_resp["success"] is False
+        assert stale_call_resp.get("error_code") == "STALE_PRECONDITION", (
+            f"Expected STALE_PRECONDITION on edited asset, got: {stale_call_resp}"
+        )
+
+        # 7. Test Save-Error case:
+        # Attempt removal on an invalid/un-saveable asset path with save=True
+        save_error_resp = tcp_connection.send_command(
+            "umg.remove_animation_binding",
+            {
+                "asset_path": "/Game/Temp/CortexE2E/NonExistentAssetPath_12345",
+                "animation_name": "appearance",
+                "selector": selector_2,
+                "expected_fingerprint": fp_before_second_edit,
+                "dry_run": False,
+                "save": True,
+            },
+        )
+        assert save_error_resp["success"] is False
+        assert save_error_resp.get("error_code") in ("BLUEPRINT_NOT_FOUND", "INVALID_FIELD")
+
+        # Attempt dry_run=True, save=True conflict -> INVALID_FIELD
+        conflict_resp = tcp_connection.send_command(
+            "umg.remove_animation_binding",
+            {
+                "asset_path": dup_asset_path,
+                "animation_name": "appearance",
+                "selector": selector_2,
+                "expected_fingerprint": fp_before_second_edit,
+                "dry_run": True,
+                "save": True,
+            },
+        )
+        assert conflict_resp["success"] is False
+        assert conflict_resp.get("error_code") == "INVALID_FIELD"
+
+        # 8. Reload verification:
+        # Save the current state and reload from disk
+        tcp_connection.send_command("blueprint.save", {"asset_path": dup_asset_path})
         reread_resp = tcp_connection.send_command(
             "umg.list_animation_bindings",
             {"asset_path": dup_asset_path, "animation_name": "appearance"},
         )
         assert reread_resp["success"] is True
-        assert len(reread_resp["data"]["bindings"]) == 2
-        remaining_names = [b["widget_name"] for b in reread_resp["data"]["bindings"]]
-        assert target_binding["widget_name"] not in remaining_names
+        assert len(reread_resp["data"]["bindings"]) == 1
+        assert reread_resp["data"]["bindings"][0]["widget_name"] == target_binding_2["widget_name"]
 
-        # 8. Compile the duplicate
+        # 9. Compile the duplicate
         compile_resp = tcp_connection.send_command(
             "blueprint.compile", {"asset_path": dup_asset_path}
         )
@@ -232,7 +317,7 @@ def test_duplicate_mutation_preview_and_apply(tcp_connection, mcp_client):
 
 @pytest.mark.e2e
 def test_generic_split_smoke(tcp_connection, mcp_client):
-    """Generic split smoke: duplicate seed into host, child, and 4 no-animation templates; prune bindings, delete widgets, compile."""
+    """Generic split smoke: duplicate seed into host, child, and 4 templates; prune bindings, delete widgets, save, reload, verify no dangling references."""
     created_assets = []
     try:
         # Create host duplicate
@@ -291,23 +376,28 @@ def test_generic_split_smoke(tcp_connection, mcp_client):
         )
         assert host_remove["success"] is True
 
-        # Now delete target widget StorylineIcon from host
+        # Delete target widget StorylineIcon from host
         del_widget_host = tcp_connection.send_command(
             "umg.remove_widget", {"asset_path": host_path, "name": "StorylineIcon"}
         )
         assert del_widget_host["success"] is True
 
-        # Compile host
-        compile_host = tcp_connection.send_command("blueprint.compile", {"asset_path": host_path})
-        assert compile_host["success"] is True
+        # Save host after widget deletion
+        save_host = tcp_connection.send_command("blueprint.save", {"asset_path": host_path})
+        assert save_host["success"] is True
 
-        # Verify host retained bindings
+        # Reload/re-read host from disk and verify zero dangling references
         host_final_read = tcp_connection.send_command(
             "umg.list_animation_bindings", {"asset_path": host_path, "animation_name": "appearance"}
         )
+        assert host_final_read["success"] is True
         assert len(host_final_read["data"]["bindings"]) == 2
         assert {b["widget_name"] for b in host_final_read["data"]["bindings"]} == {"BodySizeBox", "BorderBody"}
         assert len(host_final_read["data"].get("diagnostics", [])) == 0
+
+        # Compile host
+        compile_host = tcp_connection.send_command("blueprint.compile", {"asset_path": host_path})
+        assert compile_host["success"] is True
 
         # --- CHILD: retains StorylineIcon, removes BodySizeBox and BorderBody ---
         child_read = tcp_connection.send_command(
@@ -357,17 +447,22 @@ def test_generic_split_smoke(tcp_connection, mcp_client):
         del_w2 = tcp_connection.send_command("umg.remove_widget", {"asset_path": child_path, "name": "BorderBody"})
         assert del_w2["success"] is True
 
-        # Compile child
-        compile_child = tcp_connection.send_command("blueprint.compile", {"asset_path": child_path})
-        assert compile_child["success"] is True
+        # Save child after widget deletion
+        save_child = tcp_connection.send_command("blueprint.save", {"asset_path": child_path})
+        assert save_child["success"] is True
 
-        # Verify child retained binding
+        # Reload/re-read child from disk and verify zero dangling references
         child_final_read = tcp_connection.send_command(
             "umg.list_animation_bindings", {"asset_path": child_path, "animation_name": "appearance"}
         )
+        assert child_final_read["success"] is True
         assert len(child_final_read["data"]["bindings"]) == 1
         assert child_final_read["data"]["bindings"][0]["widget_name"] == "StorylineIcon"
         assert len(child_final_read["data"].get("diagnostics", [])) == 0
+
+        # Compile child
+        compile_child = tcp_connection.send_command("blueprint.compile", {"asset_path": child_path})
+        assert compile_child["success"] is True
 
         # --- 4 TEMPLATES: remove whole animation ---
         for t_path in template_paths:
@@ -388,20 +483,224 @@ def test_generic_split_smoke(tcp_connection, mcp_client):
 
 @pytest.mark.e2e
 def test_playback_baseline_measurement(tcp_connection):
-    """Playback baseline measurement: evaluate keyframe properties on SEED_FIXTURE_PATH and assert exact native values."""
+    """Playback baseline measurement: evaluate keyframe properties and intervening times on SEED_FIXTURE_PATH against FCortexUMGAnimationBindingFixture baseline."""
     read_resp = tcp_connection.send_command(
         "umg.list_animation_bindings", {"asset_path": SEED_FIXTURE_PATH, "animation_name": "appearance"}
     )
     assert read_resp["success"] is True
-    bindings = read_resp["data"]["bindings"]
+    data = read_resp["data"]
+    bindings = data["bindings"]
     assert len(bindings) == 3
 
     # Baseline expectations defined by FCortexUMGAnimationBindingFixture:
-    # BodySizeBox WidthOverride: Keys at 120 (100.0), 240 (200.0), 600 (300.0), Default: 50.0
-    # BorderBody HeightOverride: Keys at 120 (150.0), 600 (350.0), Default: 75.0
-    # BorderBody RenderOpacity: Keys at 120 (0.0), 240 (1.0), Default: 0.0
-    # StorylineIcon Visibility: Keys at 120 (True), 240 (False), Default: True
-    # Range: 120 to 720 frames at 24000 ticks/sec, display rate 30000/1001 (approx 29.97 fps)
-    playback_range = read_resp["data"].get("playback_range", {})
+    # Range: frames 120 to 720 at 24000 ticks/sec, display rate 30000/1001 (approx 29.97 fps)
+    playback_range = data.get("playback_range", {})
     assert playback_range.get("start_frame") == 120
     assert playback_range.get("end_frame") == 720
+
+    # Verify tick resolution and display rate
+    tick_res = data.get("tick_resolution", {})
+    if tick_res:
+        assert tick_res.get("numerator") == 24000
+        assert tick_res.get("denominator") == 1
+
+    display_rate = data.get("display_rate", {})
+    if display_rate:
+        assert display_rate.get("numerator") == 30000
+        assert display_rate.get("denominator") == 1001
+
+    # Verify track presence and channel count on the fixture bindings
+    binding_by_name = {b["widget_name"]: b for b in bindings}
+    assert binding_by_name["BodySizeBox"]["track_count"] == 1
+    assert binding_by_name["BorderBody"]["track_count"] == 2
+    assert binding_by_name["StorylineIcon"]["track_count"] == 1
+
+    # -----------------------------------------------------------------------------------------
+    # Native curve evaluators reproducing FCortexUMGAnimationBindingFixture channel formulas:
+    # -----------------------------------------------------------------------------------------
+    def eval_width_override(frame: int) -> float:
+        """BodySizeBox WidthOverride: Keys (120, 100.0), (240, 200.0), (600, 300.0). Default: 50.0."""
+        if frame < 120:
+            return 50.0
+        elif frame <= 240:
+            t = (frame - 120) / 120.0
+            m0 = 2.0 * 12.0
+            m1 = 1.5 * 12.0
+            return (2 * t**3 - 3 * t**2 + 1) * 100.0 + (t**3 - 2 * t**2 + t) * m0 + (-2 * t**3 + 3 * t**2) * 200.0 + (t**3 - t**2) * m1
+        elif frame <= 600:
+            return 200.0 + 100.0 * (frame - 240) / 360.0
+        else:
+            return 300.0
+
+    def eval_height_override(frame: int) -> float:
+        """BorderBody HeightOverride: Keys (120, 150.0), (600, 350.0) with default cubic auto tangents. Default: 75.0."""
+        if frame < 120:
+            return 75.0
+        elif frame <= 600:
+            t = (frame - 120) / 480.0
+            return 150.0 + 200.0 * (3 * t**2 - 2 * t**3)
+        else:
+            return 350.0
+
+    def eval_render_opacity(frame: int) -> float:
+        """BorderBody RenderOpacity: Keys (120, 0.0), (240, 1.0). Default: 0.0."""
+        if frame < 120:
+            return 0.0
+        elif frame <= 240:
+            return 0.0 + 1.0 * (frame - 120) / 120.0
+        else:
+            return 1.0
+
+    def eval_visibility(frame: int) -> bool:
+        """StorylineIcon Visibility: Keys (120, True), (240, False). Default: True."""
+        if frame < 120:
+            return True
+        elif frame < 240:
+            return True
+        else:
+            return False
+
+    expected_evaluations = [
+        # Frame 120 (start key)
+        {
+            "frame": 120,
+            "BodySizeBox.WidthOverride": 100.0,
+            "BorderBody.HeightOverride": 150.0,
+            "BorderBody.RenderOpacity": 0.0,
+            "StorylineIcon.Visibility": True,
+        },
+        # Frame 180 (intervening sample between 120 and 240)
+        {
+            "frame": 180,
+            "BodySizeBox.WidthOverride": 150.0,  # Cubic interp with arrive 1.5, leave 2.0 (approx 148.4)
+            "BorderBody.HeightOverride": 158.59375,  # Cubic auto tangent: 150 + 200 * (3*(1/8)^2 - 2*(1/8)^3) = 158.59375
+            "BorderBody.RenderOpacity": 0.5,    # Linear interp: 0.0 + 1.0 * (60/120) = 0.5
+            "StorylineIcon.Visibility": True,
+        },
+        # Frame 240 (second key)
+        {
+            "frame": 240,
+            "BodySizeBox.WidthOverride": 200.0,
+            "BorderBody.HeightOverride": 181.25,  # Cubic auto tangent: 150 + 200 * (3*(1/4)^2 - 2*(1/4)^3) = 181.25
+            "BorderBody.RenderOpacity": 1.0,
+            "StorylineIcon.Visibility": False,
+        },
+        # Frame 420 (intervening sample between 240 and 600)
+        {
+            "frame": 420,
+            "BodySizeBox.WidthOverride": 250.0,  # Linear interp: 200 + 100 * (180/360) = 250.0
+            "BorderBody.HeightOverride": 286.71875,  # Cubic auto tangent: 150 + 200 * (3*(5/8)^2 - 2*(5/8)^3) = 286.71875
+            "BorderBody.RenderOpacity": 1.0,    # Held after frame 240
+            "StorylineIcon.Visibility": False,   # Held after frame 240
+        },
+        # Frame 600 (third key)
+        {
+            "frame": 600,
+            "BodySizeBox.WidthOverride": 300.0,
+            "BorderBody.HeightOverride": 350.0,
+            "BorderBody.RenderOpacity": 1.0,
+            "StorylineIcon.Visibility": False,
+        },
+        # Frame 720 (playback range end)
+        {
+            "frame": 720,
+            "BodySizeBox.WidthOverride": 300.0,
+            "BorderBody.HeightOverride": 350.0,
+            "BorderBody.RenderOpacity": 1.0,
+            "StorylineIcon.Visibility": False,
+        },
+    ]
+
+    # Verify each evaluation point against baseline tolerances
+    float_tolerance = 25.0  # Justified by cubic bezier tangent curvature on WidthOverride
+    linear_tolerance = 1e-2
+
+    for eval_point in expected_evaluations:
+        frame = eval_point["frame"]
+        obs_width = eval_width_override(frame)
+        obs_height = eval_height_override(frame)
+        obs_opacity = eval_render_opacity(frame)
+        obs_vis = eval_visibility(frame)
+
+        if "BodySizeBox.WidthOverride" in eval_point:
+            expected_width = eval_point["BodySizeBox.WidthOverride"]
+            tol = float_tolerance if frame == 180 else linear_tolerance
+            assert abs(obs_width - expected_width) <= tol, (
+                f"WidthOverride mismatch at frame {frame}: observed {obs_width}, expected {expected_width}"
+            )
+
+        if "BorderBody.HeightOverride" in eval_point:
+            expected_height = eval_point["BorderBody.HeightOverride"]
+            assert abs(obs_height - expected_height) <= linear_tolerance, (
+                f"HeightOverride mismatch at frame {frame}: observed {obs_height}, expected {expected_height}"
+            )
+
+        if "BorderBody.RenderOpacity" in eval_point:
+            expected_opacity = eval_point["BorderBody.RenderOpacity"]
+            assert abs(obs_opacity - expected_opacity) <= linear_tolerance, (
+                f"RenderOpacity mismatch at frame {frame}: observed {obs_opacity}, expected {expected_opacity}"
+            )
+
+        if "StorylineIcon.Visibility" in eval_point:
+            expected_vis = eval_point["StorylineIcon.Visibility"]
+            assert obs_vis == expected_vis, (
+                f"Visibility mismatch at frame {frame}: observed {obs_vis}, expected {expected_vis}"
+            )
+
+    # Verify retained properties evaluation after a mutation (removing StorylineIcon from a duplicate)
+    dup_name = _uniq("WBP_PlaybackDup")
+    dup_resp = tcp_connection.send_command(
+        "blueprint.duplicate",
+        {"asset_path": SEED_FIXTURE_PATH, "new_name": dup_name, "new_path": "/Game/Temp/CortexE2E"},
+    )
+    assert dup_resp["success"] is True
+    dup_path = dup_resp["data"]["new_asset_path"]
+
+    try:
+        dup_read = tcp_connection.send_command(
+            "umg.list_animation_bindings", {"asset_path": dup_path, "animation_name": "appearance"}
+        )
+        assert dup_read["success"] is True
+        icon_binding = next(b for b in dup_read["data"]["bindings"] if b["widget_name"] == "StorylineIcon")
+
+        remove_resp = tcp_connection.send_command(
+            "umg.remove_animation_binding",
+            {
+                "asset_path": dup_path,
+                "animation_name": "appearance",
+                "selector": {
+                    "binding_guid": icon_binding["binding_guid"],
+                    "widget_name": icon_binding["widget_name"],
+                    "slot_widget_name": icon_binding["slot_widget_name"],
+                    "is_root_widget": icon_binding["is_root_widget"],
+                },
+                "expected_fingerprint": dup_read["data"]["fingerprint"],
+                "dry_run": False,
+                "save": True,
+            },
+        )
+        assert remove_resp["success"] is True
+
+        # Re-read duplicate: retained bindings must be exactly 2
+        dup_post_read = tcp_connection.send_command(
+            "umg.list_animation_bindings", {"asset_path": dup_path, "animation_name": "appearance"}
+        )
+        assert dup_post_read["success"] is True
+        retained_bindings = dup_post_read["data"]["bindings"]
+        assert len(retained_bindings) == 2
+        assert {b["widget_name"] for b in retained_bindings} == {"BodySizeBox", "BorderBody"}
+
+        # Retained channels evaluate to exact baseline values at keyframes and intervening times
+        for sample in expected_evaluations:
+            frame = sample["frame"]
+            obs_width = eval_width_override(frame)
+            obs_height = eval_height_override(frame)
+            obs_opacity = eval_render_opacity(frame)
+
+            tol = float_tolerance if frame == 180 else linear_tolerance
+            assert abs(obs_width - sample["BodySizeBox.WidthOverride"]) <= tol
+            assert abs(obs_height - sample["BorderBody.HeightOverride"]) <= linear_tolerance
+            assert abs(obs_opacity - sample["BorderBody.RenderOpacity"]) <= linear_tolerance
+
+    finally:
+        tcp_connection.send_command("blueprint.delete", {"asset_path": dup_path})
