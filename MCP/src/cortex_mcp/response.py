@@ -140,6 +140,18 @@ def format_response(data: dict, tool_name: str) -> str:
         mid = (lo + hi) // 2
         trial = dict(data)
         trial[array_key] = data[array_key][:mid]
+        if "pagination" in trial and isinstance(trial["pagination"], dict):
+            p = dict(trial["pagination"])
+            p_offset = p.get("offset", 0)
+            p_total = p.get("total", original_count)
+            p["returned"] = mid
+            if p_offset + mid < p_total:
+                p["next_offset"] = p_offset + mid
+                p["is_complete"] = False
+            else:
+                p["next_offset"] = None
+                p["is_complete"] = True
+            trial["pagination"] = p
         trial["_truncated"] = {
             "original_count": original_count,
             "returned_count": mid,
@@ -154,6 +166,18 @@ def format_response(data: dict, tool_name: str) -> str:
 
     truncated = dict(data)
     truncated[array_key] = data[array_key][:best]
+    if "pagination" in truncated and isinstance(truncated["pagination"], dict):
+        p = dict(truncated["pagination"])
+        p_offset = p.get("offset", 0)
+        p_total = p.get("total", original_count)
+        p["returned"] = best
+        if p_offset + best < p_total:
+            p["next_offset"] = p_offset + best
+            p["is_complete"] = False
+        else:
+            p["next_offset"] = None
+            p["is_complete"] = True
+        truncated["pagination"] = p
     truncated["_truncated"] = {
         "original_count": original_count,
         "returned_count": best,

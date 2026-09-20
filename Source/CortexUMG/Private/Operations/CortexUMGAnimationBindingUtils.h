@@ -54,11 +54,15 @@ struct FCortexUMGAnimationBindingFingerprint
 
 namespace CortexUMGAnimationBindingUtils
 {
+    /** Serializes a section's range, properties, and all channel proxy keys to an archive */
+    void SerializeSectionChannels(FArchive& Ar, UMovieSceneSection* Section);
+
     /** Computes the canonical SHA256 digest of the authored animation state */
     FString ComputeAnimationDigest(
         const FString& AssetPath,
         const FString& AnimName,
-        UWidgetAnimation* Animation);
+        UWidgetAnimation* Animation,
+        UWidgetBlueprint* Blueprint = nullptr);
 
     /** Computes the full fingerprint including base package and domain signature */
     FCortexUMGAnimationBindingFingerprint ComputeFingerprint(

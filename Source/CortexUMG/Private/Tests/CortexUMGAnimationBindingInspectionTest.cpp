@@ -162,6 +162,10 @@ bool FCortexUMGAnimationBindingInspectPaginationTest::RunTest(const FString& Par
     TSharedPtr<FJsonObject> P2 = Fixture.InspectParams();
     P2->SetNumberField(TEXT("offset"), 2);
     P2->SetNumberField(TEXT("limit"), 2);
+    if (R1.bSuccess && R1.Data.IsValid())
+    {
+        P2->SetObjectField(TEXT("expected_fingerprint"), R1.Data->GetObjectField(TEXT("fingerprint")));
+    }
     FCortexCommandResult R2 = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), P2);
     TestTrue(TEXT("Page 2 succeeds"), R2.bSuccess);
     if (R2.bSuccess && R2.Data.IsValid())
@@ -181,6 +185,10 @@ bool FCortexUMGAnimationBindingInspectPaginationTest::RunTest(const FString& Par
     TSharedPtr<FJsonObject> P3 = Fixture.InspectParams();
     P3->SetNumberField(TEXT("offset"), 5);
     P3->SetNumberField(TEXT("limit"), 10);
+    if (R1.bSuccess && R1.Data.IsValid())
+    {
+        P3->SetObjectField(TEXT("expected_fingerprint"), R1.Data->GetObjectField(TEXT("fingerprint")));
+    }
     FCortexCommandResult R3 = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), P3);
     TestTrue(TEXT("Page 3 succeeds"), R3.bSuccess);
     if (R3.bSuccess && R3.Data.IsValid())
@@ -284,17 +292,39 @@ bool FCortexUMGAnimationBindingInspectTableCasesTest::RunTest(const FString& Par
         TestNotNull(TEXT("TableAnim bindings present"), Bindings);
         if (Bindings && Bindings->Num() >= 5)
         {
-            // Dangling binding check
-            TSharedPtr<FJsonObject> DanglingObj = (*Bindings)[0]->AsObject();
-            TestFalse(TEXT("Dangling target_exists is false"), DanglingObj->GetBoolField(TEXT("target_exists")));
-            TestFalse(TEXT("Dangling slot_exists is false"), DanglingObj->GetBoolField(TEXT("slot_exists")));
-            TestFalse(TEXT("Dangling possessable_exists is false"), DanglingObj->GetBoolField(TEXT("possessable_exists")));
+            TSharedPtr<FJsonObject> DanglingObj;
+            TArray<TSharedPtr<FJsonObject>> SharedObjs;
+            for (const TSharedPtr<FJsonValue>& BVal : *Bindings)
+            {
+                TSharedPtr<FJsonObject> BObj = BVal->AsObject();
+                if (BObj.IsValid())
+                {
+                    if (BObj->GetStringField(TEXT("widget_name")) == TEXT("NonExistentWidget"))
+                    {
+                        DanglingObj = BObj;
+                    }
+                    else if (BObj->GetStringField(TEXT("widget_name")) == TEXT("BorderBody"))
+                    {
+                        SharedObjs.Add(BObj);
+                    }
+                }
+            }
+
+            TestNotNull(TEXT("DanglingObj found"), DanglingObj.Get());
+            if (DanglingObj.IsValid())
+            {
+                TestFalse(TEXT("Dangling target_exists is false"), DanglingObj->GetBoolField(TEXT("target_exists")));
+                TestFalse(TEXT("Dangling slot_exists is false"), DanglingObj->GetBoolField(TEXT("slot_exists")));
+                TestFalse(TEXT("Dangling possessable_exists is false"), DanglingObj->GetBoolField(TEXT("possessable_exists")));
+            }
 
             // Shared GUID check
-            TSharedPtr<FJsonObject> SharedObj1 = (*Bindings)[3]->AsObject();
-            TSharedPtr<FJsonObject> SharedObj2 = (*Bindings)[4]->AsObject();
-            TestEqual(TEXT("Shared GUID sharing count 1"), SharedObj1->GetIntegerField(TEXT("guid_sharing_count")), 2);
-            TestEqual(TEXT("Shared GUID sharing count 2"), SharedObj2->GetIntegerField(TEXT("guid_sharing_count")), 2);
+            TestTrue(TEXT("Found at least 2 shared BorderBody objects"), SharedObjs.Num() >= 2);
+            if (SharedObjs.Num() >= 2)
+            {
+                TestEqual(TEXT("Shared GUID sharing count 1"), SharedObjs[0]->GetIntegerField(TEXT("guid_sharing_count")), 2);
+                TestEqual(TEXT("Shared GUID sharing count 2"), SharedObjs[1]->GetIntegerField(TEXT("guid_sharing_count")), 2);
+            }
         }
 
         // Diagnostics check: should diagnose dangling target, missing possessable, scene-only binding, duplicate records, shared GUID, and master track
@@ -397,6 +427,7 @@ bool FCortexUMGAnimationBindingPaginationScalesTest::RunTest(const FString& Para
         const int32 Limit = 5;
         bool bComplete = false;
 
+        TSharedPtr<FJsonObject> ExpectedFp11;
         while (!bComplete)
         {
             TSharedPtr<FJsonObject> P = MakeShared<FJsonObject>();
@@ -404,10 +435,19 @@ bool FCortexUMGAnimationBindingPaginationScalesTest::RunTest(const FString& Para
             P->SetStringField(TEXT("animation_name"), TEXT("Anim11"));
             P->SetNumberField(TEXT("offset"), Offset);
             P->SetNumberField(TEXT("limit"), Limit);
+            if (Offset > 0 && ExpectedFp11.IsValid())
+            {
+                P->SetObjectField(TEXT("expected_fingerprint"), ExpectedFp11);
+            }
 
             FCortexCommandResult R = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), P);
             TestTrue(FString::Printf(TEXT("11-rec page at offset %d succeeds"), Offset), R.bSuccess);
             if (!R.bSuccess || !R.Data.IsValid()) break;
+
+            if (R.Data->HasTypedField<EJson::Object>(TEXT("fingerprint")))
+            {
+                ExpectedFp11 = R.Data->GetObjectField(TEXT("fingerprint"));
+            }
 
             TSharedPtr<FJsonObject> Pag = R.Data->GetObjectField(TEXT("pagination"));
             TestEqual(TEXT("11-rec total is 11"), Pag->GetIntegerField(TEXT("total")), 11);
@@ -429,6 +469,10 @@ bool FCortexUMGAnimationBindingPaginationScalesTest::RunTest(const FString& Para
         PEmpty->SetStringField(TEXT("animation_name"), TEXT("Anim11"));
         PEmpty->SetNumberField(TEXT("offset"), 11);
         PEmpty->SetNumberField(TEXT("limit"), 5);
+        if (ExpectedFp11.IsValid())
+        {
+            PEmpty->SetObjectField(TEXT("expected_fingerprint"), ExpectedFp11);
+        }
         FCortexCommandResult REmpty = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), PEmpty);
         TestTrue(TEXT("11-rec empty page succeeds"), REmpty.bSuccess);
         if (REmpty.bSuccess && REmpty.Data.IsValid())
@@ -482,6 +526,10 @@ bool FCortexUMGAnimationBindingPaginationScalesTest::RunTest(const FString& Para
         P2->SetStringField(TEXT("animation_name"), TEXT("Anim201"));
         P2->SetNumberField(TEXT("offset"), 200);
         P2->SetNumberField(TEXT("limit"), 200);
+        if (R1.bSuccess && R1.Data.IsValid())
+        {
+            P2->SetObjectField(TEXT("expected_fingerprint"), R1.Data->GetObjectField(TEXT("fingerprint")));
+        }
 
         FCortexCommandResult R2 = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), P2);
         TestTrue(TEXT("201-rec Page 2 succeeds"), R2.bSuccess);

@@ -93,8 +93,8 @@ def test_fixture_seed_inspection(tcp_connection, mcp_client):
 
     # Check tracks on bindings
     binding_by_name = {b["widget_name"]: b for b in bindings}
-    assert binding_by_name["BodySizeBox"]["track_count"] == 1
-    assert binding_by_name["BorderBody"]["track_count"] == 2
+    assert binding_by_name["BodySizeBox"]["track_count"] == 2
+    assert binding_by_name["BorderBody"]["track_count"] == 1
     assert binding_by_name["StorylineIcon"]["track_count"] == 1
 
     # Check fingerprint presence
@@ -495,8 +495,8 @@ def test_playback_baseline_measurement(tcp_connection):
     # Baseline expectations defined by FCortexUMGAnimationBindingFixture:
     # Range: frames 120 to 720 at 24000 ticks/sec, display rate 30000/1001 (approx 29.97 fps)
     playback_range = data.get("playback_range", {})
-    assert playback_range.get("start_frame") == 120
-    assert playback_range.get("end_frame") == 720
+    assert playback_range.get("lower_bound", {}).get("value") == 120
+    assert playback_range.get("upper_bound", {}).get("value") == 720
 
     # Verify tick resolution and display rate
     tick_res = data.get("tick_resolution", {})
@@ -511,8 +511,8 @@ def test_playback_baseline_measurement(tcp_connection):
 
     # Verify track presence and channel count on the fixture bindings
     binding_by_name = {b["widget_name"]: b for b in bindings}
-    assert binding_by_name["BodySizeBox"]["track_count"] == 1
-    assert binding_by_name["BorderBody"]["track_count"] == 2
+    assert binding_by_name["BodySizeBox"]["track_count"] == 2
+    assert binding_by_name["BorderBody"]["track_count"] == 1
     assert binding_by_name["StorylineIcon"]["track_count"] == 1
 
     # -----------------------------------------------------------------------------------------
@@ -533,7 +533,7 @@ def test_playback_baseline_measurement(tcp_connection):
             return 300.0
 
     def eval_height_override(frame: int) -> float:
-        """BorderBody HeightOverride: Keys (120, 150.0), (600, 350.0) with default cubic auto tangents. Default: 75.0."""
+        """BodySizeBox HeightOverride: Keys (120, 150.0), (600, 350.0) with default cubic auto tangents. Default: 75.0."""
         if frame < 120:
             return 75.0
         elif frame <= 600:
@@ -551,8 +551,8 @@ def test_playback_baseline_measurement(tcp_connection):
         else:
             return 1.0
 
-    def eval_visibility(frame: int) -> bool:
-        """StorylineIcon Visibility: Keys (120, True), (240, False). Default: True."""
+    def eval_is_enabled(frame: int) -> bool:
+        """StorylineIcon bIsEnabled: Keys (120, True), (240, False). Default: True."""
         if frame < 120:
             return True
         elif frame < 240:
@@ -565,49 +565,49 @@ def test_playback_baseline_measurement(tcp_connection):
         {
             "frame": 120,
             "BodySizeBox.WidthOverride": 100.0,
-            "BorderBody.HeightOverride": 150.0,
+            "BodySizeBox.HeightOverride": 150.0,
             "BorderBody.RenderOpacity": 0.0,
-            "StorylineIcon.Visibility": True,
+            "StorylineIcon.bIsEnabled": True,
         },
         # Frame 180 (intervening sample between 120 and 240)
         {
             "frame": 180,
             "BodySizeBox.WidthOverride": 150.0,  # Cubic interp with arrive 1.5, leave 2.0 (approx 148.4)
-            "BorderBody.HeightOverride": 158.59375,  # Cubic auto tangent: 150 + 200 * (3*(1/8)^2 - 2*(1/8)^3) = 158.59375
+            "BodySizeBox.HeightOverride": 158.59375,  # Cubic auto tangent: 150 + 200 * (3*(1/8)^2 - 2*(1/8)^3) = 158.59375
             "BorderBody.RenderOpacity": 0.5,    # Linear interp: 0.0 + 1.0 * (60/120) = 0.5
-            "StorylineIcon.Visibility": True,
+            "StorylineIcon.bIsEnabled": True,
         },
         # Frame 240 (second key)
         {
             "frame": 240,
             "BodySizeBox.WidthOverride": 200.0,
-            "BorderBody.HeightOverride": 181.25,  # Cubic auto tangent: 150 + 200 * (3*(1/4)^2 - 2*(1/4)^3) = 181.25
+            "BodySizeBox.HeightOverride": 181.25,  # Cubic auto tangent: 150 + 200 * (3*(1/4)^2 - 2*(1/4)^3) = 181.25
             "BorderBody.RenderOpacity": 1.0,
-            "StorylineIcon.Visibility": False,
+            "StorylineIcon.bIsEnabled": False,
         },
         # Frame 420 (intervening sample between 240 and 600)
         {
             "frame": 420,
             "BodySizeBox.WidthOverride": 250.0,  # Linear interp: 200 + 100 * (180/360) = 250.0
-            "BorderBody.HeightOverride": 286.71875,  # Cubic auto tangent: 150 + 200 * (3*(5/8)^2 - 2*(5/8)^3) = 286.71875
+            "BodySizeBox.HeightOverride": 286.71875,  # Cubic auto tangent: 150 + 200 * (3*(5/8)^2 - 2*(5/8)^3) = 286.71875
             "BorderBody.RenderOpacity": 1.0,    # Held after frame 240
-            "StorylineIcon.Visibility": False,   # Held after frame 240
+            "StorylineIcon.bIsEnabled": False,   # Held after frame 240
         },
         # Frame 600 (third key)
         {
             "frame": 600,
             "BodySizeBox.WidthOverride": 300.0,
-            "BorderBody.HeightOverride": 350.0,
+            "BodySizeBox.HeightOverride": 350.0,
             "BorderBody.RenderOpacity": 1.0,
-            "StorylineIcon.Visibility": False,
+            "StorylineIcon.bIsEnabled": False,
         },
         # Frame 720 (playback range end)
         {
             "frame": 720,
             "BodySizeBox.WidthOverride": 300.0,
-            "BorderBody.HeightOverride": 350.0,
+            "BodySizeBox.HeightOverride": 350.0,
             "BorderBody.RenderOpacity": 1.0,
-            "StorylineIcon.Visibility": False,
+            "StorylineIcon.bIsEnabled": False,
         },
     ]
 
@@ -620,7 +620,7 @@ def test_playback_baseline_measurement(tcp_connection):
         obs_width = eval_width_override(frame)
         obs_height = eval_height_override(frame)
         obs_opacity = eval_render_opacity(frame)
-        obs_vis = eval_visibility(frame)
+        obs_enabled = eval_is_enabled(frame)
 
         if "BodySizeBox.WidthOverride" in eval_point:
             expected_width = eval_point["BodySizeBox.WidthOverride"]
@@ -629,8 +629,8 @@ def test_playback_baseline_measurement(tcp_connection):
                 f"WidthOverride mismatch at frame {frame}: observed {obs_width}, expected {expected_width}"
             )
 
-        if "BorderBody.HeightOverride" in eval_point:
-            expected_height = eval_point["BorderBody.HeightOverride"]
+        if "BodySizeBox.HeightOverride" in eval_point:
+            expected_height = eval_point["BodySizeBox.HeightOverride"]
             assert abs(obs_height - expected_height) <= linear_tolerance, (
                 f"HeightOverride mismatch at frame {frame}: observed {obs_height}, expected {expected_height}"
             )
@@ -641,10 +641,10 @@ def test_playback_baseline_measurement(tcp_connection):
                 f"RenderOpacity mismatch at frame {frame}: observed {obs_opacity}, expected {expected_opacity}"
             )
 
-        if "StorylineIcon.Visibility" in eval_point:
-            expected_vis = eval_point["StorylineIcon.Visibility"]
-            assert obs_vis == expected_vis, (
-                f"Visibility mismatch at frame {frame}: observed {obs_vis}, expected {expected_vis}"
+        if "StorylineIcon.bIsEnabled" in eval_point:
+            expected_enabled = eval_point["StorylineIcon.bIsEnabled"]
+            assert obs_enabled == expected_enabled, (
+                f"bIsEnabled mismatch at frame {frame}: observed {obs_enabled}, expected {expected_enabled}"
             )
 
     # Verify retained properties evaluation after a mutation (removing StorylineIcon from a duplicate)
@@ -699,7 +699,7 @@ def test_playback_baseline_measurement(tcp_connection):
 
             tol = float_tolerance if frame == 180 else linear_tolerance
             assert abs(obs_width - sample["BodySizeBox.WidthOverride"]) <= tol
-            assert abs(obs_height - sample["BorderBody.HeightOverride"]) <= linear_tolerance
+            assert abs(obs_height - sample["BodySizeBox.HeightOverride"]) <= linear_tolerance
             assert abs(obs_opacity - sample["BorderBody.RenderOpacity"]) <= linear_tolerance
 
     finally:

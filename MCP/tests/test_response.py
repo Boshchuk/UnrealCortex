@@ -549,3 +549,69 @@ class TestMutationResponseBounds:
         assert res["_remaining_bindings_total"] == 3
         assert len(res["remaining_bindings"]) < 3
 
+    def test_pagination_reconciled_with_array_truncation(self):
+        """When an array with pagination metadata is truncated, pagination is reconciled (UC-4)."""
+        # 50 large bindings exceeding 40k limit
+        total_items = 50
+        bindings = [
+            {"index": i, "selector": f"selector_{i}", "details": "d" * 2000}
+            for i in range(total_items)
+        ]
+        data = {
+            "asset_path": "/Game/UI/WBP_Test",
+            "animation_name": "appearance",
+            "bindings": bindings,
+            "pagination": {
+                "total": total_items,
+                "offset": 0,
+                "limit": total_items,
+                "returned": total_items,
+                "next_offset": None,
+                "is_complete": True,
+            },
+        }
+
+        formatted = format_response(data, "umg_cmd")
+        assert len(formatted) <= _MAX_RESPONSE_CHARS
+        res = json.loads(formatted)
+        returned_count = len(res["bindings"])
+        assert returned_count < total_items
+        p = res["pagination"]
+        assert p["returned"] == returned_count
+        assert p["next_offset"] == returned_count
+        assert p["is_complete"] is False
+
+    def test_iterating_next_offset_retrieves_all_selectors_under_limit(self):
+        """Simulate paginating through all records using next_offset under 40k limit (UC-4)."""
+        total_items = 50
+        all_items = [
+            {"index": i, "selector": f"sel_{i}", "payload": "x" * 1500}
+            for i in range(total_items)
+        ]
+
+        retrieved_selectors = []
+        offset = 0
+
+        while offset is not None and offset < total_items:
+            page_slice = all_items[offset:]
+            raw_page = {
+                "bindings": page_slice,
+                "pagination": {
+                    "total": total_items,
+                    "offset": offset,
+                    "limit": len(page_slice),
+                    "returned": len(page_slice),
+                    "next_offset": None,
+                    "is_complete": True,
+                },
+            }
+            formatted = format_response(raw_page, "umg_cmd")
+            assert len(formatted) <= _MAX_RESPONSE_CHARS
+            res = json.loads(formatted)
+            for item in res["bindings"]:
+                retrieved_selectors.append(item["selector"])
+            offset = res["pagination"]["next_offset"]
+
+        assert len(retrieved_selectors) == total_items
+        assert retrieved_selectors == [f"sel_{i}" for i in range(total_items)]
+

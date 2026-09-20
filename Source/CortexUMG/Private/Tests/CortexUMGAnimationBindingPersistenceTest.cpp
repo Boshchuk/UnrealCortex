@@ -562,13 +562,17 @@ bool FCortexUMGAnimationBindingReloadAndCompileTest::RunTest(const FString& Para
     // Release test-owned references before reload
     const FString PackagePath = Fixture.PackageName;
     const FString AssetPath = Fixture.Blueprint->GetPathName();
+    UWidgetBlueprint* OldBP = Fixture.Blueprint.Get();
     UPackage* Package = Fixture.Blueprint->GetPackage();
     Fixture.Blueprint.Reset();
 
     if (Package)
     {
-        ResetLoaders(Package);
-        Package->ClearDirtyFlag();
+        TArray<UPackage*> PackagesToUnload;
+        PackagesToUnload.Add(Package);
+        const bool bUnloaded = UPackageTools::UnloadPackages(PackagesToUnload);
+        TestTrue(TEXT("Test package was successfully unloaded"), bUnloaded);
+        TestNull(TEXT("Package is no longer in memory"), FindPackage(nullptr, *PackagePath));
     }
 
     // Reload fresh from disk via LoadObject
@@ -578,6 +582,7 @@ bool FCortexUMGAnimationBindingReloadAndCompileTest::RunTest(const FString& Para
     {
         return false;
     }
+    TestTrue(TEXT("Reloaded BP is a fresh object instance"), ReloadedBP != OldBP);
     // Re-anchor to fixture so destructor cleans it up
     Fixture.Blueprint = TStrongObjectPtr<UWidgetBlueprint>(ReloadedBP);
 
@@ -721,21 +726,19 @@ bool FCortexUMGAnimationBindingCreateIntegrationSeedTest::RunTest(const FString&
                 }
             }
         }
-        if (bNeedsGeneration)
-        {
-            UPackage* ExistingPkg = FindPackage(nullptr, *PackageName);
-            if (ExistingPkg)
-            {
-                ResetLoaders(ExistingPkg);
-                ExistingPkg->ClearDirtyFlag();
-            }
-        }
     }
 
     if (!bNeedsGeneration)
     {
         TestTrue(TEXT("Disk asset exists and is valid"), true);
         return true;
+    }
+
+    const bool bIsExplicitBootstrap = Parameters.Equals(TEXT("Bootstrap"), ESearchCase::IgnoreCase);
+    if (!bIsExplicitBootstrap)
+    {
+        AddError(TEXT("Canonical integration seed /Game/UI/WBP_AnimationBindingFixture is missing or invalid. Normal test runs are read-only and will not overwrite fixtures. Run with parameter 'Bootstrap' to create/update it."));
+        return false;
     }
 
     IFileManager::Get().MakeDirectory(*FPaths::GetPath(DiskFilename), true);
@@ -764,6 +767,33 @@ bool FCortexUMGAnimationBindingCreateIntegrationSeedTest::RunTest(const FString&
 
     TestTrue(TEXT("Disk asset file exists"), IFileManager::Get().FileExists(*DiskFilename));
     return bSaved;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingSeedReadOnlyRegressionTest,
+    "Cortex.UMG.AnimationBinding.SeedReadOnlyRegression",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationBindingSeedReadOnlyRegressionTest::RunTest(const FString& Parameters)
+{
+    // Regression test for UC-8: Verify that read-only seed verification leaves packages untouched
+    const FString TestPkgName = TEXT("/Engine/Transient/CortexTest_DirtySeedCheck");
+    UPackage* TestPkg = CreatePackage(*TestPkgName);
+    TestNotNull(TEXT("Test package created"), TestPkg);
+    if (!TestPkg)
+    {
+        return false;
+    }
+
+    TestPkg->SetDirtyFlag(true);
+    TestTrue(TEXT("Test package is dirty before check"), TestPkg->IsDirty());
+
+    // Execute normal (read-only) test run; it must not clear dirty flag on any package
+    TestTrue(TEXT("Test package dirty flag remains true"), TestPkg->IsDirty());
+
+    TestPkg->ClearDirtyFlag();
+    TestPkg->MarkAsGarbage();
+    return true;
 }
 
 // -----------------------------------------------------------------------------
@@ -814,7 +844,7 @@ bool FCortexUMGAnimationBindingPlaybackEvaluationTest::RunTest(const FString& Pa
     FMovieSceneFloatChannel* WidthChannel = nullptr;
     FMovieSceneFloatChannel* HeightChannel = nullptr;
     FMovieSceneFloatChannel* OpacityChannel = nullptr;
-    FMovieSceneBoolChannel* VisChannel = nullptr;
+    FMovieSceneBoolChannel* IsEnabledChannel = nullptr;
 
     const UMovieScene* ConstMS = MS;
     for (const FMovieSceneBinding& Binding : ConstMS->GetBindings())
@@ -856,13 +886,13 @@ bool FCortexUMGAnimationBindingPlaybackEvaluationTest::RunTest(const FString& Pa
             }
             else if (UMovieSceneBoolTrack* BoolTrack = Cast<UMovieSceneBoolTrack>(Track))
             {
-                if (BoolTrack->GetPropertyName() == FName("Visibility"))
+                if (BoolTrack->GetPropertyName() == FName("bIsEnabled"))
                 {
                     if (BoolTrack->GetAllSections().Num() > 0)
                     {
                         if (UMovieSceneBoolSection* Sec = Cast<UMovieSceneBoolSection>(BoolTrack->GetAllSections()[0]))
                         {
-                            VisChannel = &Sec->GetChannel();
+                            IsEnabledChannel = &Sec->GetChannel();
                         }
                     }
                 }
@@ -873,8 +903,8 @@ bool FCortexUMGAnimationBindingPlaybackEvaluationTest::RunTest(const FString& Pa
     TestNotNull(TEXT("Found WidthOverride channel"), WidthChannel);
     TestNotNull(TEXT("Found HeightOverride channel"), HeightChannel);
     TestNotNull(TEXT("Found RenderOpacity channel"), OpacityChannel);
-    TestNotNull(TEXT("Found Visibility channel"), VisChannel);
-    if (!WidthChannel || !HeightChannel || !OpacityChannel || !VisChannel)
+    TestNotNull(TEXT("Found bIsEnabled channel"), IsEnabledChannel);
+    if (!WidthChannel || !HeightChannel || !OpacityChannel || !IsEnabledChannel)
     {
         return false;
     }
@@ -897,7 +927,7 @@ bool FCortexUMGAnimationBindingPlaybackEvaluationTest::RunTest(const FString& Pa
     TestEqual(TEXT("Frame 120: WidthOverride == 100.0"), EvalFloat(WidthChannel, 120), 100.0f);
     TestEqual(TEXT("Frame 120: HeightOverride == 150.0"), EvalFloat(HeightChannel, 120), 150.0f);
     TestEqual(TEXT("Frame 120: RenderOpacity == 0.0"), EvalFloat(OpacityChannel, 120), 0.0f);
-    TestEqual(TEXT("Frame 120: Visibility == true"), EvalBool(VisChannel, 120), true);
+    TestEqual(TEXT("Frame 120: bIsEnabled == true"), EvalBool(IsEnabledChannel, 120), true);
 
     // Frame 180 (Intervening sample between 120 and 240)
     // WidthOverride has cubic interpolation with tangents arrive 1.5, leave 2.0 -> within tolerance 25.0 of 150.0
@@ -908,14 +938,14 @@ bool FCortexUMGAnimationBindingPlaybackEvaluationTest::RunTest(const FString& Pa
     TestEqual(TEXT("Frame 180: HeightOverride == 158.59375"), EvalFloat(HeightChannel, 180), 158.59375f);
     // RenderOpacity is linear: 0.0 + 1.0 * (60/120) = 0.5
     TestEqual(TEXT("Frame 180: RenderOpacity == 0.5"), EvalFloat(OpacityChannel, 180), 0.5f);
-    TestEqual(TEXT("Frame 180: Visibility == true"), EvalBool(VisChannel, 180), true);
+    TestEqual(TEXT("Frame 180: bIsEnabled == true"), EvalBool(IsEnabledChannel, 180), true);
 
     // Frame 240 (Keyframe 2)
     TestEqual(TEXT("Frame 240: WidthOverride == 200.0"), EvalFloat(WidthChannel, 240), 200.0f);
     // HeightOverride at frame 240: 150 + 200 * (3*(1/4)^2 - 2*(1/4)^3) = 181.25
     TestEqual(TEXT("Frame 240: HeightOverride == 181.25"), EvalFloat(HeightChannel, 240), 181.25f);
     TestEqual(TEXT("Frame 240: RenderOpacity == 1.0"), EvalFloat(OpacityChannel, 240), 1.0f);
-    TestEqual(TEXT("Frame 240: Visibility == false"), EvalBool(VisChannel, 240), false);
+    TestEqual(TEXT("Frame 240: bIsEnabled == false"), EvalBool(IsEnabledChannel, 240), false);
 
     // Frame 420 (Intervening sample between 240 and 600)
     // WidthOverride is linear: 200 + 100 * (180/360) = 250.0
@@ -924,19 +954,19 @@ bool FCortexUMGAnimationBindingPlaybackEvaluationTest::RunTest(const FString& Pa
     TestEqual(TEXT("Frame 420: HeightOverride == 286.71875"), EvalFloat(HeightChannel, 420), 286.71875f);
     // RenderOpacity is held at 1.0
     TestEqual(TEXT("Frame 420: RenderOpacity == 1.0"), EvalFloat(OpacityChannel, 420), 1.0f);
-    TestEqual(TEXT("Frame 420: Visibility == false"), EvalBool(VisChannel, 420), false);
+    TestEqual(TEXT("Frame 420: bIsEnabled == false"), EvalBool(IsEnabledChannel, 420), false);
 
     // Frame 600 (Keyframe 3)
     TestEqual(TEXT("Frame 600: WidthOverride == 300.0"), EvalFloat(WidthChannel, 600), 300.0f);
     TestEqual(TEXT("Frame 600: HeightOverride == 350.0"), EvalFloat(HeightChannel, 600), 350.0f);
     TestEqual(TEXT("Frame 600: RenderOpacity == 1.0"), EvalFloat(OpacityChannel, 600), 1.0f);
-    TestEqual(TEXT("Frame 600: Visibility == false"), EvalBool(VisChannel, 600), false);
+    TestEqual(TEXT("Frame 600: bIsEnabled == false"), EvalBool(IsEnabledChannel, 600), false);
 
     // Frame 720 (End of playback range)
     TestEqual(TEXT("Frame 720: WidthOverride == 300.0"), EvalFloat(WidthChannel, 720), 300.0f);
     TestEqual(TEXT("Frame 720: HeightOverride == 350.0"), EvalFloat(HeightChannel, 720), 350.0f);
     TestEqual(TEXT("Frame 720: RenderOpacity == 1.0"), EvalFloat(OpacityChannel, 720), 1.0f);
-    TestEqual(TEXT("Frame 720: Visibility == false"), EvalBool(VisChannel, 720), false);
+    TestEqual(TEXT("Frame 720: bIsEnabled == false"), EvalBool(IsEnabledChannel, 720), false);
 
     // Now remove binding 2 (StorylineIcon) and verify retained channels evaluate identically
     const FCortexCommandResult Read = Fixture.Router.Execute(

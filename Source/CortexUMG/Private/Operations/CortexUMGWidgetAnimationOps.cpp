@@ -222,13 +222,27 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::ListAnimationBindings(
     FCortexUMGAnimationBindingFingerprint LiveFingerprint =
         CortexUMGAnimationBindingUtils::ComputeFingerprint(WBP, FoundAnim);
 
-    if (Params->HasField(TEXT("expected_fingerprint")))
+    const bool bHasFingerprint = Params->HasField(TEXT("expected_fingerprint"));
+    const bool bIsNullFingerprint = Params->HasTypedField<EJson::Null>(TEXT("expected_fingerprint"));
+    const bool bIsObjectFingerprint = Params->HasTypedField<EJson::Object>(TEXT("expected_fingerprint"));
+
+    if (Offset > 0)
     {
-        if (Params->HasTypedField<EJson::Null>(TEXT("expected_fingerprint")))
+        if (!bHasFingerprint || bIsNullFingerprint || !bIsObjectFingerprint)
         {
-            // Explicit null is allowed as no-op
+            return FCortexCommandRouter::Error(
+                CortexErrorCodes::InvalidField,
+                TEXT("expected_fingerprint is required as a valid JSON object for offset > 0"));
         }
-        else if (!Params->HasTypedField<EJson::Object>(TEXT("expected_fingerprint")))
+    }
+
+    if (bHasFingerprint)
+    {
+        if (bIsNullFingerprint)
+        {
+            // Explicit null is allowed as no-op only for initial read (offset == 0)
+        }
+        else if (!bIsObjectFingerprint)
         {
             return FCortexCommandRouter::Error(
                 CortexErrorCodes::InvalidField,
@@ -320,6 +334,28 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::ListAnimationBindings(
         }
     }
 
+    TArray<FWidgetAnimationBinding> SortedBindings = FoundAnim->AnimationBindings;
+    SortedBindings.Sort([](const FWidgetAnimationBinding& A, const FWidgetAnimationBinding& B)
+    {
+        const FString WNameA = A.bIsRootWidget ? FString() : A.WidgetName.ToString();
+        const FString WNameB = B.bIsRootWidget ? FString() : B.WidgetName.ToString();
+        if (WNameA != WNameB)
+        {
+            return WNameA < WNameB;
+        }
+        const FString SNameA = A.SlotWidgetName.ToString();
+        const FString SNameB = B.SlotWidgetName.ToString();
+        if (SNameA != SNameB)
+        {
+            return SNameA < SNameB;
+        }
+        if (A.bIsRootWidget != B.bIsRootWidget)
+        {
+            return (int32)A.bIsRootWidget < (int32)B.bIsRootWidget;
+        }
+        return A.AnimationGuid < B.AnimationGuid;
+    });
+
     TArray<TSharedPtr<FJsonValue>> BindingsArray;
     int32 ReturnedCount = 0;
     if (Offset < TotalBindings)
@@ -327,7 +363,7 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::ListAnimationBindings(
         ReturnedCount = FMath::Min(TotalBindings - Offset, Limit);
         for (int32 i = Offset; i < Offset + ReturnedCount; ++i)
         {
-            const FWidgetAnimationBinding& UMB = FoundAnim->AnimationBindings[i];
+            const FWidgetAnimationBinding& UMB = SortedBindings[i];
             TSharedPtr<FJsonObject> B = MakeShared<FJsonObject>();
 
             B->SetNumberField(TEXT("index"), i);

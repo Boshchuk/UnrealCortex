@@ -18,6 +18,22 @@
 #include "String/BytesToHex.h"
 #include "HAL/FileManager.h"
 #include "Misc/PackageName.h"
+#include "MovieScenePossessable.h"
+#include "Channels/MovieSceneChannelProxy.h"
+#include "Channels/MovieSceneIntegerChannel.h"
+#include "Channels/MovieSceneByteChannel.h"
+#include "Channels/MovieSceneEventChannel.h"
+#include "Animation/MovieScene2DTransformSection.h"
+#include "Sections/MovieSceneIntegerSection.h"
+#include "Sections/MovieSceneByteSection.h"
+#include "Sections/MovieSceneEnumSection.h"
+#include "Sections/MovieSceneEventSectionBase.h"
+#include "Sections/MovieSceneObjectPropertySection.h"
+#include "Sections/MovieSceneColorSection.h"
+#include "Animation/MovieSceneMarginSection.h"
+#include "Blueprint/WidgetTree.h"
+#include "Components/Widget.h"
+#include "Components/PanelSlot.h"
 
 namespace
 {
@@ -190,30 +206,242 @@ TSharedPtr<FJsonObject> FCortexUMGAnimationBindingFingerprint::ToJson() const
 
 namespace CortexUMGAnimationBindingUtils
 {
+    void SerializeSectionChannels(FArchive& Ar, UMovieSceneSection* Section)
+    {
+        if (!Section)
+        {
+            return;
+        }
+
+        TRange<FFrameNumber> SecRange = Section->GetRange();
+        bool bSecLowerOpen = SecRange.GetLowerBound().IsOpen();
+        bool bSecLowerInc = SecRange.GetLowerBound().IsInclusive();
+        int32 SecLowerVal = bSecLowerOpen ? 0 : SecRange.GetLowerBoundValue().Value;
+        bool bSecUpperOpen = SecRange.GetUpperBound().IsOpen();
+        bool bSecUpperInc = SecRange.GetUpperBound().IsInclusive();
+        int32 SecUpperVal = bSecUpperOpen ? 0 : SecRange.GetUpperBoundValue().Value;
+        int32 RowIndex = Section->GetRowIndex();
+        bool bActive = Section->IsActive();
+        bool bLocked = Section->IsLocked();
+
+        Ar << bSecLowerOpen;
+        Ar << bSecLowerInc;
+        Ar << SecLowerVal;
+        Ar << bSecUpperOpen;
+        Ar << bSecUpperInc;
+        Ar << SecUpperVal;
+        Ar << RowIndex;
+        Ar << bActive;
+        Ar << bLocked;
+
+        if (UMovieScene2DTransformSection* TransSec = Cast<UMovieScene2DTransformSection>(Section))
+        {
+            uint32 MaskVal = (uint32)TransSec->GetMask().GetChannels();
+            Ar << MaskVal;
+        }
+
+        const FMovieSceneChannelProxy& ChannelProxy = Section->GetChannelProxy();
+        TArrayView<const FMovieSceneChannelEntry> AllEntries = ChannelProxy.GetAllEntries();
+        int32 EntryCount = AllEntries.Num();
+        Ar << EntryCount;
+
+        for (const FMovieSceneChannelEntry& Entry : AllEntries)
+        {
+            FName TypeName = Entry.GetChannelTypeName();
+            FString TypeNameStr = TypeName.ToString();
+            Ar << TypeNameStr;
+
+            TArrayView<FMovieSceneChannel* const> Channels = Entry.GetChannels();
+            int32 ChanCount = Channels.Num();
+            Ar << ChanCount;
+
+            for (FMovieSceneChannel* Chan : Channels)
+            {
+                if (!Chan)
+                {
+                    int32 NullMarker = -1;
+                    Ar << NullMarker;
+                    continue;
+                }
+
+                int32 NumKeys = Chan->GetNumKeys();
+                Ar << NumKeys;
+
+                if (TypeName == FMovieSceneFloatChannel::StaticStruct()->GetFName())
+                {
+                    FMovieSceneFloatChannel* FloatChan = static_cast<FMovieSceneFloatChannel*>(Chan);
+                    TArrayView<const FFrameNumber> Times = FloatChan->GetTimes();
+                    TArrayView<const FMovieSceneFloatValue> Values = FloatChan->GetValues();
+                    int32 KeyNum = Times.Num();
+                    Ar << KeyNum;
+                    for (int32 k = 0; k < KeyNum; ++k)
+                    {
+                        int32 Frame = Times[k].Value;
+                        float Val = Values[k].Value;
+                        uint8 Interp = (uint8)Values[k].InterpMode.GetValue();
+                        uint8 TanMode = (uint8)Values[k].TangentMode.GetValue();
+                        float ArrTan = Values[k].Tangent.ArriveTangent;
+                        float LveTan = Values[k].Tangent.LeaveTangent;
+                        float ArrTanW = Values[k].Tangent.ArriveTangentWeight;
+                        float LveTanW = Values[k].Tangent.LeaveTangentWeight;
+                        uint8 TanWeightMode = (uint8)Values[k].Tangent.TangentWeightMode.GetValue();
+                        Ar << Frame;
+                        Ar << Val;
+                        Ar << Interp;
+                        Ar << TanMode;
+                        Ar << ArrTan;
+                        Ar << LveTan;
+                        Ar << ArrTanW;
+                        Ar << LveTanW;
+                        Ar << TanWeightMode;
+                    }
+                    TOptional<float> Def = FloatChan->GetDefault();
+                    bool bHasDef = Def.IsSet();
+                    float DefVal = Def.Get(0.0f);
+                    Ar << bHasDef;
+                    Ar << DefVal;
+                }
+                else if (TypeName == FMovieSceneBoolChannel::StaticStruct()->GetFName())
+                {
+                    FMovieSceneBoolChannel* BoolChan = static_cast<FMovieSceneBoolChannel*>(Chan);
+                    TArrayView<const FFrameNumber> Times = BoolChan->GetTimes();
+                    TArrayView<const bool> Values = BoolChan->GetValues();
+                    int32 KeyNum = Times.Num();
+                    Ar << KeyNum;
+                    for (int32 k = 0; k < KeyNum; ++k)
+                    {
+                        int32 Frame = Times[k].Value;
+                        bool Val = Values[k];
+                        Ar << Frame;
+                        Ar << Val;
+                    }
+                    TOptional<bool> Def = BoolChan->GetDefault();
+                    bool bHasDef = Def.IsSet();
+                    bool DefVal = Def.Get(false);
+                    Ar << bHasDef;
+                    Ar << DefVal;
+                }
+                else if (TypeName == FMovieSceneIntegerChannel::StaticStruct()->GetFName())
+                {
+                    FMovieSceneIntegerChannel* IntChan = static_cast<FMovieSceneIntegerChannel*>(Chan);
+                    TArrayView<const FFrameNumber> Times = IntChan->GetTimes();
+                    TArrayView<const int32> Values = IntChan->GetValues();
+                    int32 KeyNum = Times.Num();
+                    Ar << KeyNum;
+                    for (int32 k = 0; k < KeyNum; ++k)
+                    {
+                        int32 Frame = Times[k].Value;
+                        int32 Val = Values[k];
+                        Ar << Frame;
+                        Ar << Val;
+                    }
+                    TOptional<int32> Def = IntChan->GetDefault();
+                    bool bHasDef = Def.IsSet();
+                    int32 DefVal = Def.Get(0);
+                    Ar << bHasDef;
+                    Ar << DefVal;
+                }
+                else if (TypeName == FMovieSceneByteChannel::StaticStruct()->GetFName())
+                {
+                    FMovieSceneByteChannel* ByteChan = static_cast<FMovieSceneByteChannel*>(Chan);
+                    TArrayView<const FFrameNumber> Times = ByteChan->GetTimes();
+                    TArrayView<const uint8> Values = ByteChan->GetValues();
+                    int32 KeyNum = Times.Num();
+                    Ar << KeyNum;
+                    for (int32 k = 0; k < KeyNum; ++k)
+                    {
+                        int32 Frame = Times[k].Value;
+                        uint8 Val = Values[k];
+                        Ar << Frame;
+                        Ar << Val;
+                    }
+                    TOptional<uint8> Def = ByteChan->GetDefault();
+                    bool bHasDef = Def.IsSet();
+                    uint8 DefVal = Def.Get(0);
+                    Ar << bHasDef;
+                    Ar << DefVal;
+                }
+                else if (TypeName == FMovieSceneEventChannel::StaticStruct()->GetFName())
+                {
+                    FMovieSceneEventChannel* EvChan = static_cast<FMovieSceneEventChannel*>(Chan);
+                    TArrayView<const FFrameNumber> Times = EvChan->GetData().GetTimes();
+                    TArrayView<const FMovieSceneEvent> Values = EvChan->GetData().GetValues();
+                    int32 KeyNum = Times.Num();
+                    Ar << KeyNum;
+                    for (int32 k = 0; k < KeyNum; ++k)
+                    {
+                        int32 Frame = Times[k].Value;
+                        FString FuncName = Values[k].Ptrs.Function ? Values[k].Ptrs.Function->GetName() : FString();
+                        Ar << Frame;
+                        Ar << FuncName;
+                    }
+                }
+                else
+                {
+                    TArray<FFrameNumber> KeyTimes;
+                    Chan->GetKeys(TRange<FFrameNumber>::All(), &KeyTimes, nullptr);
+                    int32 KeyNum = KeyTimes.Num();
+                    Ar << KeyNum;
+                    for (int32 k = 0; k < KeyNum; ++k)
+                    {
+                        int32 Frame = KeyTimes[k].Value;
+                        Ar << Frame;
+                    }
+                }
+            }
+        }
+    }
+
     FString ComputeAnimationDigest(
         const FString& AssetPath,
         const FString& AnimName,
-        UWidgetAnimation* Animation)
+        UWidgetAnimation* Animation,
+        UWidgetBlueprint* Blueprint)
     {
         TArray<uint8> Buffer;
         FMemoryWriter Ar(Buffer);
 
-        FString AP = AssetPath;
+        FString AP = FPackageName::ObjectPathToPackageName(AssetPath);
         FString AN = AnimName;
         Ar << AP;
         Ar << AN;
+
+        // WidgetTree resolution state & hierarchy (UC-1)
+        if (Blueprint && Blueprint->WidgetTree)
+        {
+            TArray<UWidget*> AllWidgets;
+            Blueprint->WidgetTree->GetAllWidgets(AllWidgets);
+            AllWidgets.Sort([](const UWidget& A, const UWidget& B)
+            {
+                return A.GetName() < B.GetName();
+            });
+
+            int32 WidgetCount = AllWidgets.Num();
+            Ar << WidgetCount;
+            for (UWidget* Widget : AllWidgets)
+            {
+                if (!Widget)
+                {
+                    continue;
+                }
+                FString WName = Widget->GetName();
+                FString WClass = Widget->GetClass()->GetPathName();
+                FString PName = Widget->GetParent() ? Widget->GetParent()->GetName() : FString();
+                FString SClass = Widget->Slot ? Widget->Slot->GetClass()->GetPathName() : FString();
+                Ar << WName;
+                Ar << WClass;
+                Ar << PName;
+                Ar << SClass;
+            }
+        }
 
         if (Animation)
         {
             TArray<FWidgetAnimationBinding> SortedBindings = Animation->AnimationBindings;
             SortedBindings.Sort([](const FWidgetAnimationBinding& A, const FWidgetAnimationBinding& B)
             {
-                if (A.AnimationGuid != B.AnimationGuid)
-                {
-                    return A.AnimationGuid < B.AnimationGuid;
-                }
-                const FString WNameA = A.WidgetName.ToString();
-                const FString WNameB = B.WidgetName.ToString();
+                const FString WNameA = A.bIsRootWidget ? FString() : A.WidgetName.ToString();
+                const FString WNameB = B.bIsRootWidget ? FString() : B.WidgetName.ToString();
                 if (WNameA != WNameB)
                 {
                     return WNameA < WNameB;
@@ -224,7 +452,11 @@ namespace CortexUMGAnimationBindingUtils
                 {
                     return SNameA < SNameB;
                 }
-                return (int32)A.bIsRootWidget < (int32)B.bIsRootWidget;
+                if (A.bIsRootWidget != B.bIsRootWidget)
+                {
+                    return (int32)A.bIsRootWidget < (int32)B.bIsRootWidget;
+                }
+                return A.AnimationGuid < B.AnimationGuid;
             });
 
             int32 BindingNum = SortedBindings.Num();
@@ -270,6 +502,35 @@ namespace CortexUMGAnimationBindingUtils
                 int32 DispDen = MS->GetDisplayRate().Denominator;
                 Ar << DispNum;
                 Ar << DispDen;
+
+                // Possessables serialization (UC-1)
+                int32 PossessableCount = MS->GetPossessableCount();
+                TArray<FMovieScenePossessable> SortedPossessables;
+                for (int32 p = 0; p < PossessableCount; ++p)
+                {
+                    SortedPossessables.Add(MS->GetPossessable(p));
+                }
+                SortedPossessables.Sort([](const FMovieScenePossessable& A, const FMovieScenePossessable& B)
+                {
+                    return A.GetGuid() < B.GetGuid();
+                });
+                Ar << PossessableCount;
+                for (const FMovieScenePossessable& Possessable : SortedPossessables)
+                {
+                    FGuid PGuid = Possessable.GetGuid();
+                    FString PName = Possessable.GetName();
+#if WITH_EDITORONLY_DATA
+                    const UClass* PClassObj = Possessable.GetPossessedObjectClass();
+                    FString PClass = PClassObj ? PClassObj->GetPathName() : FString();
+#else
+                    FString PClass;
+#endif
+                    FGuid PParent = Possessable.GetParent();
+                    Ar << PGuid;
+                    Ar << PName;
+                    Ar << PClass;
+                    Ar << PParent;
+                }
 
                 const UMovieScene* ConstMS = MS;
                 TArray<FMovieSceneBinding> SortedMSBindings = ConstMS->GetBindings();
@@ -322,80 +583,12 @@ namespace CortexUMGAnimationBindingUtils
                         Ar << SecNum;
                         for (UMovieSceneSection* Section : Sections)
                         {
-                            if (!Section)
-                            {
-                                continue;
-                            }
-                            TRange<FFrameNumber> SecRange = Section->GetRange();
-                            int32 SecStart = SecRange.GetLowerBound().IsOpen() ? 0 : SecRange.GetLowerBoundValue().Value;
-                            int32 SecEnd = SecRange.GetUpperBound().IsOpen() ? 0 : SecRange.GetUpperBoundValue().Value;
-                            int32 RowIndex = Section->GetRowIndex();
-                            bool bActive = Section->IsActive();
-                            bool bLocked = Section->IsLocked();
-                            Ar << SecStart;
-                            Ar << SecEnd;
-                            Ar << RowIndex;
-                            Ar << bActive;
-                            Ar << bLocked;
-
-                            if (UMovieSceneFloatSection* FloatSec = Cast<UMovieSceneFloatSection>(Section))
-                            {
-                                const FMovieSceneFloatChannel& Chan = FloatSec->GetChannel();
-                                TArrayView<const FFrameNumber> Times = Chan.GetTimes();
-                                TArrayView<const FMovieSceneFloatValue> Values = Chan.GetValues();
-                                int32 KeyNum = Times.Num();
-                                Ar << KeyNum;
-                                for (int32 k = 0; k < KeyNum; ++k)
-                                {
-                                    int32 Frame = Times[k].Value;
-                                    float Val = Values[k].Value;
-                                    uint8 Interp = (uint8)Values[k].InterpMode.GetValue();
-                                    uint8 TanMode = (uint8)Values[k].TangentMode.GetValue();
-                                    float ArrTan = Values[k].Tangent.ArriveTangent;
-                                    float LveTan = Values[k].Tangent.LeaveTangent;
-                                    float ArrTanW = Values[k].Tangent.ArriveTangentWeight;
-                                    float LveTanW = Values[k].Tangent.LeaveTangentWeight;
-                                    uint8 TanWeightMode = (uint8)Values[k].Tangent.TangentWeightMode.GetValue();
-                                    Ar << Frame;
-                                    Ar << Val;
-                                    Ar << Interp;
-                                    Ar << TanMode;
-                                    Ar << ArrTan;
-                                    Ar << LveTan;
-                                    Ar << ArrTanW;
-                                    Ar << LveTanW;
-                                    Ar << TanWeightMode;
-                                }
-                                TOptional<float> Def = Chan.GetDefault();
-                                bool bHasDef = Def.IsSet();
-                                float DefVal = Def.Get(0.0f);
-                                Ar << bHasDef;
-                                Ar << DefVal;
-                            }
-                            else if (UMovieSceneBoolSection* BoolSec = Cast<UMovieSceneBoolSection>(Section))
-                            {
-                                const FMovieSceneBoolChannel& Chan = BoolSec->GetChannel();
-                                TArrayView<const FFrameNumber> Times = Chan.GetTimes();
-                                TArrayView<const bool> Values = Chan.GetValues();
-                                int32 KeyNum = Times.Num();
-                                Ar << KeyNum;
-                                for (int32 k = 0; k < KeyNum; ++k)
-                                {
-                                    int32 Frame = Times[k].Value;
-                                    bool Val = Values[k];
-                                    Ar << Frame;
-                                    Ar << Val;
-                                }
-                                TOptional<bool> Def = Chan.GetDefault();
-                                bool bHasDef = Def.IsSet();
-                                bool DefVal = Def.Get(false);
-                                Ar << bHasDef;
-                                Ar << DefVal;
-                            }
+                            SerializeSectionChannels(Ar, Section);
                         }
                     }
                 }
 
+                // Master tracks serialization including channels (UC-1)
                 TArray<UMovieSceneTrack*> MasterTracks = ConstMS->GetTracks();
                 MasterTracks.Sort([](const UMovieSceneTrack& A, const UMovieSceneTrack& B)
                 {
@@ -419,6 +612,21 @@ namespace CortexUMGAnimationBindingUtils
                     FString TrackName = Track->GetTrackName().ToString();
                     Ar << TrackClass;
                     Ar << TrackName;
+
+                    TArray<UMovieSceneSection*> Sections = Track->GetAllSections();
+                    Sections.Sort([](const UMovieSceneSection& A, const UMovieSceneSection& B)
+                    {
+                        int32 StartA = A.GetRange().GetLowerBound().IsOpen() ? 0 : A.GetRange().GetLowerBoundValue().Value;
+                        int32 StartB = B.GetRange().GetLowerBound().IsOpen() ? 0 : B.GetRange().GetLowerBoundValue().Value;
+                        return StartA < StartB;
+                    });
+
+                    int32 SecNum = Sections.Num();
+                    Ar << SecNum;
+                    for (UMovieSceneSection* Section : Sections)
+                    {
+                        SerializeSectionChannels(Ar, Section);
+                    }
                 }
             }
         }
@@ -432,9 +640,9 @@ namespace CortexUMGAnimationBindingUtils
     {
         FCortexUMGAnimationBindingFingerprint Fingerprint;
         Fingerprint.Base = MakeObjectAssetFingerprint(Blueprint);
-        Fingerprint.AssetPath = Blueprint ? Blueprint->GetPathName() : FString();
+        Fingerprint.AssetPath = Blueprint ? FPackageName::ObjectPathToPackageName(Blueprint->GetPathName()) : FString();
         Fingerprint.AnimationName = Animation ? Animation->GetName() : FString();
-        Fingerprint.Digest = ComputeAnimationDigest(Fingerprint.AssetPath, Fingerprint.AnimationName, Animation);
+        Fingerprint.Digest = ComputeAnimationDigest(Fingerprint.AssetPath, Fingerprint.AnimationName, Animation, Blueprint);
         return Fingerprint;
     }
 
@@ -507,7 +715,12 @@ namespace CortexUMGAnimationBindingUtils
         }
 
         FString AssetPath = (*DomainSig)->GetStringField(TEXT("asset_path"));
-        if (!AssetPath.Equals(ExpectedAssetPath, ESearchCase::CaseSensitive))
+        const FString CanonicalSig = FPackageName::ObjectPathToPackageName(AssetPath);
+        const FString CanonicalExpected = FPackageName::ObjectPathToPackageName(ExpectedAssetPath);
+        const FString CanonicalLive = FPackageName::ObjectPathToPackageName(LiveFingerprint.AssetPath);
+
+        if (!CanonicalSig.Equals(CanonicalExpected, ESearchCase::CaseSensitive) ||
+            !CanonicalLive.Equals(CanonicalExpected, ESearchCase::CaseSensitive))
         {
             OutError = FString::Printf(TEXT("domain_signature asset_path mismatch: expected '%s', got '%s'"),
                 *ExpectedAssetPath, *AssetPath);
@@ -770,12 +983,17 @@ namespace CortexUMGAnimationBindingUtils
         if (ExpectedFingerprint->TryGetObjectField(TEXT("domain_signature"), EarlyDomainSig) && EarlyDomainSig && EarlyDomainSig->IsValid())
         {
             const FString SigAssetPath = (*EarlyDomainSig)->GetStringField(TEXT("asset_path"));
-            if (!SigAssetPath.IsEmpty() && !SigAssetPath.Equals(AssetPath, ESearchCase::CaseSensitive))
+            if (!SigAssetPath.IsEmpty())
             {
-                OutError = FCortexCommandRouter::Error(
-                    CortexErrorCodes::StalePrecondition,
-                    FString::Printf(TEXT("domain_signature asset_path mismatch: expected '%s', got '%s'"), *AssetPath, *SigAssetPath));
-                return false;
+                const FString CanonicalSig = FPackageName::ObjectPathToPackageName(SigAssetPath);
+                const FString CanonicalReq = FPackageName::ObjectPathToPackageName(AssetPath);
+                if (!CanonicalSig.Equals(CanonicalReq, ESearchCase::CaseSensitive))
+                {
+                    OutError = FCortexCommandRouter::Error(
+                        CortexErrorCodes::StalePrecondition,
+                        FString::Printf(TEXT("domain_signature asset_path mismatch: expected '%s', got '%s'"), *AssetPath, *SigAssetPath));
+                    return false;
+                }
             }
             const FString SigAnimName = (*EarlyDomainSig)->GetStringField(TEXT("animation_name"));
             if (!SigAnimName.IsEmpty() && !SigAnimName.Equals(AnimName, ESearchCase::CaseSensitive))
@@ -905,12 +1123,30 @@ namespace CortexUMGAnimationBindingUtils
             }
         }
 
-        // Check unsupported channel / section types on the binding (Section 3.2)
+        // Check unsupported channel / section types across ALL bindings and master tracks (Section 3.2, UC-1, UC-3)
+        auto IsSectionSupported = [](UMovieSceneSection* Section) -> bool
+        {
+            if (!Section)
+            {
+                return true;
+            }
+            return Section->IsA<UMovieSceneFloatSection>()
+                || Section->IsA<UMovieSceneBoolSection>()
+                || Section->IsA<UMovieScene2DTransformSection>()
+                || Section->IsA<UMovieSceneIntegerSection>()
+                || Section->IsA<UMovieSceneByteSection>()
+                || Section->IsA<UMovieSceneEnumSection>()
+                || Section->IsA<UMovieSceneEventSectionBase>()
+                || Section->IsA<UMovieSceneObjectPropertySection>()
+                || Section->IsA<UMovieSceneMarginSection>()
+                || Section->IsA<UMovieSceneColorSection>();
+        };
+
         if (const UMovieScene* ConstMS = OutPreflight.MovieScene)
         {
-            if (const FMovieSceneBinding* ValidatingBinding = ConstMS->FindBinding(MatchedBinding.AnimationGuid))
+            for (const FMovieSceneBinding& Binding : ConstMS->GetBindings())
             {
-                for (UMovieSceneTrack* Track : ValidatingBinding->GetTracks())
+                for (UMovieSceneTrack* Track : Binding.GetTracks())
                 {
                     if (!Track)
                     {
@@ -918,17 +1154,31 @@ namespace CortexUMGAnimationBindingUtils
                     }
                     for (UMovieSceneSection* Section : Track->GetAllSections())
                     {
-                        if (!Section)
-                        {
-                            continue;
-                        }
-                        if (!Section->IsA<UMovieSceneFloatSection>() && !Section->IsA<UMovieSceneBoolSection>())
+                        if (!IsSectionSupported(Section))
                         {
                             OutError = FCortexCommandRouter::Error(
                                 CortexErrorCodes::AnimationBindingUnsupported,
-                                TEXT("Track contains unsupported channel types"));
+                                TEXT("MovieScene contains unsupported section/channel types"));
                             return false;
                         }
+                    }
+                }
+            }
+
+            for (UMovieSceneTrack* Track : ConstMS->GetTracks())
+            {
+                if (!Track)
+                {
+                    continue;
+                }
+                for (UMovieSceneSection* Section : Track->GetAllSections())
+                {
+                    if (!IsSectionSupported(Section))
+                    {
+                        OutError = FCortexCommandRouter::Error(
+                            CortexErrorCodes::AnimationBindingUnsupported,
+                            TEXT("Master track contains unsupported section/channel types"));
+                        return false;
                     }
                 }
             }

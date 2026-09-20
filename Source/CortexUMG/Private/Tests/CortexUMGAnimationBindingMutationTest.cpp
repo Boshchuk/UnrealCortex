@@ -8,6 +8,8 @@
 #include "UObject/UnrealType.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Tracks/MovieSceneSubTrack.h"
+#include "Sections/MovieSceneSubSection.h"
 
 // -----------------------------------------------------------------------------
 // Step 1: Finite Proof Matrix & Stale-Key Regression Tests
@@ -672,7 +674,7 @@ bool FCortexUMGAnimationBindingPreviewSemanticsTest::RunTest(const FString& Para
             {
                 TestEqual(TEXT("after umg_binding_count"), (*AfterObj)->GetIntegerField(TEXT("umg_binding_count")), 2);
                 TestEqual(TEXT("after movie_scene_binding_count"), (*AfterObj)->GetIntegerField(TEXT("movie_scene_binding_count")), 2);
-                TestEqual(TEXT("after track_count"), (*AfterObj)->GetIntegerField(TEXT("track_count")), 4);
+                TestEqual(TEXT("after track_count"), (*AfterObj)->GetIntegerField(TEXT("track_count")), 3);
             }
 
             TestTrue(TEXT("scene_data_removed is true for single GUID"),
@@ -951,8 +953,8 @@ bool FCortexUMGAnimationBindingRemovePreservesRetainedTest::RunTest(const FStrin
         AfterObj->GetIntegerField(TEXT("umg_binding_count")), 2);
     TestEqual(TEXT("Two records remain in after.movie_scene_binding_count"),
         AfterObj->GetIntegerField(TEXT("movie_scene_binding_count")), 2);
-    TestEqual(TEXT("Four tracks remain in after.track_count"),
-        AfterObj->GetIntegerField(TEXT("track_count")), 4);
+    TestEqual(TEXT("Three tracks remain in after.track_count"),
+        AfterObj->GetIntegerField(TEXT("track_count")), 3);
 
     // Assert native state: exactly one metadata record is gone
     TestEqual(TEXT("Native UMG bindings count is 2"), Anim->AnimationBindings.Num(), 2);
@@ -973,29 +975,29 @@ bool FCortexUMGAnimationBindingRemovePreservesRetainedTest::RunTest(const FStrin
     TestTrue(TEXT("All retained authored data preserved byte-for-byte"), RetainedBefore == RetainedAfter);
 
     // Deep native assertions on retained targets, tracks, sections, channels, keys, tangents, defaults
-    // 1. Guid2 (BorderBody): HeightOverride and RenderOpacity
+    // 1. Guid2 (BorderBody): RenderOpacity
     const FGuid Guid2 = Anim->AnimationBindings[0].AnimationGuid;
     TestNotNull(TEXT("BorderBody possessable retained"), MS->FindPossessable(Guid2));
     const FMovieSceneBinding* Binding2 = MS->FindBinding(Guid2);
     TestNotNull(TEXT("BorderBody binding retained"), Binding2);
     if (Binding2)
     {
-        TestEqual(TEXT("BorderBody has 2 tracks"), Binding2->GetTracks().Num(), 2);
-        UMovieSceneFloatTrack* HeightTrack = Cast<UMovieSceneFloatTrack>(Binding2->GetTracks()[0]);
-        TestNotNull(TEXT("HeightOverride track retained"), HeightTrack);
-        if (HeightTrack && HeightTrack->GetAllSections().Num() > 0)
+        TestEqual(TEXT("BorderBody has 1 track"), Binding2->GetTracks().Num(), 1);
+        UMovieSceneFloatTrack* OpacityTrack = Cast<UMovieSceneFloatTrack>(Binding2->GetTracks()[0]);
+        TestNotNull(TEXT("RenderOpacity track retained"), OpacityTrack);
+        if (OpacityTrack && OpacityTrack->GetAllSections().Num() > 0)
         {
-            UMovieSceneFloatSection* HeightSec = Cast<UMovieSceneFloatSection>(HeightTrack->GetAllSections()[0]);
-            TestNotNull(TEXT("HeightOverride section retained"), HeightSec);
-            if (HeightSec)
+            UMovieSceneFloatSection* OpacitySec = Cast<UMovieSceneFloatSection>(OpacityTrack->GetAllSections()[0]);
+            TestNotNull(TEXT("RenderOpacity section retained"), OpacitySec);
+            if (OpacitySec)
             {
-                TestEqual(TEXT("HeightOverride default is 75.0"), HeightSec->GetChannel().GetDefault().Get(0.0f), 75.0f);
-                TestEqual(TEXT("HeightOverride has 2 keys"), HeightSec->GetChannel().GetTimes().Num(), 2);
+                TestEqual(TEXT("RenderOpacity default is 0.0"), OpacitySec->GetChannel().GetDefault().Get(1.0f), 0.0f);
+                TestEqual(TEXT("RenderOpacity has 2 keys"), OpacitySec->GetChannel().GetTimes().Num(), 2);
             }
         }
     }
 
-    // 2. Guid3 (StorylineIcon): Visibility
+    // 2. Guid3 (StorylineIcon): bIsEnabled
     const FGuid Guid3 = Anim->AnimationBindings[1].AnimationGuid;
     TestNotNull(TEXT("StorylineIcon possessable retained"), MS->FindPossessable(Guid3));
     const FMovieSceneBinding* Binding3 = MS->FindBinding(Guid3);
@@ -1003,16 +1005,16 @@ bool FCortexUMGAnimationBindingRemovePreservesRetainedTest::RunTest(const FStrin
     if (Binding3)
     {
         TestEqual(TEXT("StorylineIcon has 1 track"), Binding3->GetTracks().Num(), 1);
-        UMovieSceneBoolTrack* VisTrack = Cast<UMovieSceneBoolTrack>(Binding3->GetTracks()[0]);
-        TestNotNull(TEXT("Visibility track retained"), VisTrack);
-        if (VisTrack && VisTrack->GetAllSections().Num() > 0)
+        UMovieSceneBoolTrack* IsEnabledTrack = Cast<UMovieSceneBoolTrack>(Binding3->GetTracks()[0]);
+        TestNotNull(TEXT("bIsEnabled track retained"), IsEnabledTrack);
+        if (IsEnabledTrack && IsEnabledTrack->GetAllSections().Num() > 0)
         {
-            UMovieSceneBoolSection* VisSec = Cast<UMovieSceneBoolSection>(VisTrack->GetAllSections()[0]);
-            TestNotNull(TEXT("Visibility section retained"), VisSec);
-            if (VisSec)
+            UMovieSceneBoolSection* IsEnabledSec = Cast<UMovieSceneBoolSection>(IsEnabledTrack->GetAllSections()[0]);
+            TestNotNull(TEXT("bIsEnabled section retained"), IsEnabledSec);
+            if (IsEnabledSec)
             {
-                TestEqual(TEXT("Visibility default is true"), VisSec->GetChannel().GetDefault().Get(false), true);
-                TestEqual(TEXT("Visibility has 2 keys"), VisSec->GetChannel().GetTimes().Num(), 2);
+                TestEqual(TEXT("bIsEnabled default is true"), IsEnabledSec->GetChannel().GetDefault().Get(false), true);
+                TestEqual(TEXT("bIsEnabled has 2 keys"), IsEnabledSec->GetChannel().GetTimes().Num(), 2);
             }
         }
     }
@@ -1078,8 +1080,22 @@ bool FCortexUMGAnimationBindingSharedGuidPreservationTest::RunTest(const FString
         return false;
     }
 
-    // Remove the extra binding (index 3)
-    TSharedPtr<FJsonObject> Params = Fixture.RemovalParams(Read.Data, 3);
+    // Remove the extra binding (find index where slot_widget_name == "ExtraSlot")
+    int32 ExtraIndex = -1;
+    const TArray<TSharedPtr<FJsonValue>>* BindingsArray = nullptr;
+    if (Read.Data->TryGetArrayField(TEXT("bindings"), BindingsArray) && BindingsArray)
+    {
+        for (int32 i = 0; i < BindingsArray->Num(); ++i)
+        {
+            if ((*BindingsArray)[i]->AsObject()->GetStringField(TEXT("slot_widget_name")) == TEXT("ExtraSlot"))
+            {
+                ExtraIndex = i;
+                break;
+            }
+        }
+    }
+    TestTrue(TEXT("Found extra binding index"), ExtraIndex != -1);
+    TSharedPtr<FJsonObject> Params = Fixture.RemovalParams(Read.Data, ExtraIndex);
     Params->SetBoolField(TEXT("dry_run"), false);
 
     const FCortexCommandResult Applied = Fixture.Router.Execute(
@@ -1110,7 +1126,7 @@ bool FCortexUMGAnimationBindingSharedGuidPreservationTest::RunTest(const FString
     const FMovieSceneBinding* MSB = MS->FindBinding(SharedGuid);
     if (MSB)
     {
-        TestEqual(TEXT("MovieScene tracks preserved on shared possessable"), MSB->GetTracks().Num(), 2);
+        TestEqual(TEXT("MovieScene tracks preserved on shared possessable"), MSB->GetTracks().Num(), 1);
     }
 
     // Original BorderBody binding still in AnimationBindings
@@ -1717,14 +1733,14 @@ bool FCortexUMGAnimationBindingUnsupportedChannelTypeRejectionTest::RunTest(cons
         return false;
     }
 
-    // Add an event track on the binding Guid1 (Event track sections are not Float/Bool)
-    UMovieSceneEventTrack* EventTrack = MS->AddTrack<UMovieSceneEventTrack>(Anim->AnimationBindings[0].AnimationGuid);
-    if (EventTrack)
+    // Add a sub track on the binding Guid1 (Sub track sections are not in the supported set)
+    UMovieSceneSubTrack* SubTrack = MS->AddTrack<UMovieSceneSubTrack>(Anim->AnimationBindings[0].AnimationGuid);
+    if (SubTrack)
     {
-        UMovieSceneSection* Sec = EventTrack->CreateNewSection();
+        UMovieSceneSection* Sec = SubTrack->CreateNewSection();
         if (Sec)
         {
-            EventTrack->AddSection(*Sec);
+            SubTrack->AddSection(*Sec);
             Sec->SetRange(TRange<FFrameNumber>(FFrameNumber(0), FFrameNumber(12000)));
         }
     }
