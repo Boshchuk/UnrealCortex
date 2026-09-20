@@ -489,3 +489,63 @@ class TestPaginationEdgeCases:
         assert meta["total"] == 10
         assert meta["has_more"] is False
         assert meta["next_cursor"] is None
+
+
+class TestMutationResponseBounds:
+    """Bounded responses for mutations preserve essential outcomes and truncate remaining_bindings."""
+
+    def test_essential_outcomes_preserved_above_40k(self):
+        data = {
+            "asset_path": "/Game/UI/WBP_EmailList",
+            "animation_name": "appearance",
+            "dry_run": False,
+            "changed": True,
+            "save_attempted": True,
+            "saved": True,
+            "fingerprint": {"domain_signature": {"digest": "abc"}},
+            "matched_selector": {"binding_guid": "{123}", "widget_name": "Icon"},
+            "before": {"umg_binding_count": 50},
+            "after": {"umg_binding_count": 49},
+            "scene_data_removed": True,
+            "remaining_bindings": [
+                {"index": i, "widget_name": f"Widget_{i}_" + "x" * 1000}
+                for i in range(50)
+            ],
+            "_remaining_bindings_truncated": False,
+            "_remaining_bindings_total": 49,
+            "save_error": None,
+        }
+        formatted = format_response(data, "umg_cmd")
+        assert len(formatted) <= _MAX_RESPONSE_CHARS
+        res = json.loads(formatted)
+        assert res.get("_error") != "RESPONSE_TOO_LARGE"
+        assert res["changed"] is True
+        assert res["saved"] is True
+        assert res["_remaining_bindings_truncated"] is True
+        assert res["_remaining_bindings_total"] == 49
+        assert "umg.list_animation_bindings" in (
+            res.get("_suggestion", "") + res.get("_remaining_bindings_instructions", "")
+        )
+
+    def test_fewer_than_ten_large_entries_truncates_list_instead_of_generic_error(self):
+        data = {
+            "changed": True,
+            "dry_run": False,
+            "save_attempted": True,
+            "saved": True,
+            "remaining_bindings": [
+                {"index": i, "data": "x" * 20_000}
+                for i in range(3)
+            ],
+            "_remaining_bindings_truncated": False,
+            "_remaining_bindings_total": 3,
+        }
+        formatted = format_response(data, "umg_cmd")
+        assert len(formatted) <= _MAX_RESPONSE_CHARS
+        res = json.loads(formatted)
+        assert res.get("_error") != "RESPONSE_TOO_LARGE"
+        assert res["changed"] is True
+        assert res["_remaining_bindings_truncated"] is True
+        assert res["_remaining_bindings_total"] == 3
+        assert len(res["remaining_bindings"]) < 3
+

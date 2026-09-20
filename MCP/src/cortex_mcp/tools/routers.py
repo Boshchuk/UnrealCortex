@@ -219,8 +219,20 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
                     response = connection.send_command("batch", batch_params)
                     return format_response(response.get("data", {}), "batch_query")
 
+            # UMG animation binding inspection and guarded removal
+            if domain == "umg" and command in {"remove_animation_binding", "list_animation_bindings"}:
+                if command == "remove_animation_binding":
+                    if any(k in route_params for k in ("limit", "cursor", "offset")):
+                        return json.dumps({
+                            "_error": "INVALID_FIELD",
+                            "_message": "Pagination parameters (limit, cursor, offset) are not supported on remove_animation_binding.",
+                        })
+                response = connection.send_command(qualified, route_params)
+                return format_response(response.get("data", {}), f"{domain}_cmd")
+
             # Check for cursor (subsequent page — no C++ call needed)
             cursor_token = route_params.get("cursor")
+
             if cursor_token is not None:
                 return _handle_cursor_request(cursor_token)
 
