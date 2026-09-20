@@ -222,7 +222,7 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
             # UMG animation binding inspection and guarded removal
             if domain == "umg" and command in {"remove_animation_binding", "list_animation_bindings"}:
                 if command == "remove_animation_binding":
-                    if any(k in route_params for k in ("limit", "cursor", "offset")):
+                    if any(route_params.get(k) is not None for k in ("limit", "cursor", "offset")):
                         return json.dumps({
                             "_error": "INVALID_FIELD",
                             "_message": "Pagination parameters (limit, cursor, offset) are not supported on remove_animation_binding.",

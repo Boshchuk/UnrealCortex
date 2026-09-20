@@ -53,6 +53,32 @@ def test_removal_rejects_pagination_before_dispatch(extra):
     connection.send_command.assert_not_called()
 
 
+def test_removal_allows_explicit_none_pagination_parameters():
+    """remove_animation_binding does not reject pagination parameters when explicitly set to None."""
+    connection = MagicMock()
+    connection.send_command.return_value = {
+        "success": True,
+        "data": {
+            "asset_path": "/Game/UI/WBP_Test",
+            "animation_name": "Appearance",
+            "changed": False,
+            "dry_run": True,
+        },
+    }
+    router = make_router("umg", connection, "test docs")
+    params = {
+        "asset_path": "/Game/UI/WBP_Test",
+        "animation_name": "Appearance",
+        "widget_name": "Button_0",
+        "limit": None,
+        "cursor": None,
+        "offset": None,
+    }
+    result = json.loads(router("remove_animation_binding", params))
+    assert "_error" not in result
+    connection.send_command.assert_called_once()
+
+
 def test_removal_rejects_valid_read_cursor_from_other_command():
     """An existing valid read cursor from another command must NOT return its cached page for removal."""
     connection = MagicMock()
