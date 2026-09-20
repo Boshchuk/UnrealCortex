@@ -877,9 +877,7 @@ namespace CortexUMGAnimationBindingUtils
             }
         }
 
-        const bool bHasSceneData = OutPreflight.bPossessableExists ||
-            (OutPreflight.MovieScene && OutPreflight.MovieScene->FindBinding(MatchedBinding.AnimationGuid) != nullptr);
-        OutPreflight.bSceneDataRemoved = (GuidSharing <= 1 && bHasSceneData);
+        OutPreflight.bSceneDataRemoved = (GuidSharing <= 1 && OutPreflight.bPossessableExists);
 
         // Counts before
         OutPreflight.BeforeUMGBindingCount = FoundAnim->AnimationBindings.Num();
@@ -993,6 +991,10 @@ namespace CortexUMGAnimationBindingUtils
             Animation->AnimationBindings[Preflight.MatchedRecordIndex] != Preflight.MatchedBinding)
         {
             Transaction.Cancel();
+            if (!bPackageWasDirty)
+            {
+                Blueprint->GetPackage()->ClearDirtyFlag();
+            }
             return FCortexCommandRouter::Error(
                 CortexErrorCodes::StalePrecondition,
                 TEXT("Matched binding index is no longer valid at mutation time"));

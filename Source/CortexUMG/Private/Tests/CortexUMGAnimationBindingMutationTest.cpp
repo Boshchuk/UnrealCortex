@@ -5,6 +5,7 @@
 #include "Editor/Transactor.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "UObject/GarbageCollection.h"
+#include "UObject/UnrealType.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
@@ -1486,4 +1487,163 @@ bool FCortexUMGAnimationBindingFailureRestorationTest::RunTest(const FString& Pa
 
     return true;
 }
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingOrphanedTrackRejectionTest,
+    "Cortex.UMG.AnimationBinding.OrphanedTrackRejection",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationBindingOrphanedTrackRejectionTest::RunTest(const FString& Parameters)
+{
+    FCortexUMGAnimationBindingFixture Fixture(*this);
+    UWidgetBlueprint* WBP = Fixture.Blueprint.Get();
+
+    UWidgetAnimation* Anim = NewObject<UWidgetAnimation>(WBP, TEXT("orphaned_track_anim"), RF_Transactional);
+    UMovieScene* MS = NewObject<UMovieScene>(Anim, TEXT("orphaned_track_anim"), RF_Transactional);
+    Anim->MovieScene = MS;
+    MS->SetPlaybackRange(TRange<FFrameNumber>(FFrameNumber(0), FFrameNumber(12000)));
+
+    // Add possessable so we get a binding and can add a track to it
+    FGuid OrphanGuid = MS->AddPossessable(TEXT("OrphanTarget"), UUserWidget::StaticClass());
+    UMovieSceneFloatTrack* FloatTrack = MS->AddTrack<UMovieSceneFloatTrack>(OrphanGuid);
+    FloatTrack->SetPropertyNameAndPath(FName("RenderOpacity"), TEXT("RenderOpacity"));
+    UMovieSceneFloatSection* Section = Cast<UMovieSceneFloatSection>(FloatTrack->CreateNewSection());
+    FloatTrack->AddSection(*Section);
+    Section->SetRange(TRange<FFrameNumber>(FFrameNumber(0), FFrameNumber(12000)));
+
+    // Now remove the possessable from MovieScene's Possessables array using reflection,
+    // leaving the FMovieSceneBinding with its tracks orphaned without a possessable.
+    FArrayProperty* PossessablesProp = FindFProperty<FArrayProperty>(UMovieScene::StaticClass(), TEXT("Possessables"));
+    if (!PossessablesProp)
+    {
+        AddError(TEXT("Failed to find Possessables property on UMovieScene"));
+        return false;
+    }
+    FScriptArrayHelper Helper(PossessablesProp, PossessablesProp->ContainerPtrToValuePtr<void>(MS));
+    for (int32 i = 0; i < Helper.Num(); ++i)
+    {
+        const FMovieScenePossessable* P = reinterpret_cast<const FMovieScenePossessable*>(Helper.GetRawPtr(i));
+        if (P && P->GetGuid() == OrphanGuid)
+        {
+            Helper.RemoveValues(i, 1);
+            break;
+        }
+    }
+
+    // Verify setup: possessable is absent, but binding exists and has tracks
+    TestNull(TEXT("Possessable is absent"), MS->FindPossessable(OrphanGuid));
+    const FMovieSceneBinding* Binding = MS->FindBinding(OrphanGuid);
+    TestNotNull(TEXT("Binding exists"), Binding);
+    TestTrue(TEXT("Binding has tracks"), Binding && Binding->GetTracks().Num() > 0);
+
+    // Add UMG binding referencing OrphanGuid
+    FWidgetAnimationBinding OrphanB;
+    OrphanB.WidgetName = FName(TEXT("OrphanTarget"));
+    OrphanB.SlotWidgetName = NAME_None;
+    OrphanB.AnimationGuid = OrphanGuid;
+    OrphanB.bIsRootWidget = false;
+    Anim->AnimationBindings.Add(OrphanB);
+
+    WBP->Animations.Add(Anim);
+
+    // Inspect
+    TSharedPtr<FJsonObject> InspectParams = MakeShared<FJsonObject>();
+    InspectParams->SetStringField(TEXT("asset_path"), WBP->GetPathName());
+    InspectParams->SetStringField(TEXT("animation_name"), TEXT("orphaned_track_anim"));
+    FCortexCommandResult Read = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), InspectParams);
+    TestTrue(TEXT("Inspect succeeds"), Read.bSuccess);
+    if (!Read.bSuccess || !Read.Data.IsValid())
+    {
+        return false;
+    }
+
+    // Attempt removal -> must be rejected with ANIMATION_BINDING_UNSUPPORTED
+    TSharedPtr<FJsonObject> Params = Fixture.RemovalParams(Read.Data, 0);
+    Params->SetStringField(TEXT("animation_name"), TEXT("orphaned_track_anim"));
+    Params->SetBoolField(TEXT("dry_run"), false);
+
+    FCortexCommandResult Result = Fixture.Router.Execute(TEXT("umg.remove_animation_binding"), Params);
+    TestFalse(TEXT("Orphaned track binding removal is rejected"), Result.bSuccess);
+    TestEqual(TEXT("Error code is ANIMATION_BINDING_UNSUPPORTED"),
+        Result.ErrorCode, CortexErrorCodes::AnimationBindingUnsupported);
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingDanglingTargetRemovalTest,
+    "Cortex.UMG.AnimationBinding.DanglingTargetRemoval",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationBindingDanglingTargetRemovalTest::RunTest(const FString& Parameters)
+{
+    FCortexUMGAnimationBindingFixture Fixture(*this);
+    UWidgetBlueprint* WBP = Fixture.Blueprint.Get();
+
+    UWidgetAnimation* Anim = NewObject<UWidgetAnimation>(WBP, TEXT("dangling_target_anim"), RF_Transactional);
+    UMovieScene* MS = NewObject<UMovieScene>(Anim, TEXT("dangling_target_anim"), RF_Transactional);
+    Anim->MovieScene = MS;
+    MS->SetPlaybackRange(TRange<FFrameNumber>(FFrameNumber(0), FFrameNumber(12000)));
+
+    // Create possessable in MovieScene for a widget name that does NOT exist in WidgetTree
+    const FName MissingWidgetName(TEXT("DeletedWidget_NonExistent"));
+    FGuid DanglingGuid = MS->AddPossessable(MissingWidgetName.ToString(), UUserWidget::StaticClass());
+
+    UMovieSceneFloatTrack* FloatTrack = MS->AddTrack<UMovieSceneFloatTrack>(DanglingGuid);
+    FloatTrack->SetPropertyNameAndPath(FName("RenderOpacity"), TEXT("RenderOpacity"));
+    UMovieSceneFloatSection* Section = Cast<UMovieSceneFloatSection>(FloatTrack->CreateNewSection());
+    FloatTrack->AddSection(*Section);
+    Section->SetRange(TRange<FFrameNumber>(FFrameNumber(0), FFrameNumber(12000)));
+
+    FWidgetAnimationBinding DanglingB;
+    DanglingB.WidgetName = MissingWidgetName;
+    DanglingB.SlotWidgetName = NAME_None;
+    DanglingB.AnimationGuid = DanglingGuid;
+    DanglingB.bIsRootWidget = false;
+    Anim->AnimationBindings.Add(DanglingB);
+
+    WBP->Animations.Add(Anim);
+
+    // Inspect and verify target_exists is false
+    TSharedPtr<FJsonObject> InspectParams = MakeShared<FJsonObject>();
+    InspectParams->SetStringField(TEXT("asset_path"), WBP->GetPathName());
+    InspectParams->SetStringField(TEXT("animation_name"), TEXT("dangling_target_anim"));
+    FCortexCommandResult Read = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), InspectParams);
+    TestTrue(TEXT("Inspect succeeds"), Read.bSuccess);
+    if (!Read.bSuccess || !Read.Data.IsValid())
+    {
+        return false;
+    }
+
+    const TArray<TSharedPtr<FJsonValue>> Bindings = Read.Data->GetArrayField(TEXT("bindings"));
+    TestEqual(TEXT("1 binding returned"), Bindings.Num(), 1);
+    if (Bindings.Num() > 0)
+    {
+        TestFalse(TEXT("target_exists is false"), Bindings[0]->AsObject()->GetBoolField(TEXT("target_exists")));
+    }
+
+    // Apply removal with dry_run = false
+    TSharedPtr<FJsonObject> Params = Fixture.RemovalParams(Read.Data, 0);
+    Params->SetStringField(TEXT("animation_name"), TEXT("dangling_target_anim"));
+    Params->SetBoolField(TEXT("dry_run"), false);
+
+    FCortexCommandResult Result = Fixture.Router.Execute(TEXT("umg.remove_animation_binding"), Params);
+    TestTrue(TEXT("Dangling target binding removal succeeds"), Result.bSuccess);
+    if (Result.bSuccess && Result.Data.IsValid())
+    {
+        TestTrue(TEXT("changed is true"), Result.Data->GetBoolField(TEXT("changed")));
+        TestTrue(TEXT("scene_data_removed is true"), Result.Data->GetBoolField(TEXT("scene_data_removed")));
+        TestEqual(TEXT("after.umg_binding_count is 0"),
+            Result.Data->GetObjectField(TEXT("after"))->GetIntegerField(TEXT("umg_binding_count")), 0);
+        TestEqual(TEXT("after.movie_scene_binding_count is 0"),
+            Result.Data->GetObjectField(TEXT("after"))->GetIntegerField(TEXT("movie_scene_binding_count")), 0);
+        TestEqual(TEXT("after.track_count is 0"),
+            Result.Data->GetObjectField(TEXT("after"))->GetIntegerField(TEXT("track_count")), 0);
+        TestNull(TEXT("Possessable removed from MovieScene"), MS->FindPossessable(DanglingGuid));
+        TestEqual(TEXT("AnimationBindings array is empty"), Anim->AnimationBindings.Num(), 0);
+    }
+
+    return true;
+}
+
 
