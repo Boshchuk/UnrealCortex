@@ -87,4 +87,24 @@ namespace CortexUMGAnimationBindingUtils
         bool& bOutDryRun,
         bool& bOutSave,
         FCortexCommandResult& OutError);
+
+    /** Executes guarded removal of the matched binding */
+    FCortexCommandResult ExecuteRemoval(
+        const TSharedPtr<FJsonObject>& Params,
+        const FCortexAnimationBindingPreflight& Preflight,
+        bool bSave);
+
+
+#if WITH_DEV_AUTOMATION_TESTS
+    enum class EFailureInjection
+    {
+        None,
+        FailAfterUMGRemoval,
+        FailRestorationVerification
+    };
+
+    void SetFailureInjection(EFailureInjection Injection);
+    EFailureInjection GetFailureInjection();
+#endif
 }
+

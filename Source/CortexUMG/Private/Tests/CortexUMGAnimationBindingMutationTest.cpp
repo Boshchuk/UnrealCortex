@@ -1,6 +1,10 @@
 #include "Misc/AutomationTest.h"
 #include "Tests/CortexUMGAnimationBindingTestUtils.h"
 #include "Operations/CortexUMGAnimationBindingUtils.h"
+#include "Editor.h"
+#include "Editor/Transactor.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "UObject/GarbageCollection.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
@@ -595,16 +599,6 @@ bool FCortexUMGAnimationBindingInputValidationTest::RunTest(const FString& Param
         }
     }
 
-    // 8. Explicit apply (dry_run=false) returns unsupported in Task 2
-    {
-        TSharedPtr<FJsonObject> P = Fixture.RemovalParams(Read.Data, 0);
-        P->SetBoolField(TEXT("dry_run"), false);
-        FCortexCommandResult R = Fixture.Router.Execute(TEXT("umg.remove_animation_binding"), P);
-        TestFalse(TEXT("dry_run=false returns unsupported in Task 2"), R.bSuccess);
-        TestEqual(TEXT("ErrorCode is ANIMATION_BINDING_UNSUPPORTED"), R.ErrorCode, CortexErrorCodes::AnimationBindingUnsupported);
-        VerifyPreserved();
-    }
-
     return true;
 }
 
@@ -811,7 +805,7 @@ bool FCortexUMGAnimationBindingRootWidgetTest::RunTest(const FString& Parameters
 
     // Create an animation with a root widget binding
     UWidgetAnimation* RootAnim = NewObject<UWidgetAnimation>(WBP, TEXT("RootAnim"), RF_Transactional);
-    UMovieScene* RootMS = NewObject<UMovieScene>(RootAnim, TEXT("RootAnim"));
+    UMovieScene* RootMS = NewObject<UMovieScene>(RootAnim, TEXT("RootAnim"), RF_Transactional);
     RootAnim->MovieScene = RootMS;
 
     FGuid RootGuid = RootMS->AddPossessable(TEXT("RootUserWidget"), UUserWidget::StaticClass());
@@ -877,3 +871,619 @@ bool FCortexUMGAnimationBindingRootWidgetTest::RunTest(const FString& Parameters
 
     return true;
 }
+
+// -----------------------------------------------------------------------------
+// Step 3: Mutation Apply & Relationship / Lifetime Tests (Task 3)
+// -----------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingRemovePreservesRetainedTest,
+    "Cortex.UMG.AnimationBinding.RemovePreservesRetained",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationBindingRemovePreservesRetainedTest::RunTest(const FString& Parameters)
+{
+    FCortexUMGAnimationBindingFixture Fixture(*this);
+    UWidgetBlueprint* WBP = Fixture.Blueprint.Get();
+    WBP->GetPackage()->ClearDirtyFlag();
+    const bool bDirtyBefore = WBP->GetPackage()->IsDirty();
+    TestFalse(TEXT("Package starts clean"), bDirtyBefore);
+
+    const FCortexCommandResult Read = Fixture.Router.Execute(
+        TEXT("umg.list_animation_bindings"), Fixture.InspectParams());
+    if (!Read.bSuccess || !Read.Data.IsValid())
+    {
+        AddError(TEXT("Fixture inspection must succeed before removal test"));
+        return false;
+    }
+
+    UWidgetAnimation* Anim = nullptr;
+    for (UWidgetAnimation* A : WBP->Animations)
+    {
+        if (A && A->GetName() == TEXT("appearance"))
+        {
+            Anim = A;
+            break;
+        }
+    }
+    TestNotNull(TEXT("appearance animation exists"), Anim);
+    if (!Anim || !Anim->MovieScene)
+    {
+        return false;
+    }
+    UMovieScene* MS = Anim->MovieScene;
+
+    // Guid to remove is binding 0 (BodySizeBox, Guid1)
+    const FGuid RemovedGuid = Anim->AnimationBindings[0].AnimationGuid;
+
+    // Capture complete native retained state before apply
+    const TArray<uint8> RetainedBefore = Fixture.CaptureRetainedAuthoredState(RemovedGuid);
+
+    // Apply with dry_run=false
+    TSharedPtr<FJsonObject> Params = Fixture.RemovalParams(Read.Data, 0);
+    Params->SetBoolField(TEXT("dry_run"), false);
+
+    const FCortexCommandResult Applied = Fixture.Router.Execute(
+        TEXT("umg.remove_animation_binding"), Params);
+
+    TestTrue(TEXT("Apply succeeds"), Applied.bSuccess);
+    if (!Applied.bSuccess || !Applied.Data.IsValid())
+    {
+        return false;
+    }
+
+    // JSON response assertions
+    TestFalse(TEXT("dry_run is false"), Applied.Data->GetBoolField(TEXT("dry_run")));
+    TestTrue(TEXT("A mutation occurred"), Applied.Data->GetBoolField(TEXT("changed")));
+    TestFalse(TEXT("Default does not save"), Applied.Data->GetBoolField(TEXT("saved")));
+    TestFalse(TEXT("save_attempted is false"), Applied.Data->GetBoolField(TEXT("save_attempted")));
+    TestTrue(TEXT("scene_data_removed is true for unshared GUID"),
+        Applied.Data->GetBoolField(TEXT("scene_data_removed")));
+
+    const TSharedPtr<FJsonObject> BeforeObj = Applied.Data->GetObjectField(TEXT("before"));
+    TestEqual(TEXT("Before UMG bindings is 3"), BeforeObj->GetIntegerField(TEXT("umg_binding_count")), 3);
+    TestEqual(TEXT("Before MovieScene bindings is 3"), BeforeObj->GetIntegerField(TEXT("movie_scene_binding_count")), 3);
+    TestEqual(TEXT("Before track count is 5"), BeforeObj->GetIntegerField(TEXT("track_count")), 5);
+
+    const TSharedPtr<FJsonObject> AfterObj = Applied.Data->GetObjectField(TEXT("after"));
+    TestEqual(TEXT("Two records remain in after.umg_binding_count"),
+        AfterObj->GetIntegerField(TEXT("umg_binding_count")), 2);
+    TestEqual(TEXT("Two records remain in after.movie_scene_binding_count"),
+        AfterObj->GetIntegerField(TEXT("movie_scene_binding_count")), 2);
+    TestEqual(TEXT("Four tracks remain in after.track_count"),
+        AfterObj->GetIntegerField(TEXT("track_count")), 4);
+
+    // Assert native state: exactly one metadata record is gone
+    TestEqual(TEXT("Native UMG bindings count is 2"), Anim->AnimationBindings.Num(), 2);
+    for (const FWidgetAnimationBinding& B : Anim->AnimationBindings)
+    {
+        TestNotEqual(TEXT("Removed GUID not in remaining UMG bindings"), B.AnimationGuid, RemovedGuid);
+    }
+
+    // Unshared scene binding and possessable are gone
+    TestNull(TEXT("MovieScene possessable removed"), MS->FindPossessable(RemovedGuid));
+    TestNull(TEXT("MovieScene binding removed"), MS->FindBinding(RemovedGuid));
+
+    // Package is marked dirty in memory, not saved
+    TestTrue(TEXT("Package marked dirty after mutation"), WBP->GetPackage()->IsDirty());
+
+    // Compare retained data byte-for-byte
+    const TArray<uint8> RetainedAfter = Fixture.CaptureRetainedAuthoredState(RemovedGuid);
+    TestTrue(TEXT("All retained authored data preserved byte-for-byte"), RetainedBefore == RetainedAfter);
+
+    // Deep native assertions on retained targets, tracks, sections, channels, keys, tangents, defaults
+    // 1. Guid2 (BorderBody): HeightOverride and RenderOpacity
+    const FGuid Guid2 = Anim->AnimationBindings[0].AnimationGuid;
+    TestNotNull(TEXT("BorderBody possessable retained"), MS->FindPossessable(Guid2));
+    const FMovieSceneBinding* Binding2 = MS->FindBinding(Guid2);
+    TestNotNull(TEXT("BorderBody binding retained"), Binding2);
+    if (Binding2)
+    {
+        TestEqual(TEXT("BorderBody has 2 tracks"), Binding2->GetTracks().Num(), 2);
+        UMovieSceneFloatTrack* HeightTrack = Cast<UMovieSceneFloatTrack>(Binding2->GetTracks()[0]);
+        TestNotNull(TEXT("HeightOverride track retained"), HeightTrack);
+        if (HeightTrack && HeightTrack->GetAllSections().Num() > 0)
+        {
+            UMovieSceneFloatSection* HeightSec = Cast<UMovieSceneFloatSection>(HeightTrack->GetAllSections()[0]);
+            TestNotNull(TEXT("HeightOverride section retained"), HeightSec);
+            if (HeightSec)
+            {
+                TestEqual(TEXT("HeightOverride default is 75.0"), HeightSec->GetChannel().GetDefault().Get(0.0f), 75.0f);
+                TestEqual(TEXT("HeightOverride has 2 keys"), HeightSec->GetChannel().GetTimes().Num(), 2);
+            }
+        }
+    }
+
+    // 2. Guid3 (StorylineIcon): Visibility
+    const FGuid Guid3 = Anim->AnimationBindings[1].AnimationGuid;
+    TestNotNull(TEXT("StorylineIcon possessable retained"), MS->FindPossessable(Guid3));
+    const FMovieSceneBinding* Binding3 = MS->FindBinding(Guid3);
+    TestNotNull(TEXT("StorylineIcon binding retained"), Binding3);
+    if (Binding3)
+    {
+        TestEqual(TEXT("StorylineIcon has 1 track"), Binding3->GetTracks().Num(), 1);
+        UMovieSceneBoolTrack* VisTrack = Cast<UMovieSceneBoolTrack>(Binding3->GetTracks()[0]);
+        TestNotNull(TEXT("Visibility track retained"), VisTrack);
+        if (VisTrack && VisTrack->GetAllSections().Num() > 0)
+        {
+            UMovieSceneBoolSection* VisSec = Cast<UMovieSceneBoolSection>(VisTrack->GetAllSections()[0]);
+            TestNotNull(TEXT("Visibility section retained"), VisSec);
+            if (VisSec)
+            {
+                TestEqual(TEXT("Visibility default is true"), VisSec->GetChannel().GetDefault().Get(false), true);
+                TestEqual(TEXT("Visibility has 2 keys"), VisSec->GetChannel().GetTimes().Num(), 2);
+            }
+        }
+    }
+
+    // 3. Playback range, frame rates, master event track
+    const UMovieScene* ConstMS = MS;
+    TestEqual(TEXT("Playback range start is 120"), ConstMS->GetPlaybackRange().GetLowerBoundValue().Value, 120);
+    TestEqual(TEXT("Playback range end is 720"), ConstMS->GetPlaybackRange().GetUpperBoundValue().Value, 720);
+    TestEqual(TEXT("Master event track retained"), ConstMS->GetTracks().Num(), 1);
+
+    // 4. Sibling animation 'idle' retained
+    TestEqual(TEXT("WBP has 2 animations"), WBP->Animations.Num(), 2);
+    TestEqual(TEXT("Second anim is idle"), WBP->Animations[1]->GetName(), TEXT("idle"));
+
+    // 5. All widgets retained in WidgetTree
+    TestNotNull(TEXT("BodySizeBox widget retained in tree"), WBP->WidgetTree->FindWidget(TEXT("BodySizeBox")));
+    TestNotNull(TEXT("BorderBody widget retained in tree"), WBP->WidgetTree->FindWidget(TEXT("BorderBody")));
+    TestNotNull(TEXT("StorylineIcon widget retained in tree"), WBP->WidgetTree->FindWidget(TEXT("StorylineIcon")));
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingSharedGuidPreservationTest,
+    "Cortex.UMG.AnimationBinding.SharedGuidPreservation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationBindingSharedGuidPreservationTest::RunTest(const FString& Parameters)
+{
+    FCortexUMGAnimationBindingFixture Fixture(*this);
+    UWidgetBlueprint* WBP = Fixture.Blueprint.Get();
+    UWidgetAnimation* Anim = nullptr;
+    for (UWidgetAnimation* A : WBP->Animations)
+    {
+        if (A && A->GetName() == TEXT("appearance"))
+        {
+            Anim = A;
+            break;
+        }
+    }
+    TestNotNull(TEXT("appearance animation exists"), Anim);
+    if (!Anim || !Anim->MovieScene || Anim->AnimationBindings.Num() < 2)
+    {
+        return false;
+    }
+    UMovieScene* MS = Anim->MovieScene;
+
+    // Add a second binding sharing Guid2 (BorderBody)
+    const FGuid SharedGuid = Anim->AnimationBindings[1].AnimationGuid;
+    FWidgetAnimationBinding ExtraBinding;
+    ExtraBinding.WidgetName = TEXT("BorderBody");
+    ExtraBinding.SlotWidgetName = TEXT("ExtraSlot");
+    ExtraBinding.AnimationGuid = SharedGuid;
+    ExtraBinding.bIsRootWidget = false;
+    Anim->AnimationBindings.Add(ExtraBinding);
+
+    // Now 4 UMG bindings, 3 MovieScene bindings, Guid2 sharing count = 2
+    const FCortexCommandResult Read = Fixture.Router.Execute(
+        TEXT("umg.list_animation_bindings"), Fixture.InspectParams());
+    TestTrue(TEXT("Inspect with shared GUID succeeds"), Read.bSuccess);
+    if (!Read.bSuccess || !Read.Data.IsValid())
+    {
+        return false;
+    }
+
+    // Remove the extra binding (index 3)
+    TSharedPtr<FJsonObject> Params = Fixture.RemovalParams(Read.Data, 3);
+    Params->SetBoolField(TEXT("dry_run"), false);
+
+    const FCortexCommandResult Applied = Fixture.Router.Execute(
+        TEXT("umg.remove_animation_binding"), Params);
+
+    TestTrue(TEXT("Shared GUID removal succeeds"), Applied.bSuccess);
+    if (!Applied.bSuccess || !Applied.Data.IsValid())
+    {
+        return false;
+    }
+
+    // Response assertions
+    TestTrue(TEXT("changed is true"), Applied.Data->GetBoolField(TEXT("changed")));
+    TestFalse(TEXT("scene_data_removed is false for shared GUID"),
+        Applied.Data->GetBoolField(TEXT("scene_data_removed")));
+
+    const TSharedPtr<FJsonObject> AfterObj = Applied.Data->GetObjectField(TEXT("after"));
+    TestEqual(TEXT("after.umg_binding_count is 3"), AfterObj->GetIntegerField(TEXT("umg_binding_count")), 3);
+    TestEqual(TEXT("after.movie_scene_binding_count is 3 (unchanged)"),
+        AfterObj->GetIntegerField(TEXT("movie_scene_binding_count")), 3);
+    TestEqual(TEXT("after.track_count is 5 (unchanged)"),
+        AfterObj->GetIntegerField(TEXT("track_count")), 5);
+
+    // Native assertions: exactly 1 UMG binding removed, MovieScene possessable and tracks intact
+    TestEqual(TEXT("Native UMG bindings count is 3"), Anim->AnimationBindings.Num(), 3);
+    TestNotNull(TEXT("MovieScene possessable preserved"), MS->FindPossessable(SharedGuid));
+    TestNotNull(TEXT("MovieScene binding preserved"), MS->FindBinding(SharedGuid));
+    const FMovieSceneBinding* MSB = MS->FindBinding(SharedGuid);
+    if (MSB)
+    {
+        TestEqual(TEXT("MovieScene tracks preserved on shared possessable"), MSB->GetTracks().Num(), 2);
+    }
+
+    // Original BorderBody binding still in AnimationBindings
+    bool bFoundOriginalBorderBody = false;
+    for (const FWidgetAnimationBinding& B : Anim->AnimationBindings)
+    {
+        if (B.WidgetName == TEXT("BorderBody") && B.SlotWidgetName == NAME_None && B.AnimationGuid == SharedGuid)
+        {
+            bFoundOriginalBorderBody = true;
+            break;
+        }
+    }
+    TestTrue(TEXT("Original BorderBody binding remains"), bFoundOriginalBorderBody);
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingLastBindingPreservesAnimationTest,
+    "Cortex.UMG.AnimationBinding.LastBindingPreservesAnimation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationBindingLastBindingPreservesAnimationTest::RunTest(const FString& Parameters)
+{
+    FCortexUMGAnimationBindingFixture Fixture(*this);
+    UWidgetBlueprint* WBP = Fixture.Blueprint.Get();
+
+    // Create a standalone animation with exactly 1 binding and 1 master event track
+    UWidgetAnimation* SingleAnim = NewObject<UWidgetAnimation>(WBP, TEXT("single_bind_anim"), RF_Transactional);
+    UMovieScene* SingleMS = NewObject<UMovieScene>(SingleAnim, TEXT("single_bind_anim"), RF_Transactional);
+    SingleAnim->MovieScene = SingleMS;
+    SingleMS->SetPlaybackRange(TRange<FFrameNumber>(FFrameNumber(0), FFrameNumber(24000)));
+
+    USizeBox* BodySizeBox = Cast<USizeBox>(WBP->WidgetTree->FindWidget(TEXT("BodySizeBox")));
+    TestNotNull(TEXT("BodySizeBox exists"), BodySizeBox);
+    FGuid SingleGuid = SingleMS->AddPossessable(TEXT("BodySizeBox"), BodySizeBox->GetClass());
+
+    FWidgetAnimationBinding SingleB;
+    SingleB.WidgetName = TEXT("BodySizeBox");
+    SingleB.SlotWidgetName = NAME_None;
+    SingleB.AnimationGuid = SingleGuid;
+    SingleB.bIsRootWidget = false;
+    SingleAnim->AnimationBindings.Add(SingleB);
+
+    UMovieSceneFloatTrack* Track = SingleMS->AddTrack<UMovieSceneFloatTrack>(SingleGuid);
+    Track->SetPropertyNameAndPath(FName("WidthOverride"), TEXT("WidthOverride"));
+    UMovieSceneFloatSection* Sec = Cast<UMovieSceneFloatSection>(Track->CreateNewSection());
+    Track->AddSection(*Sec);
+    Sec->SetRange(TRange<FFrameNumber>(FFrameNumber(0), FFrameNumber(24000)));
+
+    UMovieSceneEventTrack* EventTrack = SingleMS->AddTrack<UMovieSceneEventTrack>();
+    UMovieSceneSection* EventSec = EventTrack->CreateNewSection();
+    if (EventSec)
+    {
+        EventTrack->AddSection(*EventSec);
+        EventSec->SetRange(TRange<FFrameNumber>(FFrameNumber(0), FFrameNumber(24000)));
+    }
+
+    WBP->Animations.Add(SingleAnim);
+
+    // Inspect
+    TSharedPtr<FJsonObject> InspectParams = MakeShared<FJsonObject>();
+    InspectParams->SetStringField(TEXT("asset_path"), WBP->GetPathName());
+    InspectParams->SetStringField(TEXT("animation_name"), TEXT("single_bind_anim"));
+    FCortexCommandResult Read = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), InspectParams);
+    TestTrue(TEXT("Inspect single_bind_anim succeeds"), Read.bSuccess);
+    if (!Read.bSuccess || !Read.Data.IsValid())
+    {
+        return false;
+    }
+
+    // Remove the only binding
+    TSharedPtr<FJsonObject> Params = Fixture.RemovalParams(Read.Data, 0);
+    Params->SetStringField(TEXT("animation_name"), TEXT("single_bind_anim"));
+    Params->SetBoolField(TEXT("dry_run"), false);
+
+    const FCortexCommandResult Applied = Fixture.Router.Execute(
+        TEXT("umg.remove_animation_binding"), Params);
+
+    TestTrue(TEXT("Remove last binding succeeds"), Applied.bSuccess);
+    if (!Applied.bSuccess || !Applied.Data.IsValid())
+    {
+        return false;
+    }
+
+    TestTrue(TEXT("scene_data_removed is true"), Applied.Data->GetBoolField(TEXT("scene_data_removed")));
+    const TSharedPtr<FJsonObject> AfterObj = Applied.Data->GetObjectField(TEXT("after"));
+    TestEqual(TEXT("after.umg_binding_count is 0"), AfterObj->GetIntegerField(TEXT("umg_binding_count")), 0);
+    TestEqual(TEXT("after.movie_scene_binding_count is 0"), AfterObj->GetIntegerField(TEXT("movie_scene_binding_count")), 0);
+    TestEqual(TEXT("after.track_count is 1 (event track)"), AfterObj->GetIntegerField(TEXT("track_count")), 1);
+
+    // Native assertions: animation object, MovieScene, playback range, and event track remain
+    TestTrue(TEXT("SingleAnim still in WBP->Animations"), WBP->Animations.Contains(SingleAnim));
+    TestNotNull(TEXT("MovieScene still exists"), SingleAnim->MovieScene.Get());
+    const UMovieScene* ConstSingleMS = SingleMS;
+    TestEqual(TEXT("SingleMS has 0 possessables"), ConstSingleMS->GetPossessableCount(), 0);
+    TestEqual(TEXT("SingleMS has 0 bindings"), ConstSingleMS->GetBindings().Num(), 0);
+    TestEqual(TEXT("SingleMS event track preserved"), ConstSingleMS->GetTracks().Num(), 1);
+    TestEqual(TEXT("Playback range preserved"), ConstSingleMS->GetPlaybackRange().GetUpperBoundValue().Value, 24000);
+    TestEqual(TEXT("AnimationBindings is empty"), SingleAnim->AnimationBindings.Num(), 0);
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingSlotAndRootRemovalTest,
+    "Cortex.UMG.AnimationBinding.SlotAndRootRemoval",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationBindingSlotAndRootRemovalTest::RunTest(const FString& Parameters)
+{
+    FCortexUMGAnimationBindingFixture Fixture(*this);
+    UWidgetBlueprint* WBP = Fixture.Blueprint.Get();
+
+    // 1. Test Slot Widget removal
+    {
+        UWidgetAnimation* SlotAnim = NewObject<UWidgetAnimation>(WBP, TEXT("slot_anim"), RF_Transactional);
+        UMovieScene* SlotMS = NewObject<UMovieScene>(SlotAnim, TEXT("slot_anim"), RF_Transactional);
+        SlotAnim->MovieScene = SlotMS;
+        SlotMS->SetPlaybackRange(TRange<FFrameNumber>(FFrameNumber(0), FFrameNumber(12000)));
+
+        FGuid SlotGuid = SlotMS->AddPossessable(TEXT("BodySizeBox.Slot"), UPanelSlot::StaticClass());
+        FWidgetAnimationBinding SlotB;
+        SlotB.WidgetName = TEXT("BodySizeBox");
+        SlotB.SlotWidgetName = TEXT("CanvasSlot");
+        SlotB.AnimationGuid = SlotGuid;
+        SlotB.bIsRootWidget = false;
+        SlotAnim->AnimationBindings.Add(SlotB);
+
+        WBP->Animations.Add(SlotAnim);
+
+        TSharedPtr<FJsonObject> InspectParams = MakeShared<FJsonObject>();
+        InspectParams->SetStringField(TEXT("asset_path"), WBP->GetPathName());
+        InspectParams->SetStringField(TEXT("animation_name"), TEXT("slot_anim"));
+        FCortexCommandResult Read = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), InspectParams);
+        TestTrue(TEXT("Inspect slot_anim succeeds"), Read.bSuccess);
+
+        if (Read.bSuccess && Read.Data.IsValid())
+        {
+            TSharedPtr<FJsonObject> Params = Fixture.RemovalParams(Read.Data, 0);
+            Params->SetStringField(TEXT("animation_name"), TEXT("slot_anim"));
+            Params->SetBoolField(TEXT("dry_run"), false);
+
+            FCortexCommandResult Applied = Fixture.Router.Execute(TEXT("umg.remove_animation_binding"), Params);
+            TestTrue(TEXT("Slot binding removal succeeds"), Applied.bSuccess);
+            if (Applied.bSuccess && Applied.Data.IsValid())
+            {
+                TestTrue(TEXT("changed is true"), Applied.Data->GetBoolField(TEXT("changed")));
+                TestEqual(TEXT("after.umg_binding_count is 0"),
+                    Applied.Data->GetObjectField(TEXT("after"))->GetIntegerField(TEXT("umg_binding_count")), 0);
+                TestNull(TEXT("Slot possessable removed from MovieScene"), SlotMS->FindPossessable(SlotGuid));
+            }
+        }
+    }
+
+    // 2. Test Root Widget removal
+    {
+        UWidgetAnimation* RootAnim = NewObject<UWidgetAnimation>(WBP, TEXT("root_anim_apply"), RF_Transactional);
+        UMovieScene* RootMS = NewObject<UMovieScene>(RootAnim, TEXT("root_anim_apply"), RF_Transactional);
+        RootAnim->MovieScene = RootMS;
+        RootMS->SetPlaybackRange(TRange<FFrameNumber>(FFrameNumber(0), FFrameNumber(12000)));
+
+        FGuid RootGuid = RootMS->AddPossessable(TEXT("RootUserWidget"), UUserWidget::StaticClass());
+        FWidgetAnimationBinding RootB;
+        RootB.WidgetName = NAME_None;
+        RootB.SlotWidgetName = NAME_None;
+        RootB.AnimationGuid = RootGuid;
+        RootB.bIsRootWidget = true;
+        RootAnim->AnimationBindings.Add(RootB);
+
+        WBP->Animations.Add(RootAnim);
+
+        TSharedPtr<FJsonObject> InspectParams = MakeShared<FJsonObject>();
+        InspectParams->SetStringField(TEXT("asset_path"), WBP->GetPathName());
+        InspectParams->SetStringField(TEXT("animation_name"), TEXT("root_anim_apply"));
+        FCortexCommandResult Read = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), InspectParams);
+        TestTrue(TEXT("Inspect root_anim_apply succeeds"), Read.bSuccess);
+
+        if (Read.bSuccess && Read.Data.IsValid())
+        {
+            TSharedPtr<FJsonObject> Params = Fixture.RemovalParams(Read.Data, 0);
+            Params->SetStringField(TEXT("animation_name"), TEXT("root_anim_apply"));
+            Params->SetBoolField(TEXT("dry_run"), false);
+
+            FCortexCommandResult Applied = Fixture.Router.Execute(TEXT("umg.remove_animation_binding"), Params);
+            TestTrue(TEXT("Root binding removal succeeds"), Applied.bSuccess);
+            if (Applied.bSuccess && Applied.Data.IsValid())
+            {
+                TestTrue(TEXT("changed is true"), Applied.Data->GetBoolField(TEXT("changed")));
+                TestEqual(TEXT("after.umg_binding_count is 0"),
+                    Applied.Data->GetObjectField(TEXT("after"))->GetIntegerField(TEXT("umg_binding_count")), 0);
+                TestNull(TEXT("Root possessable removed from MovieScene"), RootMS->FindPossessable(RootGuid));
+            }
+        }
+    }
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingUndoRedoTest,
+    "Cortex.UMG.AnimationBinding.UndoRedo",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationBindingUndoRedoTest::RunTest(const FString& Parameters)
+{
+    if (GEditor == nullptr || GEditor->Trans == nullptr || !GEditor->CanTransact())
+    {
+        AddInfo(TEXT("Editor undo system not available - skipping"));
+        return true;
+    }
+
+    GEditor->ResetTransaction(FText::FromString(TEXT("Cortex UMG Animation Binding Undo Test Setup")));
+
+    FCortexUMGAnimationBindingFixture Fixture(*this);
+    const FCortexCommandResult Read = Fixture.Router.Execute(
+        TEXT("umg.list_animation_bindings"), Fixture.InspectParams());
+    if (!Read.bSuccess || !Read.Data.IsValid())
+    {
+        AddError(TEXT("Fixture inspection must succeed before undo test"));
+        return false;
+    }
+
+    UWidgetBlueprint* WBP = Fixture.Blueprint.Get();
+    UWidgetAnimation* Anim = nullptr;
+    for (UWidgetAnimation* A : WBP->Animations)
+    {
+        if (A && A->GetName() == TEXT("appearance"))
+        {
+            Anim = A;
+            break;
+        }
+    }
+    TestNotNull(TEXT("appearance animation exists"), Anim);
+    if (!Anim || !Anim->MovieScene)
+    {
+        return false;
+    }
+    UMovieScene* MS = Anim->MovieScene;
+
+    const FGuid GuidToRemove = Anim->AnimationBindings[0].AnimationGuid;
+
+    // Capture complete authored state before removal
+    const TArray<uint8> StateBefore = Fixture.CaptureAllAuthoredState();
+
+    // Apply removal of binding 0 (BodySizeBox)
+    TSharedPtr<FJsonObject> Params = Fixture.RemovalParams(Read.Data, 0);
+    Params->SetBoolField(TEXT("dry_run"), false);
+
+    const FCortexCommandResult Applied = Fixture.Router.Execute(
+        TEXT("umg.remove_animation_binding"), Params);
+
+    TestTrue(TEXT("Apply succeeds"), Applied.bSuccess);
+    if (!Applied.bSuccess)
+    {
+        return false;
+    }
+
+    const TArray<uint8> StateAfter = Fixture.CaptureAllAuthoredState();
+    TestTrue(TEXT("Authored state changed after removal"), StateBefore != StateAfter);
+    TestEqual(TEXT("UMG bindings count is 2"), Anim->AnimationBindings.Num(), 2);
+    TestNull(TEXT("Possessable removed"), MS->FindPossessable(GuidToRemove));
+
+    // Perform Undo
+    const bool bUndoSuccess = GEditor->UndoTransaction();
+    TestTrue(TEXT("UndoTransaction succeeds"), bUndoSuccess);
+
+    // GC pass to verify transaction roots the restored objects
+    CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+
+    // Verify restored state
+    const TArray<uint8> StateAfterUndo = Fixture.CaptureAllAuthoredState();
+    TestTrue(TEXT("Full authored state restored after Undo + GC"), StateAfterUndo == StateBefore);
+    TestEqual(TEXT("UMG bindings count restored to 3"), Anim->AnimationBindings.Num(), 3);
+    TestNotNull(TEXT("Possessable restored"), MS->FindPossessable(GuidToRemove));
+    TestNotNull(TEXT("Binding restored"), MS->FindBinding(GuidToRemove));
+
+    // Perform Redo
+    const bool bRedoSuccess = GEditor->RedoTransaction();
+    TestTrue(TEXT("RedoTransaction succeeds"), bRedoSuccess);
+
+    // Verify re-applied state
+    const TArray<uint8> StateAfterRedo = Fixture.CaptureAllAuthoredState();
+    TestTrue(TEXT("Full authored state matches post-removal state after Redo"), StateAfterRedo == StateAfter);
+    TestEqual(TEXT("UMG bindings count is 2 after Redo"), Anim->AnimationBindings.Num(), 2);
+    TestNull(TEXT("Possessable removed after Redo"), MS->FindPossessable(GuidToRemove));
+
+    GEditor->ResetTransaction(FText::FromString(TEXT("Cortex UMG Animation Binding Undo Test Cleanup")));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingFailureRestorationTest,
+    "Cortex.UMG.AnimationBinding.FailureRestoration",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationBindingFailureRestorationTest::RunTest(const FString& Parameters)
+{
+    FCortexUMGAnimationBindingFixture Fixture(*this);
+    UWidgetBlueprint* WBP = Fixture.Blueprint.Get();
+    UWidgetAnimation* Anim = nullptr;
+    for (UWidgetAnimation* A : WBP->Animations)
+    {
+        if (A && A->GetName() == TEXT("appearance"))
+        {
+            Anim = A;
+            break;
+        }
+    }
+    TestNotNull(TEXT("appearance animation exists"), Anim);
+    if (!Anim || !Anim->MovieScene)
+    {
+        return false;
+    }
+    UMovieScene* MS = Anim->MovieScene;
+
+    // Ensure package is initially clean
+    WBP->GetPackage()->ClearDirtyFlag();
+    const bool bInitiallyDirty = WBP->GetPackage()->IsDirty();
+    TestFalse(TEXT("Package starts clean"), bInitiallyDirty);
+
+    const TArray<uint8> StateBefore = Fixture.CaptureAllAuthoredState();
+
+    const FCortexCommandResult Read = Fixture.Router.Execute(
+        TEXT("umg.list_animation_bindings"), Fixture.InspectParams());
+    TestTrue(TEXT("Inspect succeeds"), Read.bSuccess);
+    if (!Read.bSuccess || !Read.Data.IsValid())
+    {
+        return false;
+    }
+
+    // 1. Injected failure after UMG removal
+    CortexUMGAnimationBindingUtils::SetFailureInjection(
+        CortexUMGAnimationBindingUtils::EFailureInjection::FailAfterUMGRemoval);
+
+    TSharedPtr<FJsonObject> Params = Fixture.RemovalParams(Read.Data, 0);
+    Params->SetBoolField(TEXT("dry_run"), false);
+
+    const FCortexCommandResult FailedResult = Fixture.Router.Execute(
+        TEXT("umg.remove_animation_binding"), Params);
+
+    // Verify failure and that error is NOT DirtyEditorState (since restoration succeeded)
+    TestFalse(TEXT("Operation failed as injected"), FailedResult.bSuccess);
+    TestNotEqual(TEXT("Error is not DIRTY_EDITOR_STATE because restoration succeeded"),
+        FailedResult.ErrorCode, CortexErrorCodes::DirtyEditorState);
+
+    // Verify both representations are restored
+    TestEqual(TEXT("AnimationBindings restored to 3"), Anim->AnimationBindings.Num(), 3);
+    const FGuid Guid0 = Anim->AnimationBindings[0].AnimationGuid;
+    TestNotNull(TEXT("MovieScene possessable intact"), MS->FindPossessable(Guid0));
+    TestNotNull(TEXT("MovieScene binding intact"), MS->FindBinding(Guid0));
+
+    // Verify complete authored state is restored
+    const TArray<uint8> StateAfterFail = Fixture.CaptureAllAuthoredState();
+    TestTrue(TEXT("Authored state restored completely"), StateAfterFail == StateBefore);
+
+    // Verify pre-existing dirty state is restored (clean)
+    TestFalse(TEXT("Package dirty state restored to clean"), WBP->GetPackage()->IsDirty());
+
+    // 2. Injected failure with failed restoration verification -> must return DIRTY_EDITOR_STATE
+    CortexUMGAnimationBindingUtils::SetFailureInjection(
+        CortexUMGAnimationBindingUtils::EFailureInjection::FailRestorationVerification);
+
+    const FCortexCommandResult UnverifiedResult = Fixture.Router.Execute(
+        TEXT("umg.remove_animation_binding"), Params);
+
+    TestFalse(TEXT("Unverified restoration operation fails"), UnverifiedResult.bSuccess);
+    TestEqual(TEXT("Unverified restoration returns DIRTY_EDITOR_STATE"),
+        UnverifiedResult.ErrorCode, CortexErrorCodes::DirtyEditorState);
+
+    // Reset failure hook
+    CortexUMGAnimationBindingUtils::SetFailureInjection(
+        CortexUMGAnimationBindingUtils::EFailureInjection::None);
+
+    return true;
+}
+

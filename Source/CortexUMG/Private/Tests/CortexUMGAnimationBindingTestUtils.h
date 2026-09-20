@@ -6,6 +6,7 @@
 #include "CortexCommandRouter.h"
 #include "CortexUMGCommandHandler.h"
 #include "WidgetBlueprint.h"
+#include "Kismet2/KismetEditorUtilities.h"
 #include "Blueprint/WidgetTree.h"
 #include "Blueprint/UserWidget.h"
 #include "Components/CanvasPanel.h"
@@ -293,7 +294,7 @@ struct FCortexUMGAnimationBindingFixture
         Root->AddChild(StorylineIcon);
 
         UWidgetAnimation* Anim = NewObject<UWidgetAnimation>(WBP, TEXT("appearance"), RF_Transactional);
-        UMovieScene* MS = NewObject<UMovieScene>(Anim, TEXT("appearance"));
+        UMovieScene* MS = NewObject<UMovieScene>(Anim, TEXT("appearance"), RF_Transactional);
         Anim->MovieScene = MS;
 
         MS->SetPlaybackRange(TRange<FFrameNumber>(FFrameNumber(120), FFrameNumber(720)));
@@ -387,10 +388,13 @@ struct FCortexUMGAnimationBindingFixture
 
         // Second unrelated animation: idle
         UWidgetAnimation* IdleAnim = NewObject<UWidgetAnimation>(WBP, TEXT("idle"), RF_Transactional);
-        UMovieScene* IdleMS = NewObject<UMovieScene>(IdleAnim, TEXT("idle"));
+        UMovieScene* IdleMS = NewObject<UMovieScene>(IdleAnim, TEXT("idle"), RF_Transactional);
         IdleAnim->MovieScene = IdleMS;
         IdleMS->SetPlaybackRange(TRange<FFrameNumber>(FFrameNumber(0), FFrameNumber(24000)));
         WBP->Animations.Add(IdleAnim);
+
+        FKismetEditorUtilities::CompileBlueprint(WBP);
+        TestPackage->ClearDirtyFlag();
 
         Blueprint = TStrongObjectPtr<UWidgetBlueprint>(WBP);
 

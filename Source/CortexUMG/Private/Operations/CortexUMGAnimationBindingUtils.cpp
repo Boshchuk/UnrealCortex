@@ -10,6 +10,9 @@
 #include "MovieSceneBinding.h"
 #include "MovieSceneTrack.h"
 #include "MovieSceneSection.h"
+#include "ScopedTransaction.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "UObject/SavePackage.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "String/BytesToHex.h"
@@ -842,7 +845,6 @@ namespace CortexUMGAnimationBindingUtils
             }
         }
         OutPreflight.GuidSharingCount = GuidSharing;
-        OutPreflight.bSceneDataRemoved = (GuidSharing <= 1);
 
         // Target/Slot/Possessable existence
         if (MatchedBinding.bIsRootWidget)
@@ -861,6 +863,23 @@ namespace CortexUMGAnimationBindingUtils
         }
         OutPreflight.bPossessableExists = OutPreflight.MovieScene &&
             (OutPreflight.MovieScene->FindPossessable(MatchedBinding.AnimationGuid) != nullptr);
+
+        // Check orphaned tracks without possessable (Section 3.2 & 3.3)
+        if (OutPreflight.MovieScene && !OutPreflight.bPossessableExists)
+        {
+            const FMovieSceneBinding* OrphanedBinding = OutPreflight.MovieScene->FindBinding(MatchedBinding.AnimationGuid);
+            if (OrphanedBinding && OrphanedBinding->GetTracks().Num() > 0)
+            {
+                OutError = FCortexCommandRouter::Error(
+                    CortexErrorCodes::AnimationBindingUnsupported,
+                    TEXT("MovieScene contains orphaned tracks for binding GUID without a possessable"));
+                return false;
+            }
+        }
+
+        const bool bHasSceneData = OutPreflight.bPossessableExists ||
+            (OutPreflight.MovieScene && OutPreflight.MovieScene->FindBinding(MatchedBinding.AnimationGuid) != nullptr);
+        OutPreflight.bSceneDataRemoved = (GuidSharing <= 1 && bHasSceneData);
 
         // Counts before
         OutPreflight.BeforeUMGBindingCount = FoundAnim->AnimationBindings.Num();
@@ -910,4 +929,290 @@ namespace CortexUMGAnimationBindingUtils
 
         return true;
     }
+
+    FCortexCommandResult ExecuteRemoval(
+        const TSharedPtr<FJsonObject>& Params,
+        const FCortexAnimationBindingPreflight& Preflight,
+        bool bSave)
+    {
+        check(IsInGameThread());
+        UWidgetBlueprint* Blueprint = Preflight.Blueprint;
+        UWidgetAnimation* Animation = Preflight.Animation;
+        UMovieScene* MovieScene = Preflight.MovieScene;
+
+        if (!Blueprint || !Animation)
+        {
+            return FCortexCommandRouter::Error(
+                CortexErrorCodes::InvalidOperation,
+                TEXT("Invalid Blueprint or Animation in preflight"));
+        }
+
+        const FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+        const FString AnimName = Params->GetStringField(TEXT("animation_name"));
+
+        // 1. Snapshot state needed for exact restoration
+        const TArray<FWidgetAnimationBinding> SavedBindings = Animation->AnimationBindings;
+        const bool bPackageWasDirty = Blueprint->GetPackage()->IsDirty();
+
+        TOptional<FMovieScenePossessable> SavedPossessable;
+        TOptional<FMovieSceneBinding> SavedBinding;
+        if (Preflight.bSceneDataRemoved && MovieScene)
+        {
+            const FMovieScenePossessable* FoundPossessable = MovieScene->FindPossessable(Preflight.MatchedBinding.AnimationGuid);
+            if (FoundPossessable)
+            {
+                SavedPossessable = *FoundPossessable;
+            }
+            const FMovieSceneBinding* FoundBinding = MovieScene->FindBinding(Preflight.MatchedBinding.AnimationGuid);
+            if (FoundBinding)
+            {
+                SavedBinding = *FoundBinding;
+            }
+        }
+
+        // 2. Open FScopedTransaction
+        #define LOCTEXT_NAMESPACE "CortexUMG"
+        FScopedTransaction Transaction(LOCTEXT("RemoveAnimationBinding", "Remove UMG Animation Binding"));
+        #undef LOCTEXT_NAMESPACE
+
+        // 3. Register with transaction and call Modify()
+        Blueprint->SetFlags(RF_Transactional);
+        Blueprint->Modify();
+
+        Animation->SetFlags(RF_Transactional);
+        Animation->Modify();
+
+        if (MovieScene)
+        {
+            MovieScene->SetFlags(RF_Transactional);
+            MovieScene->Modify();
+        }
+
+        // 4. Remove exact UMG binding record by validated index
+        if (!Animation->AnimationBindings.IsValidIndex(Preflight.MatchedRecordIndex) ||
+            Animation->AnimationBindings[Preflight.MatchedRecordIndex] != Preflight.MatchedBinding)
+        {
+            Transaction.Cancel();
+            return FCortexCommandRouter::Error(
+                CortexErrorCodes::StalePrecondition,
+                TEXT("Matched binding index is no longer valid at mutation time"));
+        }
+
+        Animation->AnimationBindings.RemoveAt(Preflight.MatchedRecordIndex);
+
+        // 5. Test failure hook check
+        bool bFailed = false;
+        FString FailureReason;
+
+        #if WITH_DEV_AUTOMATION_TESTS
+        if (GetFailureInjection() == EFailureInjection::FailAfterUMGRemoval ||
+            GetFailureInjection() == EFailureInjection::FailRestorationVerification)
+        {
+            bFailed = true;
+            FailureReason = TEXT("Injected failure after UMG binding removal");
+        }
+        #endif
+
+        // 6. Remove MovieScene possessable if unshared and not failed
+        if (!bFailed && Preflight.bSceneDataRemoved && MovieScene && Preflight.bPossessableExists)
+        {
+            const bool bRemoved = MovieScene->RemovePossessable(Preflight.MatchedBinding.AnimationGuid);
+            if (!bRemoved)
+            {
+                bFailed = true;
+                FailureReason = TEXT("Failed to remove possessable from MovieScene");
+            }
+        }
+
+        // 7. Handle failure restoration if needed
+        if (bFailed)
+        {
+            // Restore in-memory state
+            Animation->AnimationBindings = SavedBindings;
+            if (Preflight.bSceneDataRemoved && MovieScene)
+            {
+                if (SavedPossessable.IsSet() && SavedBinding.IsSet())
+                {
+                    if (!MovieScene->FindPossessable(Preflight.MatchedBinding.AnimationGuid))
+                    {
+                        MovieScene->AddPossessable(SavedPossessable.GetValue(), SavedBinding.GetValue());
+                    }
+                }
+            }
+            if (!bPackageWasDirty)
+            {
+                Blueprint->GetPackage()->ClearDirtyFlag();
+            }
+
+            // Verify restoration
+            bool bRestorationVerified = (Animation->AnimationBindings == SavedBindings);
+            if (Preflight.bPossessableExists && MovieScene)
+            {
+                bRestorationVerified = bRestorationVerified &&
+                    (MovieScene->FindPossessable(Preflight.MatchedBinding.AnimationGuid) != nullptr);
+            }
+            bRestorationVerified = bRestorationVerified &&
+                (Blueprint->GetPackage()->IsDirty() == bPackageWasDirty);
+
+            #if WITH_DEV_AUTOMATION_TESTS
+            if (GetFailureInjection() == EFailureInjection::FailRestorationVerification)
+            {
+                bRestorationVerified = false;
+            }
+            #endif
+
+            Transaction.Cancel();
+
+            if (!bRestorationVerified)
+            {
+                return FCortexCommandRouter::Error(
+                    CortexErrorCodes::DirtyEditorState,
+                    FString::Printf(TEXT("Animation binding removal failed and in-memory state could not be verified/restored: %s"), *FailureReason));
+            }
+
+            return FCortexCommandRouter::Error(
+                CortexErrorCodes::AnimationBindingUnsupported,
+                FString::Printf(TEXT("Animation binding removal failed: %s"), *FailureReason));
+        }
+
+        // 8. Mark Blueprint modified without compiling
+        FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+        // 9. Save package if requested
+        bool bSaveAttempted = false;
+        bool bSaved = false;
+        TSharedPtr<FJsonValue> SaveErrorVal = MakeShared<FJsonValueNull>();
+
+        if (bSave)
+        {
+            bSaveAttempted = true;
+            UPackage* Package = Blueprint->GetOutermost();
+            FSavePackageArgs SaveArgs;
+            SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+            const FString PackageFileName = FPackageName::LongPackageNameToFilename(
+                Package->GetName(), FPackageName::GetAssetPackageExtension());
+            bSaved = UPackage::SavePackage(Package, Blueprint, *PackageFileName, SaveArgs);
+            if (!bSaved)
+            {
+                SaveErrorVal = MakeShared<FJsonValueString>(TEXT("Failed to save package to disk"));
+            }
+        }
+
+        // 10. Refreshed live fingerprint
+        const FCortexUMGAnimationBindingFingerprint RefreshedFingerprint =
+            ComputeFingerprint(Blueprint, Animation);
+
+        // 11. Build response JSON
+        TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+        Data->SetStringField(TEXT("asset_path"), AssetPath);
+        Data->SetStringField(TEXT("animation_name"), AnimName);
+        Data->SetBoolField(TEXT("dry_run"), false);
+        Data->SetBoolField(TEXT("changed"), true);
+        Data->SetBoolField(TEXT("save_attempted"), bSaveAttempted);
+        Data->SetBoolField(TEXT("saved"), bSaved);
+        Data->SetObjectField(TEXT("fingerprint"), RefreshedFingerprint.ToJson());
+
+        TSharedPtr<FJsonObject> MatchedSel = MakeShared<FJsonObject>();
+        MatchedSel->SetStringField(TEXT("binding_guid"),
+            Preflight.MatchedBinding.AnimationGuid.ToString(EGuidFormats::DigitsWithHyphensInBraces));
+        MatchedSel->SetStringField(TEXT("widget_name"),
+            Preflight.MatchedBinding.bIsRootWidget ? TEXT("") : (Preflight.MatchedBinding.WidgetName == NAME_None ? TEXT("") : Preflight.MatchedBinding.WidgetName.ToString()));
+        MatchedSel->SetStringField(TEXT("slot_widget_name"),
+            (Preflight.MatchedBinding.bIsRootWidget || Preflight.MatchedBinding.SlotWidgetName == NAME_None)
+                ? TEXT("") : Preflight.MatchedBinding.SlotWidgetName.ToString());
+        MatchedSel->SetBoolField(TEXT("is_root_widget"), Preflight.MatchedBinding.bIsRootWidget);
+        Data->SetObjectField(TEXT("matched_selector"), MatchedSel);
+
+        TSharedPtr<FJsonObject> BeforeObj = MakeShared<FJsonObject>();
+        BeforeObj->SetNumberField(TEXT("umg_binding_count"), Preflight.BeforeUMGBindingCount);
+        BeforeObj->SetNumberField(TEXT("movie_scene_binding_count"), Preflight.BeforeMovieSceneBindingCount);
+        BeforeObj->SetNumberField(TEXT("track_count"), Preflight.BeforeTrackCount);
+        Data->SetObjectField(TEXT("before"), BeforeObj);
+
+        // After counts from live state
+        const UMovieScene* ConstMS = MovieScene;
+        int32 LiveAfterTracks = 0;
+        int32 LiveAfterMSBindings = 0;
+        if (ConstMS)
+        {
+            LiveAfterMSBindings = ConstMS->GetBindings().Num();
+            for (const FMovieSceneBinding& MSB : ConstMS->GetBindings())
+            {
+                LiveAfterTracks += MSB.GetTracks().Num();
+            }
+            LiveAfterTracks += ConstMS->GetTracks().Num();
+        }
+
+        TSharedPtr<FJsonObject> AfterObj = MakeShared<FJsonObject>();
+        AfterObj->SetNumberField(TEXT("umg_binding_count"), Animation->AnimationBindings.Num());
+        AfterObj->SetNumberField(TEXT("movie_scene_binding_count"), LiveAfterMSBindings);
+        AfterObj->SetNumberField(TEXT("track_count"), LiveAfterTracks);
+        Data->SetObjectField(TEXT("after"), AfterObj);
+
+        Data->SetBoolField(TEXT("scene_data_removed"), Preflight.bSceneDataRemoved);
+
+        // Remaining bindings from live state
+        TMap<FGuid, int32> RemainingGuidCounts;
+        for (const FWidgetAnimationBinding& B : Animation->AnimationBindings)
+        {
+            RemainingGuidCounts.FindOrAdd(B.AnimationGuid, 0)++;
+        }
+
+        const int32 TotalRemaining = Animation->AnimationBindings.Num();
+        const bool bTruncated = TotalRemaining > 20;
+        const int32 ReturnCount = bTruncated ? 20 : TotalRemaining;
+
+        TArray<TSharedPtr<FJsonValue>> RemBindingsArray;
+        for (int32 i = 0; i < ReturnCount; ++i)
+        {
+            const FWidgetAnimationBinding& B = Animation->AnimationBindings[i];
+            TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+            Entry->SetNumberField(TEXT("index"), i);
+            Entry->SetStringField(TEXT("binding_guid"), B.AnimationGuid.ToString(EGuidFormats::DigitsWithHyphensInBraces));
+            Entry->SetStringField(TEXT("widget_name"),
+                B.bIsRootWidget ? TEXT("") : (B.WidgetName == NAME_None ? TEXT("") : B.WidgetName.ToString()));
+            Entry->SetStringField(TEXT("slot_widget_name"),
+                (B.bIsRootWidget || B.SlotWidgetName == NAME_None) ? TEXT("") : B.SlotWidgetName.ToString());
+            Entry->SetBoolField(TEXT("is_root_widget"), B.bIsRootWidget);
+            Entry->SetNumberField(TEXT("guid_sharing_count"), RemainingGuidCounts.FindRef(B.AnimationGuid));
+
+            int32 TrackCount = 0;
+            if (ConstMS)
+            {
+                const FMovieSceneBinding* MSB = ConstMS->FindBinding(B.AnimationGuid);
+                if (MSB)
+                {
+                    TrackCount = MSB->GetTracks().Num();
+                }
+            }
+            Entry->SetNumberField(TEXT("track_count"), TrackCount);
+            RemBindingsArray.Add(MakeShared<FJsonValueObject>(Entry));
+        }
+
+        Data->SetArrayField(TEXT("remaining_bindings"), RemBindingsArray);
+        Data->SetBoolField(TEXT("_remaining_bindings_truncated"), bTruncated);
+        Data->SetNumberField(TEXT("_remaining_bindings_total"), TotalRemaining);
+        Data->SetField(TEXT("save_error"), SaveErrorVal);
+
+        return FCortexCommandRouter::Success(Data);
+    }
+
+#if WITH_DEV_AUTOMATION_TESTS
+    namespace
+    {
+        EFailureInjection GFailureInjection = EFailureInjection::None;
+    }
+
+    void SetFailureInjection(EFailureInjection Injection)
+    {
+        GFailureInjection = Injection;
+    }
+
+    EFailureInjection GetFailureInjection()
+    {
+        return GFailureInjection;
+    }
+#endif
 }
+
+

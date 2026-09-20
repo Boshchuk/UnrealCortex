@@ -627,7 +627,5 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::RemoveAnimationBinding(
         return FCortexCommandRouter::Success(Data);
     }
 
-    return FCortexCommandRouter::Error(
-        CortexErrorCodes::AnimationBindingUnsupported,
-        TEXT("Apply is not supported in preview-only mode (Task 2)"));
+    return CortexUMGAnimationBindingUtils::ExecuteRemoval(Params, Preflight, bSave);
 }
