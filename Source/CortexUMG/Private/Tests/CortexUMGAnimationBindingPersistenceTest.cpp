@@ -801,24 +801,26 @@ static bool ValidateSeedAssetStrict(UWidgetBlueprint* ExistingBP, FString* OutEr
     return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-    FCortexUMGAnimationBindingCreateIntegrationSeedTest,
-    "Cortex.UMG.AnimationBinding.CreateIntegrationSeed",
-    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FCortexUMGAnimationBindingCreateIntegrationSeedTest::RunTest(const FString& Parameters)
+static bool VerifyOrBootstrapSeedAsset(
+    const FString& PackageName,
+    const FString& AssetName,
+    bool bAllowBootstrap,
+    FString& OutError,
+    bool& bOutDidBootstrap)
 {
-    const FString PackageName = TEXT("/Game/UI/WBP_AnimationBindingFixture");
+    bOutDidBootstrap = false;
+    OutError.Empty();
+
     const FString DiskFilename = FPackageName::LongPackageNameToFilename(
         PackageName, FPackageName::GetAssetPackageExtension());
 
-
     bool bNeedsGeneration = true;
     FString ValidationError = TEXT("File does not exist");
+
     if (IFileManager::Get().FileExists(*DiskFilename))
     {
         UPackage* ExistingPkg = LoadPackage(nullptr, *PackageName, LOAD_None);
-        UWidgetBlueprint* ExistingBP = ExistingPkg ? FindObject<UWidgetBlueprint>(ExistingPkg, TEXT("WBP_AnimationBindingFixture")) : nullptr;
+        UWidgetBlueprint* ExistingBP = ExistingPkg ? FindObject<UWidgetBlueprint>(ExistingPkg, *AssetName) : nullptr;
         if (ValidateSeedAssetStrict(ExistingBP, &ValidationError))
         {
             bNeedsGeneration = false;
@@ -827,16 +829,14 @@ bool FCortexUMGAnimationBindingCreateIntegrationSeedTest::RunTest(const FString&
 
     if (!bNeedsGeneration)
     {
-        TestTrue(TEXT("Disk asset exists and is valid"), true);
         return true;
     }
 
-    const bool bIsExplicitBootstrap = Parameters.Equals(TEXT("Bootstrap"), ESearchCase::IgnoreCase)
-        || FParse::Param(FCommandLine::Get(), TEXT("BootstrapAnimationFixture"))
-        || (FPlatformMisc::GetEnvironmentVariable(TEXT("CORTEX_BOOTSTRAP_FIXTURES")) == TEXT("1"));
-    if (!bIsExplicitBootstrap)
+    if (!bAllowBootstrap)
     {
-        AddError(FString::Printf(TEXT("Canonical integration seed /Game/UI/WBP_AnimationBindingFixture is missing or invalid: %s. Normal test runs are read-only and will not overwrite fixtures. Run with parameter 'Bootstrap' or -BootstrapAnimationFixture to create/update it."), *ValidationError));
+        OutError = FString::Printf(
+            TEXT("Canonical integration seed %s is missing or invalid: %s. Normal test runs are read-only and will not overwrite fixtures. Run with parameter 'Bootstrap' or -BootstrapAnimationFixture to create/update it."),
+            *PackageName, *ValidationError);
         return false;
     }
 
@@ -847,9 +847,9 @@ bool FCortexUMGAnimationBindingCreateIntegrationSeedTest::RunTest(const FString&
     {
         SeedPackage = CreatePackage(*PackageName);
     }
-    TestNotNull(TEXT("Seed package created"), SeedPackage);
     if (!SeedPackage)
     {
+        OutError = FString::Printf(TEXT("Failed to create package: %s"), *PackageName);
         return false;
     }
 
@@ -857,21 +857,53 @@ bool FCortexUMGAnimationBindingCreateIntegrationSeedTest::RunTest(const FString&
     ResetLoaders(SeedPackage);
 
     UWidgetBlueprint* WBP = CortexUMGAnimationBindingTestUtils::CreateAnimationBindingWidgetBlueprint(
-        SeedPackage, TEXT("WBP_AnimationBindingFixture"));
-    TestNotNull(TEXT("Seed WidgetBlueprint created"), WBP);
+        SeedPackage, AssetName);
     if (!WBP)
     {
+        OutError = FString::Printf(TEXT("Failed to create WidgetBlueprint: %s"), *AssetName);
         return false;
     }
 
     FSavePackageArgs SaveArgs;
     SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
     const bool bSaved = UPackage::SavePackage(SeedPackage, WBP, *DiskFilename, SaveArgs);
-    TestTrue(TEXT("Seed package saved to disk"), bSaved);
-    SeedPackage->ClearDirtyFlag();
+    if (!bSaved)
+    {
+        OutError = FString::Printf(TEXT("Failed to save seed package to disk: %s"), *DiskFilename);
+        return false;
+    }
 
-    TestTrue(TEXT("Disk asset file exists"), IFileManager::Get().FileExists(*DiskFilename));
-    return bSaved;
+    SeedPackage->ClearDirtyFlag();
+    bOutDidBootstrap = true;
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingCreateIntegrationSeedTest,
+    "Cortex.UMG.AnimationBinding.CreateIntegrationSeed",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationBindingCreateIntegrationSeedTest::RunTest(const FString& Parameters)
+{
+    const FString PackageName = TEXT("/Game/UI/WBP_AnimationBindingFixture");
+    const FString AssetName = TEXT("WBP_AnimationBindingFixture");
+
+    const bool bIsExplicitBootstrap = Parameters.Equals(TEXT("Bootstrap"), ESearchCase::IgnoreCase)
+        || FParse::Param(FCommandLine::Get(), TEXT("BootstrapAnimationFixture"))
+        || (FPlatformMisc::GetEnvironmentVariable(TEXT("CORTEX_BOOTSTRAP_FIXTURES")) == TEXT("1"));
+
+    FString Error;
+    bool bDidBootstrap = false;
+    const bool bSuccess = VerifyOrBootstrapSeedAsset(PackageName, AssetName, bIsExplicitBootstrap, Error, bDidBootstrap);
+
+    if (!bSuccess)
+    {
+        AddError(Error);
+        return false;
+    }
+
+    TestTrue(TEXT("Seed asset verification/bootstrap succeeded"), bSuccess);
+    return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -883,8 +915,10 @@ bool FCortexUMGAnimationBindingSeedReadOnlyRegressionTest::RunTest(const FString
 {
     // Regression test for UC-8: Verify that normal-mode verification against a mismatching
     // seed is strictly read-only: it detects the mismatch, reports failure, does NOT clear
-    // or set dirty flags, and does NOT overwrite or touch the disk file.
+    // or set dirty flags (tested on both clean and already-dirty fixtures), and does NOT
+    // overwrite or touch the disk file.
     const FString TestPkgName = TEXT("/Game/Temp/CortexTest_MismatchSeed");
+    const FString AssetName = TEXT("CortexTest_MismatchSeed");
     const FString TestFilename = FPackageName::LongPackageNameToFilename(
         TestPkgName, FPackageName::GetAssetPackageExtension());
 
@@ -899,7 +933,7 @@ bool FCortexUMGAnimationBindingSeedReadOnlyRegressionTest::RunTest(const FString
     }
 
     UWidgetBlueprint* MismatchWBP = NewObject<UWidgetBlueprint>(
-        TestPkg, TEXT("CortexTest_MismatchSeed"), RF_Public | RF_Standalone | RF_Transactional);
+        TestPkg, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
     MismatchWBP->ParentClass = UUserWidget::StaticClass();
     MismatchWBP->WidgetTree = NewObject<UWidgetTree>(MismatchWBP, TEXT("WidgetTree"));
     // Add appearance anim with 0 bindings (deliberate mismatch)
@@ -918,23 +952,45 @@ bool FCortexUMGAnimationBindingSeedReadOnlyRegressionTest::RunTest(const FString
     const int64 OrigFileSize = IFileManager::Get().FileSize(*TestFilename);
     TestTrue(TEXT("Original file exists"), OrigFileSize > 0);
 
-    // 2. Invoke strict validation against the mismatching asset
-    FString ValidationError;
-    const bool bValid = ValidateSeedAssetStrict(MismatchWBP, &ValidationError);
-    TestFalse(TEXT("Strict validation correctly detects mismatch"), bValid);
-    TestFalse(TEXT("Validation error is populated"), ValidationError.IsEmpty());
+    // 2. Case A: Clean fixture verification
+    // Verify that normal-mode verification fails and leaves package CLEAN and disk UNTOUCHED.
+    TestFalse(TEXT("Package starts clean in Case A"), TestPkg->IsDirty());
+    FString ErrorCaseA;
+    bool bDidBootstrapCaseA = false;
+    const bool bResultCaseA = VerifyOrBootstrapSeedAsset(
+        TestPkgName, AssetName, /*bAllowBootstrap=*/false, ErrorCaseA, bDidBootstrapCaseA);
 
-    // 3. Verify normal-mode verification did NOT mark package dirty
-    TestFalse(TEXT("Package was not marked dirty during read-only verification"), TestPkg->IsDirty());
+    TestFalse(TEXT("Normal mode verification correctly detects mismatch (Case A)"), bResultCaseA);
+    TestFalse(TEXT("Did not bootstrap in normal mode (Case A)"), bDidBootstrapCaseA);
+    TestFalse(TEXT("Validation error is populated (Case A)"), ErrorCaseA.IsEmpty());
+    TestFalse(TEXT("Package remains clean in Case A"), TestPkg->IsDirty());
+    TestEqual(TEXT("Disk file timestamp unchanged (Case A)"),
+        IFileManager::Get().GetTimeStamp(*TestFilename), OrigTimestamp);
+    TestEqual(TEXT("Disk file size unchanged (Case A)"),
+        IFileManager::Get().FileSize(*TestFilename), OrigFileSize);
 
-    // 4. Verify disk file was NOT overwritten or modified
-    const FDateTime AfterTimestamp = IFileManager::Get().GetTimeStamp(*TestFilename);
-    const int64 AfterFileSize = IFileManager::Get().FileSize(*TestFilename);
-    TestEqual(TEXT("Disk file timestamp unchanged"), AfterTimestamp, OrigTimestamp);
-    TestEqual(TEXT("Disk file size unchanged"), AfterFileSize, OrigFileSize);
+    // 3. Case B: Already-dirty fixture verification
+    // Verify that normal-mode verification fails and leaves package DIRTY and disk UNTOUCHED.
+    TestPkg->SetDirtyFlag(true);
+    TestTrue(TEXT("Package starts dirty in Case B"), TestPkg->IsDirty());
+    FString ErrorCaseB;
+    bool bDidBootstrapCaseB = false;
+    const bool bResultCaseB = VerifyOrBootstrapSeedAsset(
+        TestPkgName, AssetName, /*bAllowBootstrap=*/false, ErrorCaseB, bDidBootstrapCaseB);
 
-    // 5. Cleanup test file
+    TestFalse(TEXT("Normal mode verification correctly detects mismatch (Case B)"), bResultCaseB);
+    TestFalse(TEXT("Did not bootstrap in normal mode (Case B)"), bDidBootstrapCaseB);
+    TestFalse(TEXT("Validation error is populated (Case B)"), ErrorCaseB.IsEmpty());
+    TestTrue(TEXT("Package remains dirty in Case B (dirty flag not cleared)"), TestPkg->IsDirty());
+    TestEqual(TEXT("Disk file timestamp unchanged (Case B)"),
+        IFileManager::Get().GetTimeStamp(*TestFilename), OrigTimestamp);
+    TestEqual(TEXT("Disk file size unchanged (Case B)"),
+        IFileManager::Get().FileSize(*TestFilename), OrigFileSize);
+
+    // 4. Cleanup test file
+    ResetLoaders(TestPkg);
     IFileManager::Get().Delete(*TestFilename);
+    TestPkg->ClearDirtyFlag();
     TestPkg->MarkAsGarbage();
     return true;
 }
@@ -1150,6 +1206,205 @@ bool FCortexUMGAnimationBindingPlaybackEvaluationTest::RunTest(const FString& Pa
     TestNotEqual(TEXT("Negative control: corrupted bIsEnabled key fails baseline comparison"),
         EvalBool(IsEnabledChannel, 120), true);
     IsEnabledChannel->GetData().GetValues()[0] = OrigEnabledVal;
+
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+// Step 8: Real Runtime Playback Acceptance Test (UC-6)
+// -----------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingRuntimePlaybackAcceptanceTest,
+    "Cortex.UMG.AnimationBinding.RuntimePlaybackAcceptance",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationBindingRuntimePlaybackAcceptanceTest::RunTest(const FString& Parameters)
+{
+    FCortexUMGAnimationBindingPersistenceFixture Fixture(*this);
+    if (!Fixture.IsValid())
+    {
+        return false;
+    }
+
+    UWidgetBlueprint* WBP = Fixture.Blueprint.Get();
+    TestNotNull(TEXT("WidgetBlueprint exists"), WBP);
+    if (!WBP || !WBP->GeneratedClass)
+    {
+        return false;
+    }
+
+    UWidgetAnimation* Anim = nullptr;
+    for (UWidgetAnimation* A : WBP->Animations)
+    {
+        if (A && A->GetName() == TEXT("appearance"))
+        {
+            Anim = A;
+            break;
+        }
+    }
+    TestNotNull(TEXT("Found appearance animation"), Anim);
+    if (!Anim || !Anim->MovieScene)
+    {
+        return false;
+    }
+
+    struct FCortexUserWidgetTickAccessor : public UUserWidget
+    {
+        static void TickAnimation(UUserWidget* InWidget, float InDeltaTime)
+        {
+            if (InWidget)
+            {
+                static_cast<FCortexUserWidgetTickAccessor*>(InWidget)->TickActionsAndAnimation(InDeltaTime);
+                InWidget->FlushAnimations();
+            }
+        }
+    };
+
+    // Instantiate UUserWidget
+    UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+    const TSubclassOf<UUserWidget> WidgetClass = Cast<UClass>(WBP->GeneratedClass.Get());
+    UUserWidget* Widget = World
+        ? CreateWidget<UUserWidget>(World, WidgetClass)
+        : CreateWidget<UUserWidget>(WBP->WidgetTree.Get(), WidgetClass);
+    TestNotNull(TEXT("Live UUserWidget instance created"), Widget);
+    if (!Widget)
+    {
+        return false;
+    }
+
+    USizeBox* BodySizeBox = Cast<USizeBox>(Widget->GetWidgetFromName(TEXT("BodySizeBox")));
+    UBorder* BorderBody = Cast<UBorder>(Widget->GetWidgetFromName(TEXT("BorderBody")));
+    UImage* StorylineIcon = Cast<UImage>(Widget->GetWidgetFromName(TEXT("StorylineIcon")));
+    TestNotNull(TEXT("BodySizeBox live component exists"), BodySizeBox);
+    TestNotNull(TEXT("BorderBody live component exists"), BorderBody);
+    TestNotNull(TEXT("StorylineIcon live component exists"), StorylineIcon);
+    if (!BodySizeBox || !BorderBody || !StorylineIcon)
+    {
+        return false;
+    }
+
+    FBoolProperty* EventFiredProp = CastField<FBoolProperty>(
+        Widget->GetClass()->FindPropertyByName(TEXT("bAuthoredEventFired")));
+    auto WasEventFired = [&]() -> bool
+    {
+        return EventFiredProp ? EventFiredProp->GetPropertyValue_InContainer(Widget) : false;
+    };
+
+    // 1. Play animation forward from start
+    const float StartTime = Anim->GetStartTime();
+    Widget->PlayAnimation(Anim, StartTime, 1, EUMGSequencePlayMode::Forward, 1.0f);
+    FCortexUserWidgetTickAccessor::TickAnimation(Widget, 0.0f);
+
+    // Frame 120 (start key)
+    TestEqual(TEXT("Live Frame 120: WidthOverride == 100.0"), BodySizeBox->GetWidthOverride(), 100.0f);
+    TestEqual(TEXT("Live Frame 120: HeightOverride == 150.0"), BodySizeBox->GetHeightOverride(), 150.0f);
+    TestEqual(TEXT("Live Frame 120: RenderOpacity == 0.0"), BorderBody->GetRenderOpacity(), 0.0f);
+    TestEqual(TEXT("Live Frame 120: bIsEnabled == true"), StorylineIcon->GetIsEnabled(), true);
+    TestFalse(TEXT("Live Frame 120: Event not yet fired"), WasEventFired());
+
+    // Frame 180 (intervening sample between 120 and 240)
+    FCortexUserWidgetTickAccessor::TickAnimation(Widget, 0.0025f);
+    TestTrue(TEXT("Live Frame 180: WidthOverride within cubic tolerance of 150.0"),
+        FMath::Abs(BodySizeBox->GetWidthOverride() - 150.0f) <= 25.0f);
+    TestEqual(TEXT("Live Frame 180: HeightOverride == 158.59375"), BodySizeBox->GetHeightOverride(), 158.59375f);
+    TestEqual(TEXT("Live Frame 180: RenderOpacity == 0.5"), BorderBody->GetRenderOpacity(), 0.5f);
+    TestEqual(TEXT("Live Frame 180: bIsEnabled == true"), StorylineIcon->GetIsEnabled(), true);
+    TestFalse(TEXT("Live Frame 180: Event not yet fired"), WasEventFired());
+
+    // Frame 240 (second key)
+    FCortexUserWidgetTickAccessor::TickAnimation(Widget, 0.0025f);
+    TestEqual(TEXT("Live Frame 240: WidthOverride == 200.0"), BodySizeBox->GetWidthOverride(), 200.0f);
+    TestEqual(TEXT("Live Frame 240: HeightOverride == 181.25"), BodySizeBox->GetHeightOverride(), 181.25f);
+    TestEqual(TEXT("Live Frame 240: RenderOpacity == 1.0"), BorderBody->GetRenderOpacity(), 1.0f);
+    TestEqual(TEXT("Live Frame 240: bIsEnabled == false"), StorylineIcon->GetIsEnabled(), false);
+    TestFalse(TEXT("Live Frame 240: Event not yet fired"), WasEventFired());
+
+    // Frame 360 (authored event callback fires)
+    FCortexUserWidgetTickAccessor::TickAnimation(Widget, 0.0050f);
+    TestTrue(TEXT("Live Frame 360: Authored event callback fired"), WasEventFired());
+
+    // Frame 420 (intervening sample between 240 and 600)
+    FCortexUserWidgetTickAccessor::TickAnimation(Widget, 0.0025f);
+    TestEqual(TEXT("Live Frame 420: WidthOverride == 250.0"), BodySizeBox->GetWidthOverride(), 250.0f);
+    TestEqual(TEXT("Live Frame 420: HeightOverride == 286.71875"), BodySizeBox->GetHeightOverride(), 286.71875f);
+    TestEqual(TEXT("Live Frame 420: RenderOpacity == 1.0"), BorderBody->GetRenderOpacity(), 1.0f);
+    TestEqual(TEXT("Live Frame 420: bIsEnabled == false"), StorylineIcon->GetIsEnabled(), false);
+
+    // Frame 600 (third key)
+    FCortexUserWidgetTickAccessor::TickAnimation(Widget, 0.0075f);
+    TestEqual(TEXT("Live Frame 600: WidthOverride == 300.0"), BodySizeBox->GetWidthOverride(), 300.0f);
+    TestEqual(TEXT("Live Frame 600: HeightOverride == 350.0"), BodySizeBox->GetHeightOverride(), 350.0f);
+    TestEqual(TEXT("Live Frame 600: RenderOpacity == 1.0"), BorderBody->GetRenderOpacity(), 1.0f);
+    TestEqual(TEXT("Live Frame 600: bIsEnabled == false"), StorylineIcon->GetIsEnabled(), false);
+
+    // 2. Remove binding 2 (StorylineIcon), recompile, re-instantiate, verify retained properties evaluate identically
+    const FCortexCommandResult Read = Fixture.Router.Execute(
+        TEXT("umg.list_animation_bindings"), Fixture.InspectParams());
+    TestTrue(TEXT("Inspect succeeds"), Read.bSuccess);
+    if (!Read.bSuccess || !Read.Data.IsValid())
+    {
+        return false;
+    }
+
+    TSharedPtr<FJsonObject> RemoveParams = Fixture.RemovalParams(Read.Data, 2);
+    RemoveParams->SetBoolField(TEXT("dry_run"), false);
+    RemoveParams->SetBoolField(TEXT("save"), false);
+
+    const FCortexCommandResult RemoveResult = Fixture.Router.Execute(
+        TEXT("umg.remove_animation_binding"), RemoveParams);
+    TestTrue(TEXT("Removal of StorylineIcon binding succeeds"), RemoveResult.bSuccess);
+
+    FKismetEditorUtilities::CompileBlueprint(WBP);
+
+    UUserWidget* Widget2 = World
+        ? CreateWidget<UUserWidget>(World, WidgetClass)
+        : CreateWidget<UUserWidget>(WBP->WidgetTree.Get(), WidgetClass);
+    TestNotNull(TEXT("Live UUserWidget instance 2 created"), Widget2);
+    if (!Widget2)
+    {
+        return false;
+    }
+
+    USizeBox* BodySizeBox2 = Cast<USizeBox>(Widget2->GetWidgetFromName(TEXT("BodySizeBox")));
+    UBorder* BorderBody2 = Cast<UBorder>(Widget2->GetWidgetFromName(TEXT("BorderBody")));
+    TestNotNull(TEXT("BodySizeBox2 exists"), BodySizeBox2);
+    TestNotNull(TEXT("BorderBody2 exists"), BorderBody2);
+
+    Widget2->PlayAnimation(Anim, StartTime, 1, EUMGSequencePlayMode::Forward, 1.0f);
+    FCortexUserWidgetTickAccessor::TickAnimation(Widget2, 0.0f);
+
+    TestEqual(TEXT("Post-removal Live Frame 120: WidthOverride == 100.0"), BodySizeBox2->GetWidthOverride(), 100.0f);
+    TestEqual(TEXT("Post-removal Live Frame 120: HeightOverride == 150.0"), BodySizeBox2->GetHeightOverride(), 150.0f);
+    TestEqual(TEXT("Post-removal Live Frame 120: RenderOpacity == 0.0"), BorderBody2->GetRenderOpacity(), 0.0f);
+
+    FCortexUserWidgetTickAccessor::TickAnimation(Widget2, 0.0025f);
+    TestEqual(TEXT("Post-removal Live Frame 180: HeightOverride == 158.59375"), BodySizeBox2->GetHeightOverride(), 158.59375f);
+    TestEqual(TEXT("Post-removal Live Frame 180: RenderOpacity == 0.5"), BorderBody2->GetRenderOpacity(), 0.5f);
+
+    FCortexUserWidgetTickAccessor::TickAnimation(Widget2, 0.0025f);
+    TestEqual(TEXT("Post-removal Live Frame 240: WidthOverride == 200.0"), BodySizeBox2->GetWidthOverride(), 200.0f);
+    TestEqual(TEXT("Post-removal Live Frame 240: RenderOpacity == 1.0"), BorderBody2->GetRenderOpacity(), 1.0f);
+
+    FCortexUserWidgetTickAccessor::TickAnimation(Widget2, 0.0150f);
+    TestEqual(TEXT("Post-removal Live Frame 600: WidthOverride == 300.0"), BodySizeBox2->GetWidthOverride(), 300.0f);
+    TestEqual(TEXT("Post-removal Live Frame 600: HeightOverride == 350.0"), BodySizeBox2->GetHeightOverride(), 350.0f);
+
+    // 3. Negative controls (UC-6):
+    // a. Disabled playback: widget instantiated without PlayAnimation does not change properties
+    UUserWidget* UnplayedWidget = World
+        ? CreateWidget<UUserWidget>(World, WidgetClass)
+        : CreateWidget<UUserWidget>(WBP->WidgetTree.Get(), WidgetClass);
+    if (UnplayedWidget)
+    {
+        FCortexUserWidgetTickAccessor::TickAnimation(UnplayedWidget, 0.05f);
+        USizeBox* UnplayedBox = Cast<USizeBox>(UnplayedWidget->GetWidgetFromName(TEXT("BodySizeBox")));
+        if (UnplayedBox)
+        {
+            TestNotEqual(TEXT("Negative control: unplayed widget WidthOverride does not animate to 300.0"),
+                UnplayedBox->GetWidthOverride(), 300.0f);
+        }
+    }
 
     return true;
 }

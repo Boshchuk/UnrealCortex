@@ -32,9 +32,12 @@
 #include "Sections/MovieSceneObjectPropertySection.h"
 #include "Sections/MovieSceneColorSection.h"
 #include "Animation/MovieSceneMarginSection.h"
+#include "Generators/MovieSceneEasingCurves.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/Widget.h"
 #include "Components/PanelSlot.h"
+#include "K2Node_CustomEvent.h"
+#include "K2Node_Event.h"
 
 namespace
 {
@@ -235,6 +238,45 @@ namespace CortexUMGAnimationBindingUtils
         Ar << bActive;
         Ar << bLocked;
 
+        // Section pre/post roll frames (UC-1)
+        int32 PreRollFrames = Section->GetPreRollFrames();
+        int32 PostRollFrames = Section->GetPostRollFrames();
+        Ar << PreRollFrames;
+        Ar << PostRollFrames;
+
+        // Section blend type (UC-1)
+        bool bHasBlendType = Section->GetBlendType().IsValid();
+        uint8 BlendTypeValue = bHasBlendType ? (uint8)Section->GetBlendType().BlendType : (uint8)0;
+        Ar << bHasBlendType;
+        Ar << BlendTypeValue;
+
+        // Section easing durations and flags (UC-1)
+        int32 AutoEaseIn = Section->Easing.AutoEaseInDuration;
+        int32 AutoEaseOut = Section->Easing.AutoEaseOutDuration;
+        bool bManualEaseIn = Section->Easing.bManualEaseIn;
+        int32 ManualEaseIn = Section->Easing.ManualEaseInDuration;
+        bool bManualEaseOut = Section->Easing.bManualEaseOut;
+        int32 ManualEaseOut = Section->Easing.ManualEaseOutDuration;
+        Ar << AutoEaseIn;
+        Ar << AutoEaseOut;
+        Ar << bManualEaseIn;
+        Ar << ManualEaseIn;
+        Ar << bManualEaseOut;
+        Ar << ManualEaseOut;
+
+        uint8 EaseInType = 0;
+        if (UMovieSceneBuiltInEasingFunction* InFunc = Cast<UMovieSceneBuiltInEasingFunction>(Section->Easing.EaseIn.GetObject()))
+        {
+            EaseInType = static_cast<uint8>(InFunc->Type);
+        }
+        uint8 EaseOutType = 0;
+        if (UMovieSceneBuiltInEasingFunction* OutFunc = Cast<UMovieSceneBuiltInEasingFunction>(Section->Easing.EaseOut.GetObject()))
+        {
+            EaseOutType = static_cast<uint8>(OutFunc->Type);
+        }
+        Ar << EaseInType;
+        Ar << EaseOutType;
+
         if (UMovieScene2DTransformSection* TransSec = Cast<UMovieScene2DTransformSection>(Section))
         {
             uint32 MaskVal = (uint32)TransSec->GetMask().GetChannels();
@@ -301,6 +343,15 @@ namespace CortexUMGAnimationBindingUtils
                     float DefVal = Def.Get(0.0f);
                     Ar << bHasDef;
                     Ar << DefVal;
+                    uint8 PreExtrap = (uint8)FloatChan->PreInfinityExtrap.GetValue();
+                    uint8 PostExtrap = (uint8)FloatChan->PostInfinityExtrap.GetValue();
+                    FFrameRate TickRes = FloatChan->GetTickResolution();
+                    int32 TickNum = TickRes.Numerator;
+                    int32 TickDen = TickRes.Denominator;
+                    Ar << PreExtrap;
+                    Ar << PostExtrap;
+                    Ar << TickNum;
+                    Ar << TickDen;
                 }
                 else if (TypeName == FMovieSceneBoolChannel::StaticStruct()->GetFName())
                 {
@@ -321,6 +372,10 @@ namespace CortexUMGAnimationBindingUtils
                     bool DefVal = Def.Get(false);
                     Ar << bHasDef;
                     Ar << DefVal;
+                    uint8 PreExtrap = (uint8)BoolChan->PreInfinityExtrap.GetValue();
+                    uint8 PostExtrap = (uint8)BoolChan->PostInfinityExtrap.GetValue();
+                    Ar << PreExtrap;
+                    Ar << PostExtrap;
                 }
                 else if (TypeName == FMovieSceneIntegerChannel::StaticStruct()->GetFName())
                 {
@@ -341,6 +396,12 @@ namespace CortexUMGAnimationBindingUtils
                     int32 DefVal = Def.Get(0);
                     Ar << bHasDef;
                     Ar << DefVal;
+                    uint8 PreExtrap = (uint8)IntChan->PreInfinityExtrap.GetValue();
+                    uint8 PostExtrap = (uint8)IntChan->PostInfinityExtrap.GetValue();
+                    bool bInterpLinear = IntChan->bInterpolateLinearKeys;
+                    Ar << PreExtrap;
+                    Ar << PostExtrap;
+                    Ar << bInterpLinear;
                 }
                 else if (TypeName == FMovieSceneByteChannel::StaticStruct()->GetFName())
                 {
@@ -361,6 +422,13 @@ namespace CortexUMGAnimationBindingUtils
                     uint8 DefVal = Def.Get(0);
                     Ar << bHasDef;
                     Ar << DefVal;
+                    uint8 PreExtrap = (uint8)ByteChan->PreInfinityExtrap.GetValue();
+                    uint8 PostExtrap = (uint8)ByteChan->PostInfinityExtrap.GetValue();
+                    UEnum* EnumPtr = ByteChan->GetEnum();
+                    FString EnumPath = EnumPtr ? EnumPtr->GetPathName() : FString();
+                    Ar << PreExtrap;
+                    Ar << PostExtrap;
+                    Ar << EnumPath;
                 }
                 else if (TypeName == FMovieSceneEventChannel::StaticStruct()->GetFName())
                 {
@@ -372,9 +440,28 @@ namespace CortexUMGAnimationBindingUtils
                     for (int32 k = 0; k < KeyNum; ++k)
                     {
                         int32 Frame = Times[k].Value;
-                        FString FuncName = Values[k].Ptrs.Function ? Values[k].Ptrs.Function->GetName() : FString();
+                        FString FuncName;
+#if WITH_EDITORONLY_DATA
+                        if (Values[k].WeakEndpoint.IsValid())
+                        {
+                            if (UK2Node_CustomEvent* CustomEv = Cast<UK2Node_CustomEvent>(Values[k].WeakEndpoint.Get()))
+                            {
+                                FuncName = CustomEv->CustomFunctionName.ToString();
+                            }
+                            else if (UK2Node_Event* EvNode = Cast<UK2Node_Event>(Values[k].WeakEndpoint.Get()))
+                            {
+                                FuncName = EvNode->EventReference.GetMemberName().ToString();
+                            }
+                        }
+#endif
+                        if (FuncName.IsEmpty() && Values[k].Ptrs.Function)
+                        {
+                            FuncName = Values[k].Ptrs.Function->GetName();
+                        }
+                        FString PropPath = Values[k].Ptrs.BoundObjectProperty.ToString();
                         Ar << Frame;
                         Ar << FuncName;
+                        Ar << PropPath;
                     }
                 }
                 else if (TypeName == FMovieSceneObjectPathChannel::StaticStruct()->GetFName())
@@ -1001,6 +1088,130 @@ namespace CortexUMGAnimationBindingUtils
             return false;
         }
 
+        // Check unsupported channel / section types and custom easing across ALL bindings and master tracks (Section 3.2, UC-1, UC-3)
+        auto IsSectionSupported = [](UMovieSceneSection* Section) -> bool
+        {
+            if (!Section)
+            {
+                return true;
+            }
+            return Section->IsA<UMovieSceneFloatSection>()
+                || Section->IsA<UMovieSceneBoolSection>()
+                || Section->IsA<UMovieScene2DTransformSection>()
+                || Section->IsA<UMovieSceneIntegerSection>()
+                || Section->IsA<UMovieSceneByteSection>()
+                || Section->IsA<UMovieSceneEnumSection>()
+                || Section->IsA<UMovieSceneEventSectionBase>()
+                || Section->IsA<UMovieSceneObjectPropertySection>()
+                || Section->IsA<UMovieSceneMarginSection>()
+                || Section->IsA<UMovieSceneColorSection>();
+        };
+
+        auto AreSectionChannelsSupported = [](UMovieSceneSection* Section) -> bool
+        {
+            if (!Section)
+            {
+                return true;
+            }
+            const FMovieSceneChannelProxy& Proxy = Section->GetChannelProxy();
+            for (const FMovieSceneChannelEntry& Entry : Proxy.GetAllEntries())
+            {
+                const FName TypeName = Entry.GetChannelTypeName();
+                if (TypeName != FMovieSceneFloatChannel::StaticStruct()->GetFName()
+                    && TypeName != FMovieSceneBoolChannel::StaticStruct()->GetFName()
+                    && TypeName != FMovieSceneIntegerChannel::StaticStruct()->GetFName()
+                    && TypeName != FMovieSceneByteChannel::StaticStruct()->GetFName()
+                    && TypeName != FMovieSceneEventChannel::StaticStruct()->GetFName()
+                    && TypeName != FMovieSceneObjectPathChannel::StaticStruct()->GetFName())
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        auto HasUnsupportedSectionState = [](UMovieSceneSection* Section) -> bool
+        {
+            if (!Section)
+            {
+                return false;
+            }
+            // Custom easing objects hold non-deterministic evaluation state that cannot be stably hashed (UC-1)
+            if (UObject* EaseInObj = Section->Easing.EaseIn.GetObject())
+            {
+                UMovieSceneBuiltInEasingFunction* BuiltIn = Cast<UMovieSceneBuiltInEasingFunction>(EaseInObj);
+                if (!BuiltIn || BuiltIn->Type == EMovieSceneBuiltInEasing::Custom)
+                {
+                    return true;
+                }
+            }
+            if (UObject* EaseOutObj = Section->Easing.EaseOut.GetObject())
+            {
+                UMovieSceneBuiltInEasingFunction* BuiltIn = Cast<UMovieSceneBuiltInEasingFunction>(EaseOutObj);
+                if (!BuiltIn || BuiltIn->Type == EMovieSceneBuiltInEasing::Custom)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        if (const UMovieScene* ConstMS = FoundAnim->MovieScene)
+        {
+            for (const FMovieSceneBinding& Binding : ConstMS->GetBindings())
+            {
+                for (UMovieSceneTrack* Track : Binding.GetTracks())
+                {
+                    if (!Track)
+                    {
+                        continue;
+                    }
+                    for (UMovieSceneSection* Section : Track->GetAllSections())
+                    {
+                        if (HasUnsupportedSectionState(Section))
+                        {
+                            OutError = FCortexCommandRouter::Error(
+                                CortexErrorCodes::UnsupportedOperation,
+                                TEXT("Custom easing objects on MovieSceneSection are not supported"));
+                            return false;
+                        }
+                        if (!IsSectionSupported(Section) || !AreSectionChannelsSupported(Section))
+                        {
+                            OutError = FCortexCommandRouter::Error(
+                                CortexErrorCodes::AnimationBindingUnsupported,
+                                TEXT("MovieScene contains unsupported section/channel types"));
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            for (UMovieSceneTrack* Track : ConstMS->GetTracks())
+            {
+                if (!Track)
+                {
+                    continue;
+                }
+                for (UMovieSceneSection* Section : Track->GetAllSections())
+                {
+                    if (HasUnsupportedSectionState(Section))
+                    {
+                        OutError = FCortexCommandRouter::Error(
+                            CortexErrorCodes::UnsupportedOperation,
+                            TEXT("Custom easing objects on MovieSceneSection are not supported"));
+                        return false;
+                    }
+                    if (!IsSectionSupported(Section) || !AreSectionChannelsSupported(Section))
+                    {
+                        OutError = FCortexCommandRouter::Error(
+                            CortexErrorCodes::AnimationBindingUnsupported,
+                            TEXT("Master track contains unsupported section/channel types"));
+                        return false;
+                    }
+                }
+            }
+        }
+
         // Early validation of expected_fingerprint domain_signature before computing heavy digest
         const TSharedPtr<FJsonObject>* EarlyDomainSig = nullptr;
         if (ExpectedFingerprint->TryGetObjectField(TEXT("domain_signature"), EarlyDomainSig) && EarlyDomainSig && EarlyDomainSig->IsValid())
@@ -1146,89 +1357,6 @@ namespace CortexUMGAnimationBindingUtils
             }
         }
 
-        // Check unsupported channel / section types across ALL bindings and master tracks (Section 3.2, UC-1, UC-3)
-        auto IsSectionSupported = [](UMovieSceneSection* Section) -> bool
-        {
-            if (!Section)
-            {
-                return true;
-            }
-            return Section->IsA<UMovieSceneFloatSection>()
-                || Section->IsA<UMovieSceneBoolSection>()
-                || Section->IsA<UMovieScene2DTransformSection>()
-                || Section->IsA<UMovieSceneIntegerSection>()
-                || Section->IsA<UMovieSceneByteSection>()
-                || Section->IsA<UMovieSceneEnumSection>()
-                || Section->IsA<UMovieSceneEventSectionBase>()
-                || Section->IsA<UMovieSceneObjectPropertySection>()
-                || Section->IsA<UMovieSceneMarginSection>()
-                || Section->IsA<UMovieSceneColorSection>();
-        };
-
-        auto AreSectionChannelsSupported = [](UMovieSceneSection* Section) -> bool
-        {
-            if (!Section)
-            {
-                return true;
-            }
-            const FMovieSceneChannelProxy& Proxy = Section->GetChannelProxy();
-            for (const FMovieSceneChannelEntry& Entry : Proxy.GetAllEntries())
-            {
-                const FName TypeName = Entry.GetChannelTypeName();
-                if (TypeName != FMovieSceneFloatChannel::StaticStruct()->GetFName()
-                    && TypeName != FMovieSceneBoolChannel::StaticStruct()->GetFName()
-                    && TypeName != FMovieSceneIntegerChannel::StaticStruct()->GetFName()
-                    && TypeName != FMovieSceneByteChannel::StaticStruct()->GetFName()
-                    && TypeName != FMovieSceneEventChannel::StaticStruct()->GetFName()
-                    && TypeName != FMovieSceneObjectPathChannel::StaticStruct()->GetFName())
-                {
-                    return false;
-                }
-            }
-            return true;
-        };
-
-        if (const UMovieScene* ConstMS = OutPreflight.MovieScene)
-        {
-            for (const FMovieSceneBinding& Binding : ConstMS->GetBindings())
-            {
-                for (UMovieSceneTrack* Track : Binding.GetTracks())
-                {
-                    if (!Track)
-                    {
-                        continue;
-                    }
-                    for (UMovieSceneSection* Section : Track->GetAllSections())
-                    {
-                        if (!IsSectionSupported(Section) || !AreSectionChannelsSupported(Section))
-                        {
-                            OutError = FCortexCommandRouter::Error(
-                                CortexErrorCodes::AnimationBindingUnsupported,
-                                TEXT("MovieScene contains unsupported section/channel types"));
-                            return false;
-                        }
-                    }
-                }
-            }
-
-            for (UMovieSceneTrack* Track : ConstMS->GetTracks())
-            {
-                if (!Track)
-                {
-                    continue;
-                }
-                for (UMovieSceneSection* Section : Track->GetAllSections())
-                {
-                    if (!IsSectionSupported(Section) || !AreSectionChannelsSupported(Section))
-                    {
-                        OutError = FCortexCommandRouter::Error(
-                            CortexErrorCodes::AnimationBindingUnsupported,
-                            TEXT("Master track contains unsupported section/channel types"));
-                        return false;
-                    }
-                }
-            }
-        }
 
         // Check orphaned tracks without possessable (Section 3.2 & 3.3)
         if (OutPreflight.MovieScene && !OutPreflight.bPossessableExists)

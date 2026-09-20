@@ -35,8 +35,11 @@
 #include "K2Node_CallFunction.h"
 #include "K2Node_Event.h"
 #include "K2Node_VariableGet.h"
+#include "K2Node_CustomEvent.h"
+#include "K2Node_VariableSet.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Serialization/MemoryWriter.h"
+#include "Generators/MovieSceneEasingCurves.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
@@ -69,6 +72,45 @@ namespace CortexUMGAnimationBindingTestUtils
         Ar << RowIndex;
         Ar << bActive;
         Ar << bLocked;
+
+        // Section pre/post roll frames
+        int32 PreRollFrames = Section->GetPreRollFrames();
+        int32 PostRollFrames = Section->GetPostRollFrames();
+        Ar << PreRollFrames;
+        Ar << PostRollFrames;
+
+        // Section blend type
+        bool bHasBlendType = Section->GetBlendType().IsValid();
+        uint8 BlendTypeValue = bHasBlendType ? (uint8)Section->GetBlendType().BlendType : (uint8)0;
+        Ar << bHasBlendType;
+        Ar << BlendTypeValue;
+
+        // Section easing durations and flags
+        int32 AutoEaseInDuration = Section->Easing.AutoEaseInDuration;
+        int32 AutoEaseOutDuration = Section->Easing.AutoEaseOutDuration;
+        bool bManualEaseIn = Section->Easing.bManualEaseIn;
+        int32 ManualEaseInDuration = Section->Easing.ManualEaseInDuration;
+        bool bManualEaseOut = Section->Easing.bManualEaseOut;
+        int32 ManualEaseOutDuration = Section->Easing.ManualEaseOutDuration;
+        Ar << AutoEaseInDuration;
+        Ar << AutoEaseOutDuration;
+        Ar << bManualEaseIn;
+        Ar << ManualEaseInDuration;
+        Ar << bManualEaseOut;
+        Ar << ManualEaseOutDuration;
+
+        uint8 EaseInType = 0;
+        if (UMovieSceneBuiltInEasingFunction* InFunc = Cast<UMovieSceneBuiltInEasingFunction>(Section->Easing.EaseIn.GetObject()))
+        {
+            EaseInType = static_cast<uint8>(InFunc->Type);
+        }
+        uint8 EaseOutType = 0;
+        if (UMovieSceneBuiltInEasingFunction* OutFunc = Cast<UMovieSceneBuiltInEasingFunction>(Section->Easing.EaseOut.GetObject()))
+        {
+            EaseOutType = static_cast<uint8>(OutFunc->Type);
+        }
+        Ar << EaseInType;
+        Ar << EaseOutType;
 
         if (UMovieScene2DTransformSection* TransSec = Cast<UMovieScene2DTransformSection>(Section))
         {
@@ -136,6 +178,15 @@ namespace CortexUMGAnimationBindingTestUtils
                     float DefVal = Def.Get(0.0f);
                     Ar << bHasDef;
                     Ar << DefVal;
+                    uint8 PreExtrap = (uint8)FloatChan->PreInfinityExtrap.GetValue();
+                    uint8 PostExtrap = (uint8)FloatChan->PostInfinityExtrap.GetValue();
+                    FFrameRate TickRes = FloatChan->GetTickResolution();
+                    int32 TickNum = TickRes.Numerator;
+                    int32 TickDen = TickRes.Denominator;
+                    Ar << PreExtrap;
+                    Ar << PostExtrap;
+                    Ar << TickNum;
+                    Ar << TickDen;
                 }
                 else if (TypeName == FMovieSceneBoolChannel::StaticStruct()->GetFName())
                 {
@@ -156,6 +207,10 @@ namespace CortexUMGAnimationBindingTestUtils
                     bool DefVal = Def.Get(false);
                     Ar << bHasDef;
                     Ar << DefVal;
+                    uint8 PreExtrap = (uint8)BoolChan->PreInfinityExtrap.GetValue();
+                    uint8 PostExtrap = (uint8)BoolChan->PostInfinityExtrap.GetValue();
+                    Ar << PreExtrap;
+                    Ar << PostExtrap;
                 }
                 else if (TypeName == FMovieSceneIntegerChannel::StaticStruct()->GetFName())
                 {
@@ -176,6 +231,12 @@ namespace CortexUMGAnimationBindingTestUtils
                     int32 DefVal = Def.Get(0);
                     Ar << bHasDef;
                     Ar << DefVal;
+                    uint8 PreExtrap = (uint8)IntChan->PreInfinityExtrap.GetValue();
+                    uint8 PostExtrap = (uint8)IntChan->PostInfinityExtrap.GetValue();
+                    bool bInterpLinear = IntChan->bInterpolateLinearKeys;
+                    Ar << PreExtrap;
+                    Ar << PostExtrap;
+                    Ar << bInterpLinear;
                 }
                 else if (TypeName == FMovieSceneByteChannel::StaticStruct()->GetFName())
                 {
@@ -196,6 +257,13 @@ namespace CortexUMGAnimationBindingTestUtils
                     uint8 DefVal = Def.Get(0);
                     Ar << bHasDef;
                     Ar << DefVal;
+                    uint8 PreExtrap = (uint8)ByteChan->PreInfinityExtrap.GetValue();
+                    uint8 PostExtrap = (uint8)ByteChan->PostInfinityExtrap.GetValue();
+                    UEnum* EnumPtr = ByteChan->GetEnum();
+                    FString EnumPath = EnumPtr ? EnumPtr->GetPathName() : FString();
+                    Ar << PreExtrap;
+                    Ar << PostExtrap;
+                    Ar << EnumPath;
                 }
                 else if (TypeName == FMovieSceneEventChannel::StaticStruct()->GetFName())
                 {
@@ -207,9 +275,28 @@ namespace CortexUMGAnimationBindingTestUtils
                     for (int32 k = 0; k < KeyNum; ++k)
                     {
                         int32 Frame = Times[k].Value;
-                        FString FuncName = Values[k].Ptrs.Function ? Values[k].Ptrs.Function->GetName() : FString();
+                        FString FuncName;
+#if WITH_EDITORONLY_DATA
+                        if (Values[k].WeakEndpoint.IsValid())
+                        {
+                            if (UK2Node_CustomEvent* CustomEv = Cast<UK2Node_CustomEvent>(Values[k].WeakEndpoint.Get()))
+                            {
+                                FuncName = CustomEv->CustomFunctionName.ToString();
+                            }
+                            else if (UK2Node_Event* EvNode = Cast<UK2Node_Event>(Values[k].WeakEndpoint.Get()))
+                            {
+                                FuncName = EvNode->EventReference.GetMemberName().ToString();
+                            }
+                        }
+#endif
+                        if (FuncName.IsEmpty() && Values[k].Ptrs.Function)
+                        {
+                            FuncName = Values[k].Ptrs.Function->GetName();
+                        }
+                        FString PropPath = Values[k].Ptrs.BoundObjectProperty.ToString();
                         Ar << Frame;
                         Ar << FuncName;
+                        Ar << PropPath;
                     }
                 }
                 else if (TypeName == FMovieSceneObjectPathChannel::StaticStruct()->GetFName())
@@ -587,9 +674,6 @@ namespace CortexUMGAnimationBindingTestUtils
         {
             EventTrack->AddSection(*EventSec);
             EventSec->SetRange(TRange<FFrameNumber>(FFrameNumber(120), FFrameNumber(720)));
-            FMovieSceneEvent EventKey;
-            EventKey.Ptrs.Function = UUserWidget::StaticClass()->FindFunctionByName(TEXT("PlayAnimation"));
-            EventSec->EventChannel.GetData().AddKey(FFrameNumber(360), EventKey);
         }
 
         WBP->Animations.Add(Anim);
@@ -605,6 +689,42 @@ namespace CortexUMGAnimationBindingTestUtils
         UEdGraph* EventGraph = FBlueprintEditorUtils::CreateNewGraph(
             WBP, TEXT("EventGraph"), UEdGraph::StaticClass(), UEdGraphSchema_K2::StaticClass());
         FBlueprintEditorUtils::AddUbergraphPage(WBP, EventGraph);
+
+        // Add member variable bAuthoredEventFired (UC-6)
+        FBlueprintEditorUtils::AddMemberVariable(
+            WBP,
+            TEXT("bAuthoredEventFired"),
+            FEdGraphPinType(UEdGraphSchema_K2::PC_Boolean, NAME_None, nullptr, EPinContainerType::None, false, FEdGraphTerminalType()));
+
+        FKismetEditorUtilities::CompileBlueprint(WBP);
+
+        // Add custom event OnAuthoredAnimationEvent that sets bAuthoredEventFired to true (UC-6)
+        UK2Node_CustomEvent* CustomEventNode = NewObject<UK2Node_CustomEvent>(EventGraph);
+        CustomEventNode->CustomFunctionName = TEXT("OnAuthoredAnimationEvent");
+        CustomEventNode->bCallInEditor = true;
+        CustomEventNode->CreateNewGuid();
+        EventGraph->AddNode(CustomEventNode, false, false);
+        CustomEventNode->PostPlacedNewNode();
+        CustomEventNode->AllocateDefaultPins();
+
+        UK2Node_VariableSet* VarSetNode = NewObject<UK2Node_VariableSet>(EventGraph);
+        VarSetNode->CreateNewGuid();
+        VarSetNode->VariableReference.SetSelfMember(TEXT("bAuthoredEventFired"));
+        EventGraph->AddNode(VarSetNode, false, false);
+        VarSetNode->AllocateDefaultPins();
+
+        UEdGraphPin* CustomEventThen = CustomEventNode->FindPin(UEdGraphSchema_K2::PN_Then);
+        UEdGraphPin* VarSetExec = VarSetNode->FindPin(UEdGraphSchema_K2::PN_Execute);
+        if (CustomEventThen && VarSetExec)
+        {
+            CustomEventThen->MakeLinkTo(VarSetExec);
+        }
+
+        UEdGraphPin* VarSetValuePin = VarSetNode->FindPin(TEXT("bAuthoredEventFired"));
+        if (VarSetValuePin)
+        {
+            VarSetValuePin->DefaultValue = TEXT("true");
+        }
 
         UFunction* PlayAnimFunc = UUserWidget::StaticClass()->FindFunctionByName(TEXT("PlayAnimation"));
         if (PlayAnimFunc)
@@ -646,6 +766,24 @@ namespace CortexUMGAnimationBindingTestUtils
         }
 
         FKismetEditorUtilities::CompileBlueprint(WBP);
+
+        // Connect master event track key at frame 360 to OnAuthoredAnimationEvent (UC-6)
+        if (EventSec)
+        {
+            FMovieSceneEvent EventKey;
+            EventKey.WeakEndpoint = CustomEventNode;
+            EventKey.Ptrs.Function = WBP->GeneratedClass ? WBP->GeneratedClass->FindFunctionByName(TEXT("OnAuthoredAnimationEvent")) : nullptr;
+            if (EventKey.Ptrs.Function)
+            {
+                EventKey.Ptrs.Function->SetMetaData(TEXT("CallInEditor"), TEXT("true"));
+            }
+            else
+            {
+                EventKey.Ptrs.Function = UUserWidget::StaticClass()->FindFunctionByName(TEXT("PlayAnimation"));
+            }
+            EventSec->EventChannel.GetData().AddKey(FFrameNumber(360), EventKey);
+        }
+
         return WBP;
     }
 }
@@ -973,6 +1111,185 @@ struct FCortexUMGAnimationBindingFixture
                     Anim->AnimationBindings[BindingIndex].SlotWidgetName = NewSlotName;
                 }
                 return;
+            }
+        }
+    }
+
+    void ChangeRetainedExtrapolation(ERichCurveExtrapolation NewPreExtrap, ERichCurveExtrapolation NewPostExtrap)
+    {
+        if (!Blueprint.IsValid()) return;
+        for (UWidgetAnimation* Anim : Blueprint->Animations)
+        {
+            if (Anim && Anim->GetName() == TEXT("appearance") && Anim->MovieScene)
+            {
+                const UMovieScene* ConstMS = Anim->MovieScene;
+                for (const FMovieSceneBinding& Binding : ConstMS->GetBindings())
+                {
+                    for (UMovieSceneTrack* Track : Binding.GetTracks())
+                    {
+                        if (UMovieSceneFloatTrack* FloatTrack = Cast<UMovieSceneFloatTrack>(Track))
+                        {
+                            for (UMovieSceneSection* Section : FloatTrack->GetAllSections())
+                            {
+                                if (UMovieSceneFloatSection* FloatSec = Cast<UMovieSceneFloatSection>(Section))
+                                {
+                                    FloatSec->GetChannel().PreInfinityExtrap = NewPreExtrap;
+                                    FloatSec->GetChannel().PostInfinityExtrap = NewPostExtrap;
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    void ChangeRetainedTickResolution(FFrameRate NewTickResolution)
+    {
+        if (!Blueprint.IsValid()) return;
+        for (UWidgetAnimation* Anim : Blueprint->Animations)
+        {
+            if (Anim && Anim->GetName() == TEXT("appearance") && Anim->MovieScene)
+            {
+                const UMovieScene* ConstMS = Anim->MovieScene;
+                for (const FMovieSceneBinding& Binding : ConstMS->GetBindings())
+                {
+                    for (UMovieSceneTrack* Track : Binding.GetTracks())
+                    {
+                        if (UMovieSceneFloatTrack* FloatTrack = Cast<UMovieSceneFloatTrack>(Track))
+                        {
+                            for (UMovieSceneSection* Section : FloatTrack->GetAllSections())
+                            {
+                                if (UMovieSceneFloatSection* FloatSec = Cast<UMovieSceneFloatSection>(Section))
+                                {
+                                    FloatSec->GetChannel().SetTickResolution(NewTickResolution);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    void ChangeRetainedSectionRoll(int32 PreRoll, int32 PostRoll)
+    {
+        if (!Blueprint.IsValid()) return;
+        for (UWidgetAnimation* Anim : Blueprint->Animations)
+        {
+            if (Anim && Anim->GetName() == TEXT("appearance") && Anim->MovieScene)
+            {
+                const UMovieScene* ConstMS = Anim->MovieScene;
+                for (const FMovieSceneBinding& Binding : ConstMS->GetBindings())
+                {
+                    for (UMovieSceneTrack* Track : Binding.GetTracks())
+                    {
+                        for (UMovieSceneSection* Section : Track->GetAllSections())
+                        {
+                            if (Section)
+                            {
+                                Section->SetPreRollFrames(PreRoll);
+                                Section->SetPostRollFrames(PostRoll);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    struct FMovieSceneSectionAccessor : public UMovieSceneSection
+    {
+        static void SetSectionBlendType(UMovieSceneSection* Section, EMovieSceneBlendType NewBlendType)
+        {
+            if (Section)
+            {
+                static_cast<FMovieSceneSectionAccessor*>(Section)->BlendType = FOptionalMovieSceneBlendType(NewBlendType);
+            }
+        }
+    };
+
+    void ChangeRetainedSectionBlendType(EMovieSceneBlendType NewBlendType)
+    {
+        if (!Blueprint.IsValid()) return;
+        for (UWidgetAnimation* Anim : Blueprint->Animations)
+        {
+            if (Anim && Anim->GetName() == TEXT("appearance") && Anim->MovieScene)
+            {
+                const UMovieScene* ConstMS = Anim->MovieScene;
+                for (const FMovieSceneBinding& Binding : ConstMS->GetBindings())
+                {
+                    for (UMovieSceneTrack* Track : Binding.GetTracks())
+                    {
+                        for (UMovieSceneSection* Section : Track->GetAllSections())
+                        {
+                            if (Section)
+                            {
+                                FMovieSceneSectionAccessor::SetSectionBlendType(Section, NewBlendType);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    void ChangeRetainedSectionEasing(int32 EaseInDuration, int32 EaseOutDuration)
+    {
+        if (!Blueprint.IsValid()) return;
+        for (UWidgetAnimation* Anim : Blueprint->Animations)
+        {
+            if (Anim && Anim->GetName() == TEXT("appearance") && Anim->MovieScene)
+            {
+                const UMovieScene* ConstMS = Anim->MovieScene;
+                for (const FMovieSceneBinding& Binding : ConstMS->GetBindings())
+                {
+                    for (UMovieSceneTrack* Track : Binding.GetTracks())
+                    {
+                        for (UMovieSceneSection* Section : Track->GetAllSections())
+                        {
+                            if (Section)
+                            {
+                                Section->Easing.AutoEaseInDuration = EaseInDuration;
+                                Section->Easing.AutoEaseOutDuration = EaseOutDuration;
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    void AssignCustomEasingObject()
+    {
+        if (!Blueprint.IsValid()) return;
+        for (UWidgetAnimation* Anim : Blueprint->Animations)
+        {
+            if (Anim && Anim->GetName() == TEXT("appearance") && Anim->MovieScene)
+            {
+                const UMovieScene* ConstMS = Anim->MovieScene;
+                for (const FMovieSceneBinding& Binding : ConstMS->GetBindings())
+                {
+                    for (UMovieSceneTrack* Track : Binding.GetTracks())
+                    {
+                        for (UMovieSceneSection* Section : Track->GetAllSections())
+                        {
+                            if (Section)
+                            {
+                                UMovieSceneBuiltInEasingFunction* CustomEase = NewObject<UMovieSceneBuiltInEasingFunction>(Section);
+                                CustomEase->Type = EMovieSceneBuiltInEasing::Custom;
+                                Section->Easing.EaseIn.SetObject(CustomEase);
+                                Section->Easing.EaseIn.SetInterface(CustomEase);
+                                return;
+                            }
+                        }
+                    }
+                }
             }
         }
     }

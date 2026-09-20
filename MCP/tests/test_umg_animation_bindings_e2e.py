@@ -516,141 +516,30 @@ def test_playback_baseline_measurement(tcp_connection):
 
     # Verify track presence and channel count on the fixture bindings
     binding_by_name = {b["widget_name"]: b for b in bindings}
+    assert "BodySizeBox" in binding_by_name
+    assert "BorderBody" in binding_by_name
+    assert "StorylineIcon" in binding_by_name
+
     assert binding_by_name["BodySizeBox"]["track_count"] == 2
     assert binding_by_name["BorderBody"]["track_count"] == 1
     assert binding_by_name["StorylineIcon"]["track_count"] == 1
 
-    # -----------------------------------------------------------------------------------------
-    # Native curve evaluators reproducing FCortexUMGAnimationBindingFixture channel formulas:
-    # -----------------------------------------------------------------------------------------
-    def eval_width_override(frame: int) -> float:
-        """BodySizeBox WidthOverride: Keys (120, 100.0), (240, 200.0), (600, 300.0). Default: 50.0."""
-        if frame < 120:
-            return 50.0
-        elif frame <= 240:
-            t = (frame - 120) / 120.0
-            m0 = 2.0 * 12.0
-            m1 = 1.5 * 12.0
-            return (2 * t**3 - 3 * t**2 + 1) * 100.0 + (t**3 - 2 * t**2 + t) * m0 + (-2 * t**3 + 3 * t**2) * 200.0 + (t**3 - t**2) * m1
-        elif frame <= 600:
-            return 200.0 + 100.0 * (frame - 240) / 360.0
-        else:
-            return 300.0
+    body_tracks = {t["track_name"]: t for t in binding_by_name["BodySizeBox"].get("tracks", [])}
+    if body_tracks:
+        assert "WidthOverride" in body_tracks
+        assert "HeightOverride" in body_tracks
+        assert body_tracks["WidthOverride"]["track_class"] == "MovieSceneFloatTrack"
+        assert body_tracks["HeightOverride"]["track_class"] == "MovieSceneFloatTrack"
 
-    def eval_height_override(frame: int) -> float:
-        """BodySizeBox HeightOverride: Keys (120, 150.0), (600, 350.0) with default cubic auto tangents. Default: 75.0."""
-        if frame < 120:
-            return 75.0
-        elif frame <= 600:
-            t = (frame - 120) / 480.0
-            return 150.0 + 200.0 * (3 * t**2 - 2 * t**3)
-        else:
-            return 350.0
+    border_tracks = {t["track_name"]: t for t in binding_by_name["BorderBody"].get("tracks", [])}
+    if border_tracks:
+        assert "RenderOpacity" in border_tracks
+        assert border_tracks["RenderOpacity"]["track_class"] == "MovieSceneFloatTrack"
 
-    def eval_render_opacity(frame: int) -> float:
-        """BorderBody RenderOpacity: Keys (120, 0.0), (240, 1.0). Default: 0.0."""
-        if frame < 120:
-            return 0.0
-        elif frame <= 240:
-            return 0.0 + 1.0 * (frame - 120) / 120.0
-        else:
-            return 1.0
-
-    def eval_is_enabled(frame: int) -> bool:
-        """StorylineIcon bIsEnabled: Keys (120, True), (240, False). Default: True."""
-        if frame < 120:
-            return True
-        elif frame < 240:
-            return True
-        else:
-            return False
-
-    expected_evaluations = [
-        # Frame 120 (start key)
-        {
-            "frame": 120,
-            "BodySizeBox.WidthOverride": 100.0,
-            "BodySizeBox.HeightOverride": 150.0,
-            "BorderBody.RenderOpacity": 0.0,
-            "StorylineIcon.bIsEnabled": True,
-        },
-        # Frame 180 (intervening sample between 120 and 240)
-        {
-            "frame": 180,
-            "BodySizeBox.WidthOverride": 150.0,  # Cubic interp with arrive 1.5, leave 2.0 (approx 148.4)
-            "BodySizeBox.HeightOverride": 158.59375,  # Cubic auto tangent: 150 + 200 * (3*(1/8)^2 - 2*(1/8)^3) = 158.59375
-            "BorderBody.RenderOpacity": 0.5,    # Linear interp: 0.0 + 1.0 * (60/120) = 0.5
-            "StorylineIcon.bIsEnabled": True,
-        },
-        # Frame 240 (second key)
-        {
-            "frame": 240,
-            "BodySizeBox.WidthOverride": 200.0,
-            "BodySizeBox.HeightOverride": 181.25,  # Cubic auto tangent: 150 + 200 * (3*(1/4)^2 - 2*(1/4)^3) = 181.25
-            "BorderBody.RenderOpacity": 1.0,
-            "StorylineIcon.bIsEnabled": False,
-        },
-        # Frame 420 (intervening sample between 240 and 600)
-        {
-            "frame": 420,
-            "BodySizeBox.WidthOverride": 250.0,  # Linear interp: 200 + 100 * (180/360) = 250.0
-            "BodySizeBox.HeightOverride": 286.71875,  # Cubic auto tangent: 150 + 200 * (3*(5/8)^2 - 2*(5/8)^3) = 286.71875
-            "BorderBody.RenderOpacity": 1.0,    # Held after frame 240
-            "StorylineIcon.bIsEnabled": False,   # Held after frame 240
-        },
-        # Frame 600 (third key)
-        {
-            "frame": 600,
-            "BodySizeBox.WidthOverride": 300.0,
-            "BodySizeBox.HeightOverride": 350.0,
-            "BorderBody.RenderOpacity": 1.0,
-            "StorylineIcon.bIsEnabled": False,
-        },
-        # Frame 720 (playback range end)
-        {
-            "frame": 720,
-            "BodySizeBox.WidthOverride": 300.0,
-            "BodySizeBox.HeightOverride": 350.0,
-            "BorderBody.RenderOpacity": 1.0,
-            "StorylineIcon.bIsEnabled": False,
-        },
-    ]
-
-    # Verify each evaluation point against baseline tolerances
-    float_tolerance = 25.0  # Justified by cubic bezier tangent curvature on WidthOverride
-    linear_tolerance = 1e-2
-
-    for eval_point in expected_evaluations:
-        frame = eval_point["frame"]
-        obs_width = eval_width_override(frame)
-        obs_height = eval_height_override(frame)
-        obs_opacity = eval_render_opacity(frame)
-        obs_enabled = eval_is_enabled(frame)
-
-        if "BodySizeBox.WidthOverride" in eval_point:
-            expected_width = eval_point["BodySizeBox.WidthOverride"]
-            tol = float_tolerance if frame == 180 else linear_tolerance
-            assert abs(obs_width - expected_width) <= tol, (
-                f"WidthOverride mismatch at frame {frame}: observed {obs_width}, expected {expected_width}"
-            )
-
-        if "BodySizeBox.HeightOverride" in eval_point:
-            expected_height = eval_point["BodySizeBox.HeightOverride"]
-            assert abs(obs_height - expected_height) <= linear_tolerance, (
-                f"HeightOverride mismatch at frame {frame}: observed {obs_height}, expected {expected_height}"
-            )
-
-        if "BorderBody.RenderOpacity" in eval_point:
-            expected_opacity = eval_point["BorderBody.RenderOpacity"]
-            assert abs(obs_opacity - expected_opacity) <= linear_tolerance, (
-                f"RenderOpacity mismatch at frame {frame}: observed {obs_opacity}, expected {expected_opacity}"
-            )
-
-        if "StorylineIcon.bIsEnabled" in eval_point:
-            expected_enabled = eval_point["StorylineIcon.bIsEnabled"]
-            assert obs_enabled == expected_enabled, (
-                f"bIsEnabled mismatch at frame {frame}: observed {obs_enabled}, expected {expected_enabled}"
-            )
+    icon_tracks = {t["track_name"]: t for t in binding_by_name["StorylineIcon"].get("tracks", [])}
+    if icon_tracks:
+        assert "bIsEnabled" in icon_tracks
+        assert icon_tracks["bIsEnabled"]["track_class"] == "MovieSceneBoolTrack"
 
     # Verify retained properties evaluation after a mutation (removing StorylineIcon from a duplicate)
     dup_name = _uniq("WBP_PlaybackDup")
@@ -697,30 +586,25 @@ def test_playback_baseline_measurement(tcp_connection):
 
         # Inspect retained tracks directly on the duplicate
         retained_by_name = {b["widget_name"]: b for b in retained_bindings}
-        body_tracks = {t["track_name"] for t in retained_by_name["BodySizeBox"].get("tracks", [])}
-        assert "WidthOverride" in body_tracks or retained_by_name["BodySizeBox"]["track_count"] == 2
-        border_tracks = {t["track_name"] for t in retained_by_name["BorderBody"].get("tracks", [])}
-        assert "RenderOpacity" in border_tracks or retained_by_name["BorderBody"]["track_count"] == 1
+        assert retained_by_name["BodySizeBox"]["track_count"] == 2
+        assert retained_by_name["BorderBody"]["track_count"] == 1
 
-        # Retained channels evaluate to exact baseline values at keyframes and intervening times
-        for sample in expected_evaluations:
-            frame = sample["frame"]
-            obs_width = eval_width_override(frame)
-            obs_height = eval_height_override(frame)
-            obs_opacity = eval_render_opacity(frame)
+        dup_body_tracks = {t["track_name"]: t for t in retained_by_name["BodySizeBox"].get("tracks", [])}
+        if dup_body_tracks:
+            assert "WidthOverride" in dup_body_tracks
+            assert "HeightOverride" in dup_body_tracks
+        dup_border_tracks = {t["track_name"]: t for t in retained_by_name["BorderBody"].get("tracks", [])}
+        if dup_border_tracks:
+            assert "RenderOpacity" in dup_border_tracks
 
-            tol = float_tolerance if frame == 180 else linear_tolerance
-            assert abs(obs_width - sample["BodySizeBox.WidthOverride"]) <= tol
-            assert abs(obs_height - sample["BodySizeBox.HeightOverride"]) <= linear_tolerance
-            assert abs(obs_opacity - sample["BorderBody.RenderOpacity"]) <= linear_tolerance
-
-        # Negative controls (UC-6): verify evaluation harness rejects corrupted/mismatched values
-        corrupted_val = 999.0
-        assert abs(eval_width_override(120) - corrupted_val) > tol, "Negative control: corrupted width must fail"
-        assert abs(eval_height_override(120) - corrupted_val) > linear_tolerance, "Negative control: corrupted height must fail"
-        assert abs(eval_render_opacity(240) - corrupted_val) > linear_tolerance, "Negative control: corrupted opacity must fail"
-        assert eval_is_enabled(120) != False, "Negative control: inverted bool at 120 must fail"
-        assert eval_is_enabled(240) != True, "Negative control: inverted bool at 240 must fail"
+        # Negative controls (UC-6):
+        # 1. Removed binding StorylineIcon must not exist in retained bindings
+        assert "StorylineIcon" not in retained_by_name
+        # 2. Corrupted / non-existent track must not be found in retained tracks
+        assert "CorruptedTrack" not in dup_body_tracks
+        assert "CorruptedTrack" not in dup_border_tracks
+        # 3. Retained binding count must not equal initial binding count (3)
+        assert len(retained_bindings) != 3
 
     finally:
         tcp_connection.send_command("blueprint.delete", {"asset_path": dup_path})
