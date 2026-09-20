@@ -528,18 +528,18 @@ def test_playback_baseline_measurement(tcp_connection):
     if body_tracks:
         assert "WidthOverride" in body_tracks
         assert "HeightOverride" in body_tracks
-        assert body_tracks["WidthOverride"]["track_class"] == "MovieSceneFloatTrack"
-        assert body_tracks["HeightOverride"]["track_class"] == "MovieSceneFloatTrack"
+        assert body_tracks["WidthOverride"]["track_class"] == "/Script/MovieSceneTracks.MovieSceneFloatTrack"
+        assert body_tracks["HeightOverride"]["track_class"] == "/Script/MovieSceneTracks.MovieSceneFloatTrack"
 
     border_tracks = {t["track_name"]: t for t in binding_by_name["BorderBody"].get("tracks", [])}
     if border_tracks:
         assert "RenderOpacity" in border_tracks
-        assert border_tracks["RenderOpacity"]["track_class"] == "MovieSceneFloatTrack"
+        assert border_tracks["RenderOpacity"]["track_class"] == "/Script/MovieSceneTracks.MovieSceneFloatTrack"
 
     icon_tracks = {t["track_name"]: t for t in binding_by_name["StorylineIcon"].get("tracks", [])}
     if icon_tracks:
         assert "bIsEnabled" in icon_tracks
-        assert icon_tracks["bIsEnabled"]["track_class"] == "MovieSceneBoolTrack"
+        assert icon_tracks["bIsEnabled"]["track_class"] == "/Script/MovieSceneTracks.MovieSceneBoolTrack"
 
     # Verify retained properties evaluation after a mutation (removing StorylineIcon from a duplicate)
     dup_name = _uniq("WBP_PlaybackDup")

@@ -85,6 +85,10 @@ namespace CortexUMGAnimationBindingTestUtils
         Ar << bHasBlendType;
         Ar << BlendTypeValue;
 
+        // Section completion mode
+        uint8 CompletionModeVal = static_cast<uint8>(Section->GetCompletionMode());
+        Ar << CompletionModeVal;
+
         // Section easing durations and flags
         int32 AutoEaseInDuration = Section->Easing.AutoEaseInDuration;
         int32 AutoEaseOutDuration = Section->Easing.AutoEaseOutDuration;
@@ -504,6 +508,16 @@ namespace CortexUMGAnimationBindingTestUtils
                     Ar << TrackClass;
                     Ar << TrackName;
 
+                    if (UMovieSceneEventTrack* EventTrack = Cast<UMovieSceneEventTrack>(Track))
+                    {
+                        bool bForwards = (bool)EventTrack->bFireEventsWhenForwards;
+                        bool bBackwards = (bool)EventTrack->bFireEventsWhenBackwards;
+                        uint8 EvPos = static_cast<uint8>(EventTrack->EventPosition);
+                        Ar << bForwards;
+                        Ar << bBackwards;
+                        Ar << EvPos;
+                    }
+
                     TArray<UMovieSceneSection*> Sections = Track->GetAllSections();
                     Sections.Sort([](const UMovieSceneSection& A, const UMovieSceneSection& B)
                     {
@@ -545,6 +559,16 @@ namespace CortexUMGAnimationBindingTestUtils
                 FString TrackName = Track->GetTrackName().ToString();
                 Ar << TrackClass;
                 Ar << TrackName;
+
+                if (UMovieSceneEventTrack* EventTrack = Cast<UMovieSceneEventTrack>(Track))
+                {
+                    bool bForwards = (bool)EventTrack->bFireEventsWhenForwards;
+                    bool bBackwards = (bool)EventTrack->bFireEventsWhenBackwards;
+                    uint8 EvPos = static_cast<uint8>(EventTrack->EventPosition);
+                    Ar << bForwards;
+                    Ar << bBackwards;
+                    Ar << EvPos;
+                }
 
                 TArray<UMovieSceneSection*> Sections = Track->GetAllSections();
                 Sections.Sort([](const UMovieSceneSection& A, const UMovieSceneSection& B)
@@ -1256,6 +1280,53 @@ struct FCortexUMGAnimationBindingFixture
                             {
                                 Section->Easing.AutoEaseInDuration = EaseInDuration;
                                 Section->Easing.AutoEaseOutDuration = EaseOutDuration;
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    void ChangeEventTrackFiring(bool bForwards, bool bBackwards, EFireEventsAtPosition Position)
+    {
+        if (!Blueprint.IsValid()) return;
+        for (UWidgetAnimation* Anim : Blueprint->Animations)
+        {
+            if (Anim && Anim->GetName() == TEXT("appearance") && Anim->MovieScene)
+            {
+                for (UMovieSceneTrack* Track : Anim->MovieScene->GetTracks())
+                {
+                    if (UMovieSceneEventTrack* EventTrack = Cast<UMovieSceneEventTrack>(Track))
+                    {
+                        EventTrack->bFireEventsWhenForwards = bForwards;
+                        EventTrack->bFireEventsWhenBackwards = bBackwards;
+                        EventTrack->EventPosition = Position;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    void ChangeRetainedSectionCompletionMode(EMovieSceneCompletionMode NewMode)
+    {
+        if (!Blueprint.IsValid()) return;
+        for (UWidgetAnimation* Anim : Blueprint->Animations)
+        {
+            if (Anim && Anim->GetName() == TEXT("appearance") && Anim->MovieScene)
+            {
+                const UMovieScene* ConstMS = Anim->MovieScene;
+                for (const FMovieSceneBinding& Binding : ConstMS->GetBindings())
+                {
+                    for (UMovieSceneTrack* Track : Binding.GetTracks())
+                    {
+                        for (UMovieSceneSection* Section : Track->GetAllSections())
+                        {
+                            if (Section)
+                            {
+                                Section->SetCompletionMode(NewMode);
                                 return;
                             }
                         }

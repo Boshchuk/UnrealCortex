@@ -450,6 +450,68 @@ bool FCortexUMGAnimationBindingCustomEasingFailClosedTest::RunTest(const FString
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingStaleEventTrackFiringTest,
+    "Cortex.UMG.AnimationBinding.StaleEventTrackFiring",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationBindingStaleEventTrackFiringTest::RunTest(const FString& Parameters)
+{
+    FCortexUMGAnimationBindingFixture Fixture(*this);
+    const FCortexCommandResult Read = Fixture.Router.Execute(
+        TEXT("umg.list_animation_bindings"), Fixture.InspectParams());
+    if (!Read.bSuccess || !Read.Data.IsValid())
+    {
+        AddError(TEXT("Fixture inspection must succeed before stale-token test"));
+        return false;
+    }
+
+    TSharedPtr<FJsonObject> Params = Fixture.RemovalParams(Read.Data, 0);
+    Fixture.ChangeEventTrackFiring(false, false, EFireEventsAtPosition::AtStartOfEvaluation);
+    const TArray<uint8> EditedState = Fixture.CaptureAllAuthoredState();
+
+    const FCortexCommandResult Result = Fixture.Router.Execute(
+        TEXT("umg.remove_animation_binding"), Params);
+
+    TestFalse(TEXT("Old token is rejected after event track firing change"), Result.bSuccess);
+    TestEqual(TEXT("Stable stale error"), Result.ErrorCode, CortexErrorCodes::StalePrecondition);
+    TestTrue(TEXT("Rejection preserves event track firing edit"),
+        EditedState == Fixture.CaptureAllAuthoredState());
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingStaleSectionCompletionModeTest,
+    "Cortex.UMG.AnimationBinding.StaleSectionCompletionMode",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationBindingStaleSectionCompletionModeTest::RunTest(const FString& Parameters)
+{
+    FCortexUMGAnimationBindingFixture Fixture(*this);
+    const FCortexCommandResult Read = Fixture.Router.Execute(
+        TEXT("umg.list_animation_bindings"), Fixture.InspectParams());
+    if (!Read.bSuccess || !Read.Data.IsValid())
+    {
+        AddError(TEXT("Fixture inspection must succeed before stale-token test"));
+        return false;
+    }
+
+    TSharedPtr<FJsonObject> Params = Fixture.RemovalParams(Read.Data, 0);
+    Fixture.ChangeRetainedSectionCompletionMode(EMovieSceneCompletionMode::RestoreState);
+    const TArray<uint8> EditedState = Fixture.CaptureAllAuthoredState();
+
+    const FCortexCommandResult Result = Fixture.Router.Execute(
+        TEXT("umg.remove_animation_binding"), Params);
+
+    TestFalse(TEXT("Old token is rejected after section completion mode change"), Result.bSuccess);
+    TestEqual(TEXT("Stable stale error"), Result.ErrorCode, CortexErrorCodes::StalePrecondition);
+    TestTrue(TEXT("Rejection preserves section completion mode edit"),
+        EditedState == Fixture.CaptureAllAuthoredState());
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FCortexUMGAnimationBindingStaleDuplicateAssetTest,
     "Cortex.UMG.AnimationBinding.StaleDuplicateAsset",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

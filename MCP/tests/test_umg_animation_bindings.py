@@ -482,3 +482,47 @@ def test_removal_save_failure_retains_error_identity_and_outcomes():
     assert result["save_error"] == "Package save failed: disk read-only"
     assert result["fingerprint"]["is_dirty"] is True
     assert result["_remaining_bindings_truncated"] is True
+
+
+def test_list_animation_bindings_track_class_response_contract():
+    """umg.list_animation_bindings track_class response contract requires full class-path (/Script/ModuleName.ClassName), rejecting short names."""
+    native_data = {
+        "asset_path": "/Game/UI/WBP_Test",
+        "animation_name": "Appearance",
+        "bindings": [
+            {
+                "widget_name": "BodySizeBox",
+                "tracks": [
+                    {
+                        "track_name": "WidthOverride",
+                        "track_class": "/Script/MovieSceneTracks.MovieSceneFloatTrack",
+                    },
+                    {
+                        "track_name": "HeightOverride",
+                        "track_class": "/Script/MovieSceneTracks.MovieSceneFloatTrack",
+                    },
+                ],
+            },
+            {
+                "widget_name": "StorylineIcon",
+                "tracks": [
+                    {
+                        "track_name": "bIsEnabled",
+                        "track_class": "/Script/MovieSceneTracks.MovieSceneBoolTrack",
+                    },
+                ],
+            },
+        ],
+    }
+
+    # Verify that valid full class-path contract passes
+    for b in native_data["bindings"]:
+        for t in b["tracks"]:
+            track_class = t["track_class"]
+            assert track_class.startswith("/Script/"), f"track_class must start with '/Script/': {track_class}"
+            assert "." in track_class, f"track_class must contain '.' separating package and class: {track_class}"
+
+    # Verify that invalid short names like 'MovieSceneFloatTrack' fail the contract check
+    invalid_short_names = ["MovieSceneFloatTrack", "MovieSceneBoolTrack"]
+    for short_name in invalid_short_names:
+        assert not short_name.startswith("/Script/"), f"Short name should not pass full class path contract: {short_name}"

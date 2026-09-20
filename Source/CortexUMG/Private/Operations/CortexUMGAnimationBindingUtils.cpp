@@ -3,6 +3,7 @@
 #include "Serialization/MemoryWriter.h"
 #include "Tracks/MovieSceneFloatTrack.h"
 #include "Tracks/MovieSceneBoolTrack.h"
+#include "Tracks/MovieSceneEventTrack.h"
 #include "Sections/MovieSceneFloatSection.h"
 #include "Sections/MovieSceneBoolSection.h"
 #include "Channels/MovieSceneFloatChannel.h"
@@ -249,6 +250,10 @@ namespace CortexUMGAnimationBindingUtils
         uint8 BlendTypeValue = bHasBlendType ? (uint8)Section->GetBlendType().BlendType : (uint8)0;
         Ar << bHasBlendType;
         Ar << BlendTypeValue;
+
+        // Section completion mode (UC-1)
+        uint8 CompletionModeVal = static_cast<uint8>(Section->GetCompletionMode());
+        Ar << CompletionModeVal;
 
         // Section easing durations and flags (UC-1)
         int32 AutoEaseIn = Section->Easing.AutoEaseInDuration;
@@ -681,6 +686,16 @@ namespace CortexUMGAnimationBindingUtils
                         Ar << TrackClass;
                         Ar << TrackName;
 
+                        if (UMovieSceneEventTrack* EventTrack = Cast<UMovieSceneEventTrack>(Track))
+                        {
+                            bool bForwards = (bool)EventTrack->bFireEventsWhenForwards;
+                            bool bBackwards = (bool)EventTrack->bFireEventsWhenBackwards;
+                            uint8 EvPos = static_cast<uint8>(EventTrack->EventPosition);
+                            Ar << bForwards;
+                            Ar << bBackwards;
+                            Ar << EvPos;
+                        }
+
                         TArray<UMovieSceneSection*> Sections = Track->GetAllSections();
                         Sections.Sort([](const UMovieSceneSection& A, const UMovieSceneSection& B)
                         {
@@ -722,6 +737,16 @@ namespace CortexUMGAnimationBindingUtils
                     FString TrackName = Track->GetTrackName().ToString();
                     Ar << TrackClass;
                     Ar << TrackName;
+
+                    if (UMovieSceneEventTrack* EventTrack = Cast<UMovieSceneEventTrack>(Track))
+                    {
+                        bool bForwards = (bool)EventTrack->bFireEventsWhenForwards;
+                        bool bBackwards = (bool)EventTrack->bFireEventsWhenBackwards;
+                        uint8 EvPos = static_cast<uint8>(EventTrack->EventPosition);
+                        Ar << bForwards;
+                        Ar << bBackwards;
+                        Ar << EvPos;
+                    }
 
                     TArray<UMovieSceneSection*> Sections = Track->GetAllSections();
                     Sections.Sort([](const UMovieSceneSection& A, const UMovieSceneSection& B)

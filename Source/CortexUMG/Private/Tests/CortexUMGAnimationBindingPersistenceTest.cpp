@@ -917,15 +917,52 @@ bool FCortexUMGAnimationBindingSeedReadOnlyRegressionTest::RunTest(const FString
     // seed is strictly read-only: it detects the mismatch, reports failure, does NOT clear
     // or set dirty flags (tested on both clean and already-dirty fixtures), and does NOT
     // overwrite or touch the disk file.
-    const FString TestPkgName = TEXT("/Game/Temp/CortexTest_MismatchSeed");
-    const FString AssetName = TEXT("CortexTest_MismatchSeed");
+    const FString UniqueSuffix = FGuid::NewGuid().ToString(EGuidFormats::Short);
+    const FString TestPkgName = FString::Printf(TEXT("/Game/Temp/CortexTest_MismatchSeed_%s"), *UniqueSuffix);
+    const FString AssetName = FString::Printf(TEXT("CortexTest_MismatchSeed_%s"), *UniqueSuffix);
     const FString TestFilename = FPackageName::LongPackageNameToFilename(
         TestPkgName, FPackageName::GetAssetPackageExtension());
 
+    // Before writing, fail if a package/file unexpectedly already exists
+    if (FindPackage(nullptr, *TestPkgName) != nullptr ||
+        FPackageName::DoesPackageExist(TestPkgName) ||
+        IFileManager::Get().FileExists(*TestFilename))
+    {
+        AddError(FString::Printf(TEXT("Test-owned seed mismatch fixture package or file unexpectedly already exists: %s"), *TestPkgName));
+        return false;
+    }
+
     IFileManager::Get().MakeDirectory(*FPaths::GetPath(TestFilename), true);
 
+    auto ComputeDiskHash = [](const FString& Filename) -> FString
+    {
+        TArray<uint8> FileBytes;
+        if (FFileHelper::LoadFileToArray(FileBytes, *Filename))
+        {
+            return FMD5::HashBytes(FileBytes.GetData(), FileBytes.Num());
+        }
+        return FString();
+    };
+
+    // Explicit ownership tracking: test owns TestFilename and TestPkg created below
+    bool bFileCreatedByTest = false;
+    UPackage* TestPkg = nullptr;
+    auto CleanupTestResources = [&]()
+    {
+        if (TestPkg)
+        {
+            ResetLoaders(TestPkg);
+            TestPkg->ClearDirtyFlag();
+            TestPkg->MarkAsGarbage();
+        }
+        if (bFileCreatedByTest && IFileManager::Get().FileExists(*TestFilename))
+        {
+            IFileManager::Get().Delete(*TestFilename);
+        }
+    };
+
     // 1. Create a controlled mismatching seed: missing required tracks / wrong property layout
-    UPackage* TestPkg = CreatePackage(*TestPkgName);
+    TestPkg = CreatePackage(*TestPkgName);
     TestNotNull(TEXT("Test package created"), TestPkg);
     if (!TestPkg)
     {
@@ -946,8 +983,11 @@ bool FCortexUMGAnimationBindingSeedReadOnlyRegressionTest::RunTest(const FString
     SaveArgs.SaveFlags = SAVE_NoError;
     const bool bSaved = UPackage::SavePackage(TestPkg, MismatchWBP, *TestFilename, SaveArgs);
     TestTrue(TEXT("Mismatch seed saved to disk"), bSaved);
+    bFileCreatedByTest = bSaved;
     TestPkg->ClearDirtyFlag();
 
+    const FString OrigDiskHash = ComputeDiskHash(TestFilename);
+    TestFalse(TEXT("Original disk file hash is non-empty"), OrigDiskHash.IsEmpty());
     const FDateTime OrigTimestamp = IFileManager::Get().GetTimeStamp(*TestFilename);
     const int64 OrigFileSize = IFileManager::Get().FileSize(*TestFilename);
     TestTrue(TEXT("Original file exists"), OrigFileSize > 0);
@@ -964,6 +1004,7 @@ bool FCortexUMGAnimationBindingSeedReadOnlyRegressionTest::RunTest(const FString
     TestFalse(TEXT("Did not bootstrap in normal mode (Case A)"), bDidBootstrapCaseA);
     TestFalse(TEXT("Validation error is populated (Case A)"), ErrorCaseA.IsEmpty());
     TestFalse(TEXT("Package remains clean in Case A"), TestPkg->IsDirty());
+    TestEqual(TEXT("Disk file hash unchanged (Case A)"), ComputeDiskHash(TestFilename), OrigDiskHash);
     TestEqual(TEXT("Disk file timestamp unchanged (Case A)"),
         IFileManager::Get().GetTimeStamp(*TestFilename), OrigTimestamp);
     TestEqual(TEXT("Disk file size unchanged (Case A)"),
@@ -982,16 +1023,14 @@ bool FCortexUMGAnimationBindingSeedReadOnlyRegressionTest::RunTest(const FString
     TestFalse(TEXT("Did not bootstrap in normal mode (Case B)"), bDidBootstrapCaseB);
     TestFalse(TEXT("Validation error is populated (Case B)"), ErrorCaseB.IsEmpty());
     TestTrue(TEXT("Package remains dirty in Case B (dirty flag not cleared)"), TestPkg->IsDirty());
+    TestEqual(TEXT("Disk file hash unchanged (Case B)"), ComputeDiskHash(TestFilename), OrigDiskHash);
     TestEqual(TEXT("Disk file timestamp unchanged (Case B)"),
         IFileManager::Get().GetTimeStamp(*TestFilename), OrigTimestamp);
     TestEqual(TEXT("Disk file size unchanged (Case B)"),
         IFileManager::Get().FileSize(*TestFilename), OrigFileSize);
 
     // 4. Cleanup test file
-    ResetLoaders(TestPkg);
-    IFileManager::Get().Delete(*TestFilename);
-    TestPkg->ClearDirtyFlag();
-    TestPkg->MarkAsGarbage();
+    CleanupTestResources();
     return true;
 }
 
@@ -1355,8 +1394,6 @@ bool FCortexUMGAnimationBindingRuntimePlaybackAcceptanceTest::RunTest(const FStr
         TEXT("umg.remove_animation_binding"), RemoveParams);
     TestTrue(TEXT("Removal of StorylineIcon binding succeeds"), RemoveResult.bSuccess);
 
-    FKismetEditorUtilities::CompileBlueprint(WBP);
-
     UUserWidget* Widget2 = World
         ? CreateWidget<UUserWidget>(World, WidgetClass)
         : CreateWidget<UUserWidget>(WBP->WidgetTree.Get(), WidgetClass);
@@ -1371,24 +1408,60 @@ bool FCortexUMGAnimationBindingRuntimePlaybackAcceptanceTest::RunTest(const FStr
     TestNotNull(TEXT("BodySizeBox2 exists"), BodySizeBox2);
     TestNotNull(TEXT("BorderBody2 exists"), BorderBody2);
 
+    FBoolProperty* EventFiredProp2 = CastField<FBoolProperty>(
+        Widget2->GetClass()->FindPropertyByName(TEXT("bAuthoredEventFired")));
+    auto WasEventFired2 = [&]() -> bool
+    {
+        return EventFiredProp2 ? EventFiredProp2->GetPropertyValue_InContainer(Widget2) : false;
+    };
+
+    UImage* StorylineIcon2 = Cast<UImage>(Widget2->GetWidgetFromName(TEXT("StorylineIcon")));
+    TestNotNull(TEXT("StorylineIcon2 exists in widget tree"), StorylineIcon2);
+
     Widget2->PlayAnimation(Anim, StartTime, 1, EUMGSequencePlayMode::Forward, 1.0f);
     FCortexUserWidgetTickAccessor::TickAnimation(Widget2, 0.0f);
 
     TestEqual(TEXT("Post-removal Live Frame 120: WidthOverride == 100.0"), BodySizeBox2->GetWidthOverride(), 100.0f);
     TestEqual(TEXT("Post-removal Live Frame 120: HeightOverride == 150.0"), BodySizeBox2->GetHeightOverride(), 150.0f);
     TestEqual(TEXT("Post-removal Live Frame 120: RenderOpacity == 0.0"), BorderBody2->GetRenderOpacity(), 0.0f);
+    if (StorylineIcon2)
+    {
+        TestEqual(TEXT("Post-removal Live Frame 120: StorylineIcon remains enabled"), StorylineIcon2->GetIsEnabled(), true);
+    }
+    TestFalse(TEXT("Post-removal Live Frame 120: Event not yet fired"), WasEventFired2());
 
     FCortexUserWidgetTickAccessor::TickAnimation(Widget2, 0.0025f);
     TestEqual(TEXT("Post-removal Live Frame 180: HeightOverride == 158.59375"), BodySizeBox2->GetHeightOverride(), 158.59375f);
     TestEqual(TEXT("Post-removal Live Frame 180: RenderOpacity == 0.5"), BorderBody2->GetRenderOpacity(), 0.5f);
+    TestFalse(TEXT("Post-removal Live Frame 180: Event not yet fired"), WasEventFired2());
 
     FCortexUserWidgetTickAccessor::TickAnimation(Widget2, 0.0025f);
     TestEqual(TEXT("Post-removal Live Frame 240: WidthOverride == 200.0"), BodySizeBox2->GetWidthOverride(), 200.0f);
     TestEqual(TEXT("Post-removal Live Frame 240: RenderOpacity == 1.0"), BorderBody2->GetRenderOpacity(), 1.0f);
+    if (StorylineIcon2)
+    {
+        TestEqual(TEXT("Post-removal Live Frame 240: StorylineIcon is NOT animated, remains enabled"), StorylineIcon2->GetIsEnabled(), true);
+    }
+    TestFalse(TEXT("Post-removal Live Frame 240: Event not yet fired"), WasEventFired2());
 
-    FCortexUserWidgetTickAccessor::TickAnimation(Widget2, 0.0150f);
+    // Frame 360: authored event callback still fires after removal of StorylineIcon binding
+    FCortexUserWidgetTickAccessor::TickAnimation(Widget2, 0.0050f);
+    TestTrue(TEXT("Post-removal Live Frame 360: Authored event callback still fired"), WasEventFired2());
+
+    // Frame 420 (intervening sample between 240 and 600)
+    FCortexUserWidgetTickAccessor::TickAnimation(Widget2, 0.0025f);
+    TestEqual(TEXT("Post-removal Live Frame 420: WidthOverride == 250.0"), BodySizeBox2->GetWidthOverride(), 250.0f);
+    TestEqual(TEXT("Post-removal Live Frame 420: HeightOverride == 286.71875"), BodySizeBox2->GetHeightOverride(), 286.71875f);
+    TestEqual(TEXT("Post-removal Live Frame 420: RenderOpacity == 1.0"), BorderBody2->GetRenderOpacity(), 1.0f);
+
+    // Frame 600
+    FCortexUserWidgetTickAccessor::TickAnimation(Widget2, 0.0075f);
     TestEqual(TEXT("Post-removal Live Frame 600: WidthOverride == 300.0"), BodySizeBox2->GetWidthOverride(), 300.0f);
     TestEqual(TEXT("Post-removal Live Frame 600: HeightOverride == 350.0"), BodySizeBox2->GetHeightOverride(), 350.0f);
+    if (StorylineIcon2)
+    {
+        TestEqual(TEXT("Post-removal Live Frame 600: StorylineIcon remains enabled"), StorylineIcon2->GetIsEnabled(), true);
+    }
 
     // 3. Negative controls (UC-6):
     // a. Disabled playback: widget instantiated without PlayAnimation does not change properties
