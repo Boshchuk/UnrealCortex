@@ -765,6 +765,28 @@ namespace CortexUMGAnimationBindingUtils
             return false;
         }
 
+        // Early validation of expected_fingerprint domain_signature before computing heavy digest
+        const TSharedPtr<FJsonObject>* EarlyDomainSig = nullptr;
+        if (ExpectedFingerprint->TryGetObjectField(TEXT("domain_signature"), EarlyDomainSig) && EarlyDomainSig && EarlyDomainSig->IsValid())
+        {
+            const FString SigAssetPath = (*EarlyDomainSig)->GetStringField(TEXT("asset_path"));
+            if (!SigAssetPath.IsEmpty() && !SigAssetPath.Equals(AssetPath, ESearchCase::CaseSensitive))
+            {
+                OutError = FCortexCommandRouter::Error(
+                    CortexErrorCodes::StalePrecondition,
+                    FString::Printf(TEXT("domain_signature asset_path mismatch: expected '%s', got '%s'"), *AssetPath, *SigAssetPath));
+                return false;
+            }
+            const FString SigAnimName = (*EarlyDomainSig)->GetStringField(TEXT("animation_name"));
+            if (!SigAnimName.IsEmpty() && !SigAnimName.Equals(AnimName, ESearchCase::CaseSensitive))
+            {
+                OutError = FCortexCommandRouter::Error(
+                    CortexErrorCodes::StalePrecondition,
+                    FString::Printf(TEXT("domain_signature animation_name mismatch: expected '%s', got '%s'"), *AnimName, *SigAnimName));
+                return false;
+            }
+        }
+
         // Compute live fingerprint & verify against expected
         OutLiveFingerprint = ComputeFingerprint(WBP, FoundAnim);
         FString VerifyError;
@@ -793,7 +815,7 @@ namespace CortexUMGAnimationBindingUtils
             }
             else
             {
-                const FString WName = Binding.WidgetName.ToString();
+                const FString WName = Binding.WidgetName == NAME_None ? TEXT("") : Binding.WidgetName.ToString();
                 const FString SName = Binding.SlotWidgetName == NAME_None ? TEXT("") : Binding.SlotWidgetName.ToString();
                 if (WName.Equals(Selector.WidgetName, ESearchCase::CaseSensitive) &&
                     SName.Equals(Selector.SlotWidgetName, ESearchCase::CaseSensitive))
@@ -865,6 +887,52 @@ namespace CortexUMGAnimationBindingUtils
         }
         OutPreflight.bPossessableExists = OutPreflight.MovieScene &&
             (OutPreflight.MovieScene->FindPossessable(MatchedBinding.AnimationGuid) != nullptr);
+
+        // Check possessable child hierarchies (Section 3.2)
+        if (OutPreflight.MovieScene && OutPreflight.bPossessableExists)
+        {
+            const int32 PossessableCount = OutPreflight.MovieScene->GetPossessableCount();
+            for (int32 p = 0; p < PossessableCount; ++p)
+            {
+                const FMovieScenePossessable& CandidateChild = OutPreflight.MovieScene->GetPossessable(p);
+                if (CandidateChild.GetParent() == MatchedBinding.AnimationGuid)
+                {
+                    OutError = FCortexCommandRouter::Error(
+                        CortexErrorCodes::AnimationBindingUnsupported,
+                        TEXT("MovieScene possessable has children; removal is unsafe"));
+                    return false;
+                }
+            }
+        }
+
+        // Check unsupported channel / section types on the binding (Section 3.2)
+        if (const UMovieScene* ConstMS = OutPreflight.MovieScene)
+        {
+            if (const FMovieSceneBinding* ValidatingBinding = ConstMS->FindBinding(MatchedBinding.AnimationGuid))
+            {
+                for (UMovieSceneTrack* Track : ValidatingBinding->GetTracks())
+                {
+                    if (!Track)
+                    {
+                        continue;
+                    }
+                    for (UMovieSceneSection* Section : Track->GetAllSections())
+                    {
+                        if (!Section)
+                        {
+                            continue;
+                        }
+                        if (!Section->IsA<UMovieSceneFloatSection>() && !Section->IsA<UMovieSceneBoolSection>())
+                        {
+                            OutError = FCortexCommandRouter::Error(
+                                CortexErrorCodes::AnimationBindingUnsupported,
+                                TEXT("Track contains unsupported channel types"));
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
 
         // Check orphaned tracks without possessable (Section 3.2 & 3.3)
         if (OutPreflight.MovieScene && !OutPreflight.bPossessableExists)

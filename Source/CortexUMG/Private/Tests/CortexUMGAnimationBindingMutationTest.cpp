@@ -1646,4 +1646,106 @@ bool FCortexUMGAnimationBindingDanglingTargetRemovalTest::RunTest(const FString&
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingPossessableWithChildrenRejectionTest,
+    "Cortex.UMG.AnimationBinding.PossessableWithChildrenRejection",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
+bool FCortexUMGAnimationBindingPossessableWithChildrenRejectionTest::RunTest(const FString& Parameters)
+{
+    FCortexUMGAnimationBindingFixture Fixture(*this);
+    UWidgetBlueprint* WBP = Fixture.Blueprint.Get();
+    UWidgetAnimation* Anim = nullptr;
+    if (WBP && WBP->Animations.Num() > 0)
+    {
+        Anim = WBP->Animations[0];
+    }
+    UMovieScene* MS = Anim ? Anim->MovieScene : nullptr;
+    if (!Anim || !MS)
+    {
+        AddError(TEXT("Invalid fixture animation"));
+        return false;
+    }
+
+    // Add a child possessable to Guid1
+    FGuid ChildGuid = MS->AddPossessable(TEXT("ChildOfBodySizeBox"), UUserWidget::StaticClass());
+    FMovieScenePossessable* ChildPossessable = MS->FindPossessable(ChildGuid);
+    if (ChildPossessable)
+    {
+        ChildPossessable->SetParent(Anim->AnimationBindings[0].AnimationGuid, MS);
+    }
+
+    TSharedPtr<FJsonObject> InspectParams = MakeShared<FJsonObject>();
+    InspectParams->SetStringField(TEXT("asset_path"), WBP->GetPathName());
+    InspectParams->SetStringField(TEXT("animation_name"), Anim->GetName());
+    FCortexCommandResult Read = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), InspectParams);
+    TestTrue(TEXT("Inspect succeeds"), Read.bSuccess);
+    if (!Read.bSuccess || !Read.Data.IsValid())
+    {
+        return false;
+    }
+
+    TSharedPtr<FJsonObject> Params = Fixture.RemovalParams(Read.Data, 0);
+    Params->SetBoolField(TEXT("dry_run"), false);
+
+    FCortexCommandResult Result = Fixture.Router.Execute(TEXT("umg.remove_animation_binding"), Params);
+    TestFalse(TEXT("Removal rejected due to child possessables"), Result.bSuccess);
+    TestEqual(TEXT("Error is ANIMATION_BINDING_UNSUPPORTED"),
+        Result.ErrorCode, CortexErrorCodes::AnimationBindingUnsupported);
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingUnsupportedChannelTypeRejectionTest,
+    "Cortex.UMG.AnimationBinding.UnsupportedChannelTypeRejection",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationBindingUnsupportedChannelTypeRejectionTest::RunTest(const FString& Parameters)
+{
+    FCortexUMGAnimationBindingFixture Fixture(*this);
+    UWidgetBlueprint* WBP = Fixture.Blueprint.Get();
+    UWidgetAnimation* Anim = nullptr;
+    if (WBP && WBP->Animations.Num() > 0)
+    {
+        Anim = WBP->Animations[0];
+    }
+    UMovieScene* MS = Anim ? Anim->MovieScene : nullptr;
+    if (!Anim || !MS)
+    {
+        AddError(TEXT("Invalid fixture animation"));
+        return false;
+    }
+
+    // Add an event track on the binding Guid1 (Event track sections are not Float/Bool)
+    UMovieSceneEventTrack* EventTrack = MS->AddTrack<UMovieSceneEventTrack>(Anim->AnimationBindings[0].AnimationGuid);
+    if (EventTrack)
+    {
+        UMovieSceneSection* Sec = EventTrack->CreateNewSection();
+        if (Sec)
+        {
+            EventTrack->AddSection(*Sec);
+            Sec->SetRange(TRange<FFrameNumber>(FFrameNumber(0), FFrameNumber(12000)));
+        }
+    }
+
+    TSharedPtr<FJsonObject> InspectParams = MakeShared<FJsonObject>();
+    InspectParams->SetStringField(TEXT("asset_path"), WBP->GetPathName());
+    InspectParams->SetStringField(TEXT("animation_name"), Anim->GetName());
+    FCortexCommandResult Read = Fixture.Router.Execute(TEXT("umg.list_animation_bindings"), InspectParams);
+    TestTrue(TEXT("Inspect succeeds"), Read.bSuccess);
+    if (!Read.bSuccess || !Read.Data.IsValid())
+    {
+        return false;
+    }
+
+    TSharedPtr<FJsonObject> Params = Fixture.RemovalParams(Read.Data, 0);
+    Params->SetBoolField(TEXT("dry_run"), false);
+
+    FCortexCommandResult Result = Fixture.Router.Execute(TEXT("umg.remove_animation_binding"), Params);
+    TestFalse(TEXT("Removal rejected due to unsupported channel type"), Result.bSuccess);
+    TestEqual(TEXT("Error is ANIMATION_BINDING_UNSUPPORTED"),
+        Result.ErrorCode, CortexErrorCodes::AnimationBindingUnsupported);
+
+    return true;
+}
