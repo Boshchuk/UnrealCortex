@@ -615,3 +615,126 @@ class TestMutationResponseBounds:
         assert len(retrieved_selectors) == total_items
         assert retrieved_selectors == [f"sel_{i}" for i in range(total_items)]
 
+    def test_diagnostics_dominant_response_preserves_bindings_and_binding_pagination(self):
+        """When diagnostics is the largest array, truncating diagnostics must not corrupt binding pagination (UC-4)."""
+        bindings = [
+            {
+                "binding_guid": f"{{{i:08x}-0000-0000-0000-000000000000}}",
+                "widget_name": f"Widget_{i}",
+                "slot_widget_name": "",
+                "is_root_widget": False,
+                "tracks": [{"track_name": "PropertyTrack", "section_count": 1}],
+            }
+            for i in range(10)
+        ]
+        diagnostics = [f"Diagnostic message {i}: detailed warning about property or track layout" * 5 for i in range(600)]
+        data = {
+            "asset_path": "/Game/UI/WBP_Test",
+            "animation_name": "appearance",
+            "bindings": bindings,
+            "diagnostics": diagnostics,
+            "pagination": {
+                "total": 10,
+                "offset": 0,
+                "limit": 10,
+                "returned": 10,
+                "next_offset": None,
+                "is_complete": True,
+            },
+        }
+        formatted = format_response(data, "umg_cmd")
+        assert len(formatted) <= _MAX_RESPONSE_CHARS
+        res = json.loads(formatted)
+        # All 10 bindings should be preserved
+        assert len(res["bindings"]) == 10
+        # Pagination must belong to bindings, NOT diagnostics!
+        p = res["pagination"]
+        assert p["returned"] == 10
+        assert p["total"] == 10
+        assert p["is_complete"] is True
+        # Diagnostics should be truncated with separate metadata
+        assert len(res["diagnostics"]) < 600
+        assert res.get("_diagnostics_truncated") is True or "_diagnostics" in str(res)
+
+    def test_single_oversized_binding_bounds_nested_tracks_and_retains_selector(self):
+        """A single binding with 250 track summaries must bound nested tracks so the selector is retrievable (UC-4)."""
+        tracks = [
+            {"track_name": f"Track_{i}", "property_name": f"Property_{i}", "data": "x" * 200}
+            for i in range(250)
+        ]
+        binding = {
+            "binding_guid": "{11111111-2222-3333-4444-555555555555}",
+            "widget_name": "OversizedWidget",
+            "slot_widget_name": "",
+            "is_root_widget": False,
+            "tracks": tracks,
+        }
+        data = {
+            "asset_path": "/Game/UI/WBP_Test",
+            "animation_name": "appearance",
+            "bindings": [binding],
+            "pagination": {
+                "total": 1,
+                "offset": 0,
+                "limit": 1,
+                "returned": 1,
+                "next_offset": None,
+                "is_complete": True,
+            },
+        }
+        formatted = format_response(data, "umg_cmd")
+        assert len(formatted) <= _MAX_RESPONSE_CHARS
+        res = json.loads(formatted)
+        assert res.get("_error") != "RESPONSE_TOO_LARGE"
+        assert len(res["bindings"]) == 1
+        ret_b = res["bindings"][0]
+        # Canonical selector fields must be present and intact
+        assert ret_b["binding_guid"] == "{11111111-2222-3333-4444-555555555555}"
+        assert ret_b["widget_name"] == "OversizedWidget"
+        assert ret_b["slot_widget_name"] == ""
+        assert ret_b["is_root_widget"] is False
+        # Tracks must be bounded/truncated
+        assert len(ret_b["tracks"]) < 250
+        assert ret_b.get("_tracks_truncated") is True or "_tracks" in str(ret_b)
+
+    def test_ten_individually_oversized_bindings_make_forward_progress(self):
+        """Ten individually oversized bindings must bound nested details and make forward progress (UC-4)."""
+        bindings = [
+            {
+                "binding_guid": f"{{{i:08x}-0000-0000-0000-000000000000}}",
+                "widget_name": f"Widget_{i}",
+                "slot_widget_name": "",
+                "is_root_widget": False,
+                "tracks": [
+                    {"track_name": f"Track_{t}", "property_name": f"Prop_{t}", "data": "x" * 200}
+                    for t in range(50)
+                ],
+            }
+            for i in range(10)
+        ]
+        data = {
+            "asset_path": "/Game/UI/WBP_Test",
+            "animation_name": "appearance",
+            "bindings": bindings,
+            "pagination": {
+                "total": 10,
+                "offset": 0,
+                "limit": 10,
+                "returned": 10,
+                "next_offset": None,
+                "is_complete": True,
+            },
+        }
+        formatted = format_response(data, "umg_cmd")
+        assert len(formatted) <= _MAX_RESPONSE_CHARS
+        res = json.loads(formatted)
+        assert res.get("_error") != "RESPONSE_TOO_LARGE"
+        assert len(res["bindings"]) > 0
+        p = res["pagination"]
+        assert p["returned"] == len(res["bindings"])
+        assert p["returned"] > 0
+        if not p["is_complete"]:
+            assert p["next_offset"] == p["returned"]
+            assert p["next_offset"] > 0
+
+

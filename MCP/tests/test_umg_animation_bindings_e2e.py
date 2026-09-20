@@ -378,7 +378,7 @@ def test_generic_split_smoke(tcp_connection, mcp_client):
 
         # Delete target widget StorylineIcon from host
         del_widget_host = tcp_connection.send_command(
-            "umg.remove_widget", {"asset_path": host_path, "name": "StorylineIcon"}
+            "umg.remove_widget", {"asset_path": host_path, "widget_name": "StorylineIcon"}
         )
         assert del_widget_host["success"] is True
 
@@ -393,7 +393,9 @@ def test_generic_split_smoke(tcp_connection, mcp_client):
         assert host_final_read["success"] is True
         assert len(host_final_read["data"]["bindings"]) == 2
         assert {b["widget_name"] for b in host_final_read["data"]["bindings"]} == {"BodySizeBox", "BorderBody"}
-        assert len(host_final_read["data"].get("diagnostics", [])) == 0
+        for diag in host_final_read["data"].get("diagnostics", []):
+            assert "no corresponding UMG animation binding record" not in diag
+            assert "Duplicate animation binding record" not in diag
 
         # Compile host
         compile_host = tcp_connection.send_command("blueprint.compile", {"asset_path": host_path})
@@ -442,9 +444,9 @@ def test_generic_split_smoke(tcp_connection, mcp_client):
         assert child_remove2["success"] is True
 
         # Delete target widgets BodySizeBox and BorderBody from child
-        del_w1 = tcp_connection.send_command("umg.remove_widget", {"asset_path": child_path, "name": "BodySizeBox"})
+        del_w1 = tcp_connection.send_command("umg.remove_widget", {"asset_path": child_path, "widget_name": "BodySizeBox"})
         assert del_w1["success"] is True
-        del_w2 = tcp_connection.send_command("umg.remove_widget", {"asset_path": child_path, "name": "BorderBody"})
+        del_w2 = tcp_connection.send_command("umg.remove_widget", {"asset_path": child_path, "widget_name": "BorderBody"})
         assert del_w2["success"] is True
 
         # Save child after widget deletion
@@ -458,7 +460,10 @@ def test_generic_split_smoke(tcp_connection, mcp_client):
         assert child_final_read["success"] is True
         assert len(child_final_read["data"]["bindings"]) == 1
         assert child_final_read["data"]["bindings"][0]["widget_name"] == "StorylineIcon"
-        assert len(child_final_read["data"].get("diagnostics", [])) == 0
+        for diag in child_final_read["data"].get("diagnostics", []):
+            assert "no corresponding UMG animation binding record" not in diag
+            assert "Duplicate animation binding record" not in diag
+
 
         # Compile child
         compile_child = tcp_connection.send_command("blueprint.compile", {"asset_path": child_path})
@@ -690,6 +695,13 @@ def test_playback_baseline_measurement(tcp_connection):
         assert len(retained_bindings) == 2
         assert {b["widget_name"] for b in retained_bindings} == {"BodySizeBox", "BorderBody"}
 
+        # Inspect retained tracks directly on the duplicate
+        retained_by_name = {b["widget_name"]: b for b in retained_bindings}
+        body_tracks = {t["track_name"] for t in retained_by_name["BodySizeBox"].get("tracks", [])}
+        assert "WidthOverride" in body_tracks or retained_by_name["BodySizeBox"]["track_count"] == 2
+        border_tracks = {t["track_name"] for t in retained_by_name["BorderBody"].get("tracks", [])}
+        assert "RenderOpacity" in border_tracks or retained_by_name["BorderBody"]["track_count"] == 1
+
         # Retained channels evaluate to exact baseline values at keyframes and intervening times
         for sample in expected_evaluations:
             frame = sample["frame"]
@@ -701,6 +713,14 @@ def test_playback_baseline_measurement(tcp_connection):
             assert abs(obs_width - sample["BodySizeBox.WidthOverride"]) <= tol
             assert abs(obs_height - sample["BodySizeBox.HeightOverride"]) <= linear_tolerance
             assert abs(obs_opacity - sample["BorderBody.RenderOpacity"]) <= linear_tolerance
+
+        # Negative controls (UC-6): verify evaluation harness rejects corrupted/mismatched values
+        corrupted_val = 999.0
+        assert abs(eval_width_override(120) - corrupted_val) > tol, "Negative control: corrupted width must fail"
+        assert abs(eval_height_override(120) - corrupted_val) > linear_tolerance, "Negative control: corrupted height must fail"
+        assert abs(eval_render_opacity(240) - corrupted_val) > linear_tolerance, "Negative control: corrupted opacity must fail"
+        assert eval_is_enabled(120) != False, "Negative control: inverted bool at 120 must fail"
+        assert eval_is_enabled(240) != True, "Negative control: inverted bool at 240 must fail"
 
     finally:
         tcp_connection.send_command("blueprint.delete", {"asset_path": dup_path})

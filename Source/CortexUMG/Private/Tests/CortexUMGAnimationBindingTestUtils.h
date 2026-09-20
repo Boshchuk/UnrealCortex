@@ -23,6 +23,12 @@
 #include "Sections/MovieSceneEventTriggerSection.h"
 #include "Channels/MovieSceneFloatChannel.h"
 #include "Channels/MovieSceneBoolChannel.h"
+#include "Channels/MovieSceneChannelProxy.h"
+#include "Channels/MovieSceneIntegerChannel.h"
+#include "Channels/MovieSceneByteChannel.h"
+#include "Channels/MovieSceneEventChannel.h"
+#include "Channels/MovieSceneObjectPathChannel.h"
+#include "Animation/MovieScene2DTransformSection.h"
 #include "Operations/CortexUMGAnimationBindingUtils.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraphSchema_K2.h"
@@ -36,6 +42,214 @@
 
 namespace CortexUMGAnimationBindingTestUtils
 {
+    inline void SerializeSectionChannelsIndependently(FArchive& Ar, UMovieSceneSection* Section)
+    {
+        if (!Section)
+        {
+            return;
+        }
+
+        TRange<FFrameNumber> SecRange = Section->GetRange();
+        bool bSecLowerOpen = SecRange.GetLowerBound().IsOpen();
+        bool bSecLowerInc = SecRange.GetLowerBound().IsInclusive();
+        int32 SecLowerVal = bSecLowerOpen ? 0 : SecRange.GetLowerBoundValue().Value;
+        bool bSecUpperOpen = SecRange.GetUpperBound().IsOpen();
+        bool bSecUpperInc = SecRange.GetUpperBound().IsInclusive();
+        int32 SecUpperVal = bSecUpperOpen ? 0 : SecRange.GetUpperBoundValue().Value;
+        int32 RowIndex = Section->GetRowIndex();
+        bool bActive = Section->IsActive();
+        bool bLocked = Section->IsLocked();
+
+        Ar << bSecLowerOpen;
+        Ar << bSecLowerInc;
+        Ar << SecLowerVal;
+        Ar << bSecUpperOpen;
+        Ar << bSecUpperInc;
+        Ar << SecUpperVal;
+        Ar << RowIndex;
+        Ar << bActive;
+        Ar << bLocked;
+
+        if (UMovieScene2DTransformSection* TransSec = Cast<UMovieScene2DTransformSection>(Section))
+        {
+            uint32 MaskVal = (uint32)TransSec->GetMask().GetChannels();
+            Ar << MaskVal;
+        }
+
+        const FMovieSceneChannelProxy& ChannelProxy = Section->GetChannelProxy();
+        TArrayView<const FMovieSceneChannelEntry> AllEntries = ChannelProxy.GetAllEntries();
+        int32 EntryCount = AllEntries.Num();
+        Ar << EntryCount;
+
+        for (const FMovieSceneChannelEntry& Entry : AllEntries)
+        {
+            FName TypeName = Entry.GetChannelTypeName();
+            FString TypeNameStr = TypeName.ToString();
+            Ar << TypeNameStr;
+
+            TArrayView<FMovieSceneChannel* const> Channels = Entry.GetChannels();
+            int32 ChanCount = Channels.Num();
+            Ar << ChanCount;
+
+            for (FMovieSceneChannel* Chan : Channels)
+            {
+                if (!Chan)
+                {
+                    int32 NullMarker = -1;
+                    Ar << NullMarker;
+                    continue;
+                }
+
+                int32 NumKeys = Chan->GetNumKeys();
+                Ar << NumKeys;
+
+                if (TypeName == FMovieSceneFloatChannel::StaticStruct()->GetFName())
+                {
+                    FMovieSceneFloatChannel* FloatChan = static_cast<FMovieSceneFloatChannel*>(Chan);
+                    TArrayView<const FFrameNumber> Times = FloatChan->GetTimes();
+                    TArrayView<const FMovieSceneFloatValue> Values = FloatChan->GetValues();
+                    int32 KeyNum = Times.Num();
+                    Ar << KeyNum;
+                    for (int32 k = 0; k < KeyNum; ++k)
+                    {
+                        int32 Frame = Times[k].Value;
+                        float Val = Values[k].Value;
+                        uint8 Interp = (uint8)Values[k].InterpMode.GetValue();
+                        uint8 TanMode = (uint8)Values[k].TangentMode.GetValue();
+                        float ArrTan = Values[k].Tangent.ArriveTangent;
+                        float LveTan = Values[k].Tangent.LeaveTangent;
+                        float ArrTanW = Values[k].Tangent.ArriveTangentWeight;
+                        float LveTanW = Values[k].Tangent.LeaveTangentWeight;
+                        uint8 TanWeightMode = (uint8)Values[k].Tangent.TangentWeightMode.GetValue();
+                        Ar << Frame;
+                        Ar << Val;
+                        Ar << Interp;
+                        Ar << TanMode;
+                        Ar << ArrTan;
+                        Ar << LveTan;
+                        Ar << ArrTanW;
+                        Ar << LveTanW;
+                        Ar << TanWeightMode;
+                    }
+                    TOptional<float> Def = FloatChan->GetDefault();
+                    bool bHasDef = Def.IsSet();
+                    float DefVal = Def.Get(0.0f);
+                    Ar << bHasDef;
+                    Ar << DefVal;
+                }
+                else if (TypeName == FMovieSceneBoolChannel::StaticStruct()->GetFName())
+                {
+                    FMovieSceneBoolChannel* BoolChan = static_cast<FMovieSceneBoolChannel*>(Chan);
+                    TArrayView<const FFrameNumber> Times = BoolChan->GetTimes();
+                    TArrayView<const bool> Values = BoolChan->GetValues();
+                    int32 KeyNum = Times.Num();
+                    Ar << KeyNum;
+                    for (int32 k = 0; k < KeyNum; ++k)
+                    {
+                        int32 Frame = Times[k].Value;
+                        bool Val = Values[k];
+                        Ar << Frame;
+                        Ar << Val;
+                    }
+                    TOptional<bool> Def = BoolChan->GetDefault();
+                    bool bHasDef = Def.IsSet();
+                    bool DefVal = Def.Get(false);
+                    Ar << bHasDef;
+                    Ar << DefVal;
+                }
+                else if (TypeName == FMovieSceneIntegerChannel::StaticStruct()->GetFName())
+                {
+                    FMovieSceneIntegerChannel* IntChan = static_cast<FMovieSceneIntegerChannel*>(Chan);
+                    TArrayView<const FFrameNumber> Times = IntChan->GetTimes();
+                    TArrayView<const int32> Values = IntChan->GetValues();
+                    int32 KeyNum = Times.Num();
+                    Ar << KeyNum;
+                    for (int32 k = 0; k < KeyNum; ++k)
+                    {
+                        int32 Frame = Times[k].Value;
+                        int32 Val = Values[k];
+                        Ar << Frame;
+                        Ar << Val;
+                    }
+                    TOptional<int32> Def = IntChan->GetDefault();
+                    bool bHasDef = Def.IsSet();
+                    int32 DefVal = Def.Get(0);
+                    Ar << bHasDef;
+                    Ar << DefVal;
+                }
+                else if (TypeName == FMovieSceneByteChannel::StaticStruct()->GetFName())
+                {
+                    FMovieSceneByteChannel* ByteChan = static_cast<FMovieSceneByteChannel*>(Chan);
+                    TArrayView<const FFrameNumber> Times = ByteChan->GetTimes();
+                    TArrayView<const uint8> Values = ByteChan->GetValues();
+                    int32 KeyNum = Times.Num();
+                    Ar << KeyNum;
+                    for (int32 k = 0; k < KeyNum; ++k)
+                    {
+                        int32 Frame = Times[k].Value;
+                        uint8 Val = Values[k];
+                        Ar << Frame;
+                        Ar << Val;
+                    }
+                    TOptional<uint8> Def = ByteChan->GetDefault();
+                    bool bHasDef = Def.IsSet();
+                    uint8 DefVal = Def.Get(0);
+                    Ar << bHasDef;
+                    Ar << DefVal;
+                }
+                else if (TypeName == FMovieSceneEventChannel::StaticStruct()->GetFName())
+                {
+                    FMovieSceneEventChannel* EvChan = static_cast<FMovieSceneEventChannel*>(Chan);
+                    TArrayView<const FFrameNumber> Times = EvChan->GetData().GetTimes();
+                    TArrayView<const FMovieSceneEvent> Values = EvChan->GetData().GetValues();
+                    int32 KeyNum = Times.Num();
+                    Ar << KeyNum;
+                    for (int32 k = 0; k < KeyNum; ++k)
+                    {
+                        int32 Frame = Times[k].Value;
+                        FString FuncName = Values[k].Ptrs.Function ? Values[k].Ptrs.Function->GetName() : FString();
+                        Ar << Frame;
+                        Ar << FuncName;
+                    }
+                }
+                else if (TypeName == FMovieSceneObjectPathChannel::StaticStruct()->GetFName())
+                {
+                    FMovieSceneObjectPathChannel* ObjChan = static_cast<FMovieSceneObjectPathChannel*>(Chan);
+                    UClass* PropClass = ObjChan->GetPropertyClass();
+                    FString PropClassName = PropClass ? PropClass->GetPathName() : FString();
+                    Ar << PropClassName;
+
+                    TArrayView<const FFrameNumber> Times = ObjChan->GetData().GetTimes();
+                    TArrayView<const FMovieSceneObjectPathChannelKeyValue> Values = ObjChan->GetData().GetValues();
+                    int32 KeyNum = Times.Num();
+                    Ar << KeyNum;
+                    for (int32 k = 0; k < KeyNum; ++k)
+                    {
+                        int32 Frame = Times[k].Value;
+                        FString ObjPath = Values[k].GetSoftPtr().ToString();
+                        Ar << Frame;
+                        Ar << ObjPath;
+                    }
+                    const FMovieSceneObjectPathChannelKeyValue& Def = ObjChan->GetDefault();
+                    FString DefPath = Def.GetSoftPtr().ToString();
+                    Ar << DefPath;
+                }
+                else
+                {
+                    TArray<FFrameNumber> KeyTimes;
+                    Chan->GetKeys(TRange<FFrameNumber>::All(), &KeyTimes, nullptr);
+                    int32 KeyNum = KeyTimes.Num();
+                    Ar << KeyNum;
+                    for (int32 k = 0; k < KeyNum; ++k)
+                    {
+                        int32 Frame = KeyTimes[k].Value;
+                        Ar << Frame;
+                    }
+                }
+            }
+        }
+    }
+
     inline void SerializeAnimationAuthoredData(
         UWidgetAnimation* Anim,
         FArchive& Ar,
@@ -215,7 +429,7 @@ namespace CortexUMGAnimationBindingTestUtils
                     Ar << SecNum;
                     for (UMovieSceneSection* Section : Sections)
                     {
-                        CortexUMGAnimationBindingUtils::SerializeSectionChannels(Ar, Section);
+                        SerializeSectionChannelsIndependently(Ar, Section);
                     }
                 }
             }
@@ -257,7 +471,7 @@ namespace CortexUMGAnimationBindingTestUtils
                 Ar << SecNum;
                 for (UMovieSceneSection* Section : Sections)
                 {
-                    CortexUMGAnimationBindingUtils::SerializeSectionChannels(Ar, Section);
+                    SerializeSectionChannelsIndependently(Ar, Section);
                 }
             }
         }

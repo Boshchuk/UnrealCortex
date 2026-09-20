@@ -23,6 +23,7 @@
 #include "Channels/MovieSceneIntegerChannel.h"
 #include "Channels/MovieSceneByteChannel.h"
 #include "Channels/MovieSceneEventChannel.h"
+#include "Channels/MovieSceneObjectPathChannel.h"
 #include "Animation/MovieScene2DTransformSection.h"
 #include "Sections/MovieSceneIntegerSection.h"
 #include "Sections/MovieSceneByteSection.h"
@@ -375,6 +376,28 @@ namespace CortexUMGAnimationBindingUtils
                         Ar << Frame;
                         Ar << FuncName;
                     }
+                }
+                else if (TypeName == FMovieSceneObjectPathChannel::StaticStruct()->GetFName())
+                {
+                    FMovieSceneObjectPathChannel* ObjChan = static_cast<FMovieSceneObjectPathChannel*>(Chan);
+                    UClass* PropClass = ObjChan->GetPropertyClass();
+                    FString PropClassName = PropClass ? PropClass->GetPathName() : FString();
+                    Ar << PropClassName;
+
+                    TArrayView<const FFrameNumber> Times = ObjChan->GetData().GetTimes();
+                    TArrayView<const FMovieSceneObjectPathChannelKeyValue> Values = ObjChan->GetData().GetValues();
+                    int32 KeyNum = Times.Num();
+                    Ar << KeyNum;
+                    for (int32 k = 0; k < KeyNum; ++k)
+                    {
+                        int32 Frame = Times[k].Value;
+                        FString ObjPath = Values[k].GetSoftPtr().ToString();
+                        Ar << Frame;
+                        Ar << ObjPath;
+                    }
+                    const FMovieSceneObjectPathChannelKeyValue& Def = ObjChan->GetDefault();
+                    FString DefPath = Def.GetSoftPtr().ToString();
+                    Ar << DefPath;
                 }
                 else
                 {
@@ -1142,6 +1165,29 @@ namespace CortexUMGAnimationBindingUtils
                 || Section->IsA<UMovieSceneColorSection>();
         };
 
+        auto AreSectionChannelsSupported = [](UMovieSceneSection* Section) -> bool
+        {
+            if (!Section)
+            {
+                return true;
+            }
+            const FMovieSceneChannelProxy& Proxy = Section->GetChannelProxy();
+            for (const FMovieSceneChannelEntry& Entry : Proxy.GetAllEntries())
+            {
+                const FName TypeName = Entry.GetChannelTypeName();
+                if (TypeName != FMovieSceneFloatChannel::StaticStruct()->GetFName()
+                    && TypeName != FMovieSceneBoolChannel::StaticStruct()->GetFName()
+                    && TypeName != FMovieSceneIntegerChannel::StaticStruct()->GetFName()
+                    && TypeName != FMovieSceneByteChannel::StaticStruct()->GetFName()
+                    && TypeName != FMovieSceneEventChannel::StaticStruct()->GetFName()
+                    && TypeName != FMovieSceneObjectPathChannel::StaticStruct()->GetFName())
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+
         if (const UMovieScene* ConstMS = OutPreflight.MovieScene)
         {
             for (const FMovieSceneBinding& Binding : ConstMS->GetBindings())
@@ -1154,7 +1200,7 @@ namespace CortexUMGAnimationBindingUtils
                     }
                     for (UMovieSceneSection* Section : Track->GetAllSections())
                     {
-                        if (!IsSectionSupported(Section))
+                        if (!IsSectionSupported(Section) || !AreSectionChannelsSupported(Section))
                         {
                             OutError = FCortexCommandRouter::Error(
                                 CortexErrorCodes::AnimationBindingUnsupported,
@@ -1173,7 +1219,7 @@ namespace CortexUMGAnimationBindingUtils
                 }
                 for (UMovieSceneSection* Section : Track->GetAllSections())
                 {
-                    if (!IsSectionSupported(Section))
+                    if (!IsSectionSupported(Section) || !AreSectionChannelsSupported(Section))
                     {
                         OutError = FCortexCommandRouter::Error(
                             CortexErrorCodes::AnimationBindingUnsupported,

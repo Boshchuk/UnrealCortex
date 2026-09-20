@@ -638,6 +638,168 @@ bool FCortexUMGAnimationBindingReloadAndCompileTest::RunTest(const FString& Para
 // -----------------------------------------------------------------------------
 // Step 6: Create Integration Seed (/Game/UI/WBP_AnimationBindingFixture)
 // -----------------------------------------------------------------------------
+// Step 6: Canonical Integration Seed Verification and Generation
+// -----------------------------------------------------------------------------
+
+static bool ValidateSeedAssetStrict(UWidgetBlueprint* ExistingBP, FString* OutError = nullptr)
+{
+    if (!ExistingBP)
+    {
+        if (OutError) *OutError = TEXT("WidgetBlueprint is null");
+        return false;
+    }
+    if (ExistingBP->Animations.Num() < 2)
+    {
+        if (OutError) *OutError = TEXT("Expected at least 2 animations");
+        return false;
+    }
+    UWidgetAnimation* ExistingAnim = nullptr;
+    for (UWidgetAnimation* A : ExistingBP->Animations)
+    {
+        if (A && A->GetName() == TEXT("appearance"))
+        {
+            ExistingAnim = A;
+            break;
+        }
+    }
+    if (!ExistingAnim || !ExistingAnim->MovieScene)
+    {
+        if (OutError) *OutError = TEXT("appearance animation or MovieScene is null");
+        return false;
+    }
+
+    if (ExistingAnim->AnimationBindings.Num() != 3)
+    {
+        if (OutError) *OutError = FString::Printf(TEXT("Expected 3 bindings, found %d"), ExistingAnim->AnimationBindings.Num());
+        return false;
+    }
+
+    TMap<FName, FGuid> BindingMap;
+    for (const FWidgetAnimationBinding& B : ExistingAnim->AnimationBindings)
+    {
+        if (!B.AnimationGuid.IsValid())
+        {
+            if (OutError) *OutError = FString::Printf(TEXT("Binding for %s has invalid GUID"), *B.WidgetName.ToString());
+            return false;
+        }
+        BindingMap.Add(B.WidgetName, B.AnimationGuid);
+    }
+
+    if (!BindingMap.Contains(TEXT("BodySizeBox")) || !BindingMap.Contains(TEXT("BorderBody")) || !BindingMap.Contains(TEXT("StorylineIcon")))
+    {
+        if (OutError) *OutError = TEXT("Missing required widget bindings (BodySizeBox, BorderBody, StorylineIcon)");
+        return false;
+    }
+
+    const UMovieScene* MS = ExistingAnim->MovieScene;
+    if (MS->GetPossessableCount() != 3)
+    {
+        if (OutError) *OutError = FString::Printf(TEXT("Expected 3 possessables, found %d"), MS->GetPossessableCount());
+        return false;
+    }
+
+    // Validate exact reflected property tracks on each possessable
+    bool bBodySizeBoxValid = false;
+    bool bBorderBodyValid = false;
+    bool bStorylineIconValid = false;
+
+    for (const FMovieSceneBinding& MSB : MS->GetBindings())
+    {
+        if (MSB.GetObjectGuid() == BindingMap[TEXT("BodySizeBox")])
+        {
+            bool bHasWidth = false;
+            bool bHasHeight = false;
+            for (UMovieSceneTrack* Track : MSB.GetTracks())
+            {
+                if (UMovieSceneFloatTrack* FT = Cast<UMovieSceneFloatTrack>(Track))
+                {
+                    if (FT->GetPropertyName() == FName("WidthOverride")) bHasWidth = true;
+                    if (FT->GetPropertyName() == FName("HeightOverride")) bHasHeight = true;
+                }
+            }
+            bBodySizeBoxValid = bHasWidth && bHasHeight && (MSB.GetTracks().Num() == 2);
+        }
+        else if (MSB.GetObjectGuid() == BindingMap[TEXT("BorderBody")])
+        {
+            bool bHasOpacity = false;
+            for (UMovieSceneTrack* Track : MSB.GetTracks())
+            {
+                if (UMovieSceneFloatTrack* FT = Cast<UMovieSceneFloatTrack>(Track))
+                {
+                    if (FT->GetPropertyName() == FName("RenderOpacity")) bHasOpacity = true;
+                }
+            }
+            bBorderBodyValid = bHasOpacity && (MSB.GetTracks().Num() == 1);
+        }
+        else if (MSB.GetObjectGuid() == BindingMap[TEXT("StorylineIcon")])
+        {
+            bool bHasEnabled = false;
+            for (UMovieSceneTrack* Track : MSB.GetTracks())
+            {
+                if (UMovieSceneBoolTrack* BT = Cast<UMovieSceneBoolTrack>(Track))
+                {
+                    if (BT->GetPropertyName() == FName("bIsEnabled")) bHasEnabled = true;
+                }
+            }
+            bStorylineIconValid = bHasEnabled && (MSB.GetTracks().Num() == 1);
+        }
+    }
+
+    if (!bBodySizeBoxValid || !bBorderBodyValid || !bStorylineIconValid)
+    {
+        if (OutError) *OutError = FString::Printf(
+            TEXT("Possessable tracks invalid: BodySizeBox=%d, BorderBody=%d, StorylineIcon=%d"),
+            (int32)bBodySizeBoxValid, (int32)bBorderBodyValid, (int32)bStorylineIconValid);
+        return false;
+    }
+
+    // Master track: exactly 1 UMovieSceneEventTrack
+    bool bHasMasterEvent = false;
+    for (UMovieSceneTrack* Track : MS->GetTracks())
+    {
+        if (Track && Track->IsA<UMovieSceneEventTrack>())
+        {
+            bHasMasterEvent = true;
+        }
+    }
+    if (!bHasMasterEvent)
+    {
+        if (OutError) *OutError = TEXT("Missing master event track");
+        return false;
+    }
+
+    // Playback node and node GUIDs
+    bool bHasPlaybackNode = false;
+    bool bAllNodesHaveGuid = true;
+    for (UEdGraph* Graph : ExistingBP->UbergraphPages)
+    {
+        if (Graph)
+        {
+            for (UEdGraphNode* Node : Graph->Nodes)
+            {
+                if (Node && !Node->NodeGuid.IsValid())
+                {
+                    bAllNodesHaveGuid = false;
+                }
+                if (UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(Node))
+                {
+                    if (CallNode->GetFunctionName() == TEXT("PlayAnimation"))
+                    {
+                        bHasPlaybackNode = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!bHasPlaybackNode || !bAllNodesHaveGuid)
+    {
+        if (OutError) *OutError = TEXT("Playback node missing or node GUIDs invalid");
+        return false;
+    }
+
+    return true;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FCortexUMGAnimationBindingCreateIntegrationSeedTest,
@@ -650,81 +812,16 @@ bool FCortexUMGAnimationBindingCreateIntegrationSeedTest::RunTest(const FString&
     const FString DiskFilename = FPackageName::LongPackageNameToFilename(
         PackageName, FPackageName::GetAssetPackageExtension());
 
+
     bool bNeedsGeneration = true;
+    FString ValidationError = TEXT("File does not exist");
     if (IFileManager::Get().FileExists(*DiskFilename))
     {
-        UWidgetBlueprint* ExistingBP = LoadObject<UWidgetBlueprint>(nullptr, *PackageName);
-        if (ExistingBP && ExistingBP->Animations.Num() >= 2)
+        UPackage* ExistingPkg = LoadPackage(nullptr, *PackageName, LOAD_None);
+        UWidgetBlueprint* ExistingBP = ExistingPkg ? FindObject<UWidgetBlueprint>(ExistingPkg, TEXT("WBP_AnimationBindingFixture")) : nullptr;
+        if (ValidateSeedAssetStrict(ExistingBP, &ValidationError))
         {
-            UWidgetAnimation* ExistingAnim = nullptr;
-            for (UWidgetAnimation* A : ExistingBP->Animations)
-            {
-                if (A && A->GetName() == TEXT("appearance"))
-                {
-                    ExistingAnim = A;
-                    break;
-                }
-            }
-            if (ExistingAnim && ExistingAnim->AnimationBindings.Num() == 3 && ExistingBP->UbergraphPages.Num() > 0)
-            {
-                // Validate existing on-disk asset actually contains the valid bindings and tracks:
-                TSet<FName> ExpectedWidgets = { TEXT("BodySizeBox"), TEXT("BorderBody"), TEXT("StorylineIcon") };
-                TSet<FName> FoundWidgets;
-                bool bValidGuids = true;
-                for (const FWidgetAnimationBinding& B : ExistingAnim->AnimationBindings)
-                {
-                    FoundWidgets.Add(B.WidgetName);
-                    if (!B.AnimationGuid.IsValid())
-                    {
-                        bValidGuids = false;
-                    }
-                }
-
-                bool bMovieSceneValid = false;
-                if (ExistingAnim->MovieScene)
-                {
-                    const UMovieScene* MS = ExistingAnim->MovieScene;
-                    int32 PossessableCount = MS->GetPossessableCount();
-                    int32 TrackCount = 0;
-                    for (const FMovieSceneBinding& MSB : MS->GetBindings())
-                    {
-                        TrackCount += MSB.GetTracks().Num();
-                    }
-                    if (PossessableCount == 3 && TrackCount >= 4)
-                    {
-                        bMovieSceneValid = true;
-                    }
-                }
-
-                bool bHasPlaybackNode = false;
-                bool bAllNodesHaveGuid = true;
-                for (UEdGraph* Graph : ExistingBP->UbergraphPages)
-                {
-                    if (Graph)
-                    {
-                        for (UEdGraphNode* Node : Graph->Nodes)
-                        {
-                            if (Node && !Node->NodeGuid.IsValid())
-                            {
-                                bAllNodesHaveGuid = false;
-                            }
-                            if (UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(Node))
-                            {
-                                if (CallNode->GetFunctionName() == TEXT("PlayAnimation"))
-                                {
-                                    bHasPlaybackNode = true;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (FoundWidgets.Num() == 3 && FoundWidgets.Includes(ExpectedWidgets) &&
-                    bValidGuids && bMovieSceneValid && bHasPlaybackNode && bAllNodesHaveGuid)
-                {
-                    bNeedsGeneration = false;
-                }
-            }
+            bNeedsGeneration = false;
         }
     }
 
@@ -734,21 +831,30 @@ bool FCortexUMGAnimationBindingCreateIntegrationSeedTest::RunTest(const FString&
         return true;
     }
 
-    const bool bIsExplicitBootstrap = Parameters.Equals(TEXT("Bootstrap"), ESearchCase::IgnoreCase);
+    const bool bIsExplicitBootstrap = Parameters.Equals(TEXT("Bootstrap"), ESearchCase::IgnoreCase)
+        || FParse::Param(FCommandLine::Get(), TEXT("BootstrapAnimationFixture"))
+        || (FPlatformMisc::GetEnvironmentVariable(TEXT("CORTEX_BOOTSTRAP_FIXTURES")) == TEXT("1"));
     if (!bIsExplicitBootstrap)
     {
-        AddError(TEXT("Canonical integration seed /Game/UI/WBP_AnimationBindingFixture is missing or invalid. Normal test runs are read-only and will not overwrite fixtures. Run with parameter 'Bootstrap' to create/update it."));
+        AddError(FString::Printf(TEXT("Canonical integration seed /Game/UI/WBP_AnimationBindingFixture is missing or invalid: %s. Normal test runs are read-only and will not overwrite fixtures. Run with parameter 'Bootstrap' or -BootstrapAnimationFixture to create/update it."), *ValidationError));
         return false;
     }
 
     IFileManager::Get().MakeDirectory(*FPaths::GetPath(DiskFilename), true);
 
-    UPackage* SeedPackage = CreatePackage(*PackageName);
+    UPackage* SeedPackage = FindPackage(nullptr, *PackageName);
+    if (!SeedPackage)
+    {
+        SeedPackage = CreatePackage(*PackageName);
+    }
     TestNotNull(TEXT("Seed package created"), SeedPackage);
     if (!SeedPackage)
     {
         return false;
     }
+
+    SeedPackage->MarkAsFullyLoaded();
+    ResetLoaders(SeedPackage);
 
     UWidgetBlueprint* WBP = CortexUMGAnimationBindingTestUtils::CreateAnimationBindingWidgetBlueprint(
         SeedPackage, TEXT("WBP_AnimationBindingFixture"));
@@ -760,7 +866,6 @@ bool FCortexUMGAnimationBindingCreateIntegrationSeedTest::RunTest(const FString&
 
     FSavePackageArgs SaveArgs;
     SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-    SaveArgs.SaveFlags = SAVE_NoError;
     const bool bSaved = UPackage::SavePackage(SeedPackage, WBP, *DiskFilename, SaveArgs);
     TestTrue(TEXT("Seed package saved to disk"), bSaved);
     SeedPackage->ClearDirtyFlag();
@@ -776,8 +881,16 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexUMGAnimationBindingSeedReadOnlyRegressionTest::RunTest(const FString& Parameters)
 {
-    // Regression test for UC-8: Verify that read-only seed verification leaves packages untouched
-    const FString TestPkgName = TEXT("/Engine/Transient/CortexTest_DirtySeedCheck");
+    // Regression test for UC-8: Verify that normal-mode verification against a mismatching
+    // seed is strictly read-only: it detects the mismatch, reports failure, does NOT clear
+    // or set dirty flags, and does NOT overwrite or touch the disk file.
+    const FString TestPkgName = TEXT("/Game/Temp/CortexTest_MismatchSeed");
+    const FString TestFilename = FPackageName::LongPackageNameToFilename(
+        TestPkgName, FPackageName::GetAssetPackageExtension());
+
+    IFileManager::Get().MakeDirectory(*FPaths::GetPath(TestFilename), true);
+
+    // 1. Create a controlled mismatching seed: missing required tracks / wrong property layout
     UPackage* TestPkg = CreatePackage(*TestPkgName);
     TestNotNull(TEXT("Test package created"), TestPkg);
     if (!TestPkg)
@@ -785,16 +898,47 @@ bool FCortexUMGAnimationBindingSeedReadOnlyRegressionTest::RunTest(const FString
         return false;
     }
 
-    TestPkg->SetDirtyFlag(true);
-    TestTrue(TEXT("Test package is dirty before check"), TestPkg->IsDirty());
+    UWidgetBlueprint* MismatchWBP = NewObject<UWidgetBlueprint>(
+        TestPkg, TEXT("CortexTest_MismatchSeed"), RF_Public | RF_Standalone | RF_Transactional);
+    MismatchWBP->ParentClass = UUserWidget::StaticClass();
+    MismatchWBP->WidgetTree = NewObject<UWidgetTree>(MismatchWBP, TEXT("WidgetTree"));
+    // Add appearance anim with 0 bindings (deliberate mismatch)
+    UWidgetAnimation* Anim = NewObject<UWidgetAnimation>(MismatchWBP, TEXT("appearance"), RF_Transactional);
+    Anim->MovieScene = NewObject<UMovieScene>(Anim, TEXT("appearance_MS"));
+    MismatchWBP->Animations.Add(Anim);
 
-    // Execute normal (read-only) test run; it must not clear dirty flag on any package
-    TestTrue(TEXT("Test package dirty flag remains true"), TestPkg->IsDirty());
-
+    FSavePackageArgs SaveArgs;
+    SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+    SaveArgs.SaveFlags = SAVE_NoError;
+    const bool bSaved = UPackage::SavePackage(TestPkg, MismatchWBP, *TestFilename, SaveArgs);
+    TestTrue(TEXT("Mismatch seed saved to disk"), bSaved);
     TestPkg->ClearDirtyFlag();
+
+    const FDateTime OrigTimestamp = IFileManager::Get().GetTimeStamp(*TestFilename);
+    const int64 OrigFileSize = IFileManager::Get().FileSize(*TestFilename);
+    TestTrue(TEXT("Original file exists"), OrigFileSize > 0);
+
+    // 2. Invoke strict validation against the mismatching asset
+    FString ValidationError;
+    const bool bValid = ValidateSeedAssetStrict(MismatchWBP, &ValidationError);
+    TestFalse(TEXT("Strict validation correctly detects mismatch"), bValid);
+    TestFalse(TEXT("Validation error is populated"), ValidationError.IsEmpty());
+
+    // 3. Verify normal-mode verification did NOT mark package dirty
+    TestFalse(TEXT("Package was not marked dirty during read-only verification"), TestPkg->IsDirty());
+
+    // 4. Verify disk file was NOT overwritten or modified
+    const FDateTime AfterTimestamp = IFileManager::Get().GetTimeStamp(*TestFilename);
+    const int64 AfterFileSize = IFileManager::Get().FileSize(*TestFilename);
+    TestEqual(TEXT("Disk file timestamp unchanged"), AfterTimestamp, OrigTimestamp);
+    TestEqual(TEXT("Disk file size unchanged"), AfterFileSize, OrigFileSize);
+
+    // 5. Cleanup test file
+    IFileManager::Get().Delete(*TestFilename);
     TestPkg->MarkAsGarbage();
     return true;
 }
+
 
 // -----------------------------------------------------------------------------
 // Step 7: Native Playback Baseline Evaluation Test
@@ -992,5 +1136,21 @@ bool FCortexUMGAnimationBindingPlaybackEvaluationTest::RunTest(const FString& Pa
     TestEqual(TEXT("Post-removal Frame 600: WidthOverride == 300.0"), EvalFloat(WidthChannel, 600), 300.0f);
     TestEqual(TEXT("Post-removal Frame 600: HeightOverride == 350.0"), EvalFloat(HeightChannel, 600), 350.0f);
 
+    // Negative controls (UC-6):
+    // 1. Corrupted float keyframe value fails evaluation check
+    const float OrigWidthVal = WidthChannel->GetData().GetValues()[0].Value;
+    WidthChannel->GetData().GetValues()[0].Value = 999.0f;
+    TestNotEqual(TEXT("Negative control: corrupted WidthOverride key fails baseline comparison"),
+        EvalFloat(WidthChannel, 120), 100.0f);
+    WidthChannel->GetData().GetValues()[0].Value = OrigWidthVal;
+
+    // 2. Corrupted bool keyframe fails evaluation check
+    const bool OrigEnabledVal = IsEnabledChannel->GetData().GetValues()[0];
+    IsEnabledChannel->GetData().GetValues()[0] = false;
+    TestNotEqual(TEXT("Negative control: corrupted bIsEnabled key fails baseline comparison"),
+        EvalBool(IsEnabledChannel, 120), true);
+    IsEnabledChannel->GetData().GetValues()[0] = OrigEnabledVal;
+
     return true;
 }
+

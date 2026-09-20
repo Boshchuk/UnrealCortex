@@ -2,6 +2,10 @@
 #include "Tests/CortexUMGAnimationBindingTestUtils.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Sections/MovieSceneObjectPropertySection.h"
+#include "Tracks/MovieSceneObjectPropertyTrack.h"
+#include "Channels/MovieSceneObjectPathChannel.h"
+#include "Components/SizeBox.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FCortexUMGAnimationBindingInspectCanonicalTest,
@@ -631,3 +635,75 @@ bool FCortexUMGAnimationBindingPaginationScalesTest::RunTest(const FString& Para
 
     return true;
 }
+
+// -----------------------------------------------------------------------------
+// Object Property Channel Digest Sensitivity Test (UC-1)
+// -----------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingObjectPropertyChannelDigestSensitivityTest,
+    "Cortex.UMG.AnimationBinding.ObjectPropertyChannelDigestSensitivity",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationBindingObjectPropertyChannelDigestSensitivityTest::RunTest(const FString& Parameters)
+{
+    FCortexUMGAnimationBindingFixture Fixture(*this);
+    UWidgetBlueprint* WBP = Fixture.Blueprint.Get();
+    TestNotNull(TEXT("WBP exists"), WBP);
+    if (!WBP)
+    {
+        return false;
+    }
+
+    UWidgetAnimation* ObjAnim = NewObject<UWidgetAnimation>(WBP, TEXT("ObjPropAnim"), RF_Transactional);
+    UMovieScene* MS = NewObject<UMovieScene>(ObjAnim, TEXT("ObjPropMS"));
+    ObjAnim->MovieScene = MS;
+
+    const FGuid PGuid = MS->AddPossessable(TEXT("BodySizeBox"), USizeBox::StaticClass());
+    FWidgetAnimationBinding Binding;
+    Binding.WidgetName = TEXT("BodySizeBox");
+    Binding.AnimationGuid = PGuid;
+    ObjAnim->AnimationBindings.Add(Binding);
+
+    UMovieSceneObjectPropertyTrack* ObjTrack = MS->AddTrack<UMovieSceneObjectPropertyTrack>(PGuid);
+    TestNotNull(TEXT("ObjTrack created"), ObjTrack);
+    if (!ObjTrack)
+    {
+        return false;
+    }
+
+    UMovieSceneObjectPropertySection* ObjSec = Cast<UMovieSceneObjectPropertySection>(ObjTrack->CreateNewSection());
+    TestNotNull(TEXT("ObjSec created"), ObjSec);
+    if (!ObjSec)
+    {
+        return false;
+    }
+    ObjTrack->AddSection(*ObjSec);
+    ObjSec->SetRange(TRange<FFrameNumber>::Inclusive(0, 1000));
+
+    // Initial state: Key at frame 100 pointing to WBP
+    ObjSec->ObjectChannel.GetData().AddKey(FFrameNumber(100), FMovieSceneObjectPathChannelKeyValue(WBP));
+
+    const FString Digest1 = CortexUMGAnimationBindingUtils::ComputeAnimationDigest(
+        WBP->GetPathName(), TEXT("ObjPropAnim"), ObjAnim, WBP);
+    TestFalse(TEXT("Digest1 is not empty"), Digest1.IsEmpty());
+
+    // Modify: Change the referenced object at frame 100 to WBP->GeneratedClass (same frame, different object)
+    ObjSec->ObjectChannel.GetData().GetValues()[0] = FMovieSceneObjectPathChannelKeyValue(WBP->GeneratedClass);
+
+    const FString Digest2 = CortexUMGAnimationBindingUtils::ComputeAnimationDigest(
+        WBP->GetPathName(), TEXT("ObjPropAnim"), ObjAnim, WBP);
+    TestFalse(TEXT("Digest2 is not empty"), Digest2.IsEmpty());
+    TestNotEqual(TEXT("Digest changes when object-property key value changes at same frame (UC-1)"), Digest1, Digest2);
+
+    // Modify: Change the default object on the channel
+    ObjSec->ObjectChannel.SetDefault(WBP);
+
+    const FString Digest3 = CortexUMGAnimationBindingUtils::ComputeAnimationDigest(
+        WBP->GetPathName(), TEXT("ObjPropAnim"), ObjAnim, WBP);
+    TestFalse(TEXT("Digest3 is not empty"), Digest3.IsEmpty());
+    TestNotEqual(TEXT("Digest changes when object-property default value changes (UC-1)"), Digest2, Digest3);
+
+    return true;
+}
+
