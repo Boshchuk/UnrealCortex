@@ -57,124 +57,8 @@ struct FCortexUMGAnimationBindingPersistenceFixture
         }
 
         const FString AssetName = FString::Printf(TEXT("WBP_PersistenceTest_%s"), *UniqueId);
-        UWidgetBlueprint* WBP = NewObject<UWidgetBlueprint>(
-            TestPackage, FName(*AssetName), RF_Public | RF_Standalone | RF_Transactional);
-        WBP->ParentClass = UUserWidget::StaticClass();
-        WBP->WidgetTree = NewObject<UWidgetTree>(WBP, TEXT("WidgetTree"));
-
-        UCanvasPanel* Root = WBP->WidgetTree->ConstructWidget<UCanvasPanel>(UCanvasPanel::StaticClass(), TEXT("Root"));
-        WBP->WidgetTree->RootWidget = Root;
-
-        USizeBox* BodySizeBox = WBP->WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass(), TEXT("BodySizeBox"));
-        Root->AddChild(BodySizeBox);
-
-        UBorder* BorderBody = WBP->WidgetTree->ConstructWidget<UBorder>(UBorder::StaticClass(), TEXT("BorderBody"));
-        Root->AddChild(BorderBody);
-
-        UImage* StorylineIcon = WBP->WidgetTree->ConstructWidget<UImage>(UImage::StaticClass(), TEXT("StorylineIcon"));
-        Root->AddChild(StorylineIcon);
-
-        UWidgetAnimation* Anim = NewObject<UWidgetAnimation>(WBP, TEXT("appearance"), RF_Transactional);
-        UMovieScene* MS = NewObject<UMovieScene>(Anim, TEXT("appearance"), RF_Transactional);
-        Anim->MovieScene = MS;
-
-        MS->SetPlaybackRange(TRange<FFrameNumber>(FFrameNumber(120), FFrameNumber(720)));
-        MS->SetTickResolutionDirectly(FFrameRate(24000, 1));
-        MS->SetDisplayRate(FFrameRate(30000, 1001));
-
-        FGuid Guid1 = MS->AddPossessable(TEXT("BodySizeBox"), BodySizeBox->GetClass());
-        FGuid Guid2 = MS->AddPossessable(TEXT("BorderBody"), BorderBody->GetClass());
-        FGuid Guid3 = MS->AddPossessable(TEXT("StorylineIcon"), StorylineIcon->GetClass());
-
-        FWidgetAnimationBinding B1;
-        B1.WidgetName = TEXT("BodySizeBox");
-        B1.SlotWidgetName = NAME_None;
-        B1.AnimationGuid = Guid1;
-        B1.bIsRootWidget = false;
-        Anim->AnimationBindings.Add(B1);
-
-        FWidgetAnimationBinding B2;
-        B2.WidgetName = TEXT("BorderBody");
-        B2.SlotWidgetName = NAME_None;
-        B2.AnimationGuid = Guid2;
-        B2.bIsRootWidget = false;
-        Anim->AnimationBindings.Add(B2);
-
-        FWidgetAnimationBinding B3;
-        B3.WidgetName = TEXT("StorylineIcon");
-        B3.SlotWidgetName = NAME_None;
-        B3.AnimationGuid = Guid3;
-        B3.bIsRootWidget = false;
-        Anim->AnimationBindings.Add(B3);
-
-        // Track 1 on Guid1 (BodySizeBox): WidthOverride
-        UMovieSceneFloatTrack* FloatTrack1 = MS->AddTrack<UMovieSceneFloatTrack>(Guid1);
-        FloatTrack1->SetPropertyNameAndPath(FName("WidthOverride"), TEXT("WidthOverride"));
-        UMovieSceneFloatSection* Section1 = Cast<UMovieSceneFloatSection>(FloatTrack1->CreateNewSection());
-        FloatTrack1->AddSection(*Section1);
-        Section1->SetRange(TRange<FFrameNumber>(FFrameNumber(120), FFrameNumber(720)));
-        FMovieSceneFloatValue K1(100.0f);
-        K1.InterpMode = RCIM_Cubic;
-        K1.TangentMode = RCTM_User;
-        K1.Tangent.ArriveTangent = 1.5f;
-        K1.Tangent.LeaveTangent = 2.0f;
-        FMovieSceneFloatValue K2(200.0f);
-        K2.InterpMode = RCIM_Linear;
-        FMovieSceneFloatValue K3(300.0f);
-        K3.InterpMode = RCIM_Constant;
-        Section1->GetChannel().AddKeys({ FFrameNumber(120), FFrameNumber(240), FFrameNumber(600) }, { K1, K2, K3 });
-        Section1->GetChannel().SetDefault(50.0f);
-
-        // Track 2 on Guid2 (BorderBody): HeightOverride
-        UMovieSceneFloatTrack* FloatTrack2 = MS->AddTrack<UMovieSceneFloatTrack>(Guid2);
-        FloatTrack2->SetPropertyNameAndPath(FName("HeightOverride"), TEXT("HeightOverride"));
-        UMovieSceneFloatSection* Section2 = Cast<UMovieSceneFloatSection>(FloatTrack2->CreateNewSection());
-        FloatTrack2->AddSection(*Section2);
-        Section2->SetRange(TRange<FFrameNumber>(FFrameNumber(120), FFrameNumber(720)));
-        Section2->GetChannel().AddKeys(
-            { FFrameNumber(120), FFrameNumber(600) },
-            { FMovieSceneFloatValue(150.0f), FMovieSceneFloatValue(350.0f) });
-        Section2->GetChannel().SetDefault(75.0f);
-
-        // Track 3 on Guid2 (BorderBody): RenderOpacity
-        UMovieSceneFloatTrack* FloatTrack3 = MS->AddTrack<UMovieSceneFloatTrack>(Guid2);
-        FloatTrack3->SetPropertyNameAndPath(FName("RenderOpacity"), TEXT("RenderOpacity"));
-        UMovieSceneFloatSection* Section3 = Cast<UMovieSceneFloatSection>(FloatTrack3->CreateNewSection());
-        FloatTrack3->AddSection(*Section3);
-        Section3->SetRange(TRange<FFrameNumber>(FFrameNumber(120), FFrameNumber(720)));
-        Section3->GetChannel().AddKeys(
-            { FFrameNumber(120), FFrameNumber(240) },
-            { FMovieSceneFloatValue(0.0f), FMovieSceneFloatValue(1.0f) });
-        Section3->GetChannel().SetDefault(0.0f);
-
-        // Track 4 on Guid3 (StorylineIcon): Visibility
-        UMovieSceneBoolTrack* BoolTrack = MS->AddTrack<UMovieSceneBoolTrack>(Guid3);
-        BoolTrack->SetPropertyNameAndPath(FName("Visibility"), TEXT("Visibility"));
-        UMovieSceneBoolSection* Section4 = Cast<UMovieSceneBoolSection>(BoolTrack->CreateNewSection());
-        BoolTrack->AddSection(*Section4);
-        Section4->SetRange(TRange<FFrameNumber>(FFrameNumber(120), FFrameNumber(720)));
-        Section4->GetChannel().AddKeys({ FFrameNumber(120), FFrameNumber(240) }, { true, false });
-        Section4->GetChannel().SetDefault(true);
-
-        // Event/master track
-        UMovieSceneEventTrack* EventTrack = MS->AddTrack<UMovieSceneEventTrack>();
-        UMovieSceneSection* EventSec = EventTrack->CreateNewSection();
-        if (EventSec)
-        {
-            EventTrack->AddSection(*EventSec);
-            EventSec->SetRange(TRange<FFrameNumber>(FFrameNumber(120), FFrameNumber(720)));
-        }
-
-        WBP->Animations.Add(Anim);
-
-        // Second unrelated animation: idle
-        UWidgetAnimation* IdleAnim = NewObject<UWidgetAnimation>(WBP, TEXT("idle"), RF_Transactional);
-        UMovieScene* IdleMS = NewObject<UMovieScene>(IdleAnim, TEXT("idle"), RF_Transactional);
-        IdleAnim->MovieScene = IdleMS;
-        IdleMS->SetPlaybackRange(TRange<FFrameNumber>(FFrameNumber(0), FFrameNumber(24000)));
-        WBP->Animations.Add(IdleAnim);
-
-        FKismetEditorUtilities::CompileBlueprint(WBP);
+        UWidgetBlueprint* WBP = CortexUMGAnimationBindingTestUtils::CreateAnimationBindingWidgetBlueprint(
+            TestPackage, AssetName);
 
         // Initial save to disk so there is an existing package file
         FSavePackageArgs SaveArgs;
@@ -212,12 +96,10 @@ struct FCortexUMGAnimationBindingPersistenceFixture
             {
                 ResetLoaders(Pkg);
                 Pkg->ClearDirtyFlag();
-                Pkg->MarkAsGarbage();
             }
             WBP->MarkAsGarbage();
             Blueprint.Reset();
         }
-        CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
 
         if (IFileManager::Get().FileExists(*DiskFilename))
         {
@@ -687,9 +569,8 @@ bool FCortexUMGAnimationBindingReloadAndCompileTest::RunTest(const FString& Para
     if (Package)
     {
         ResetLoaders(Package);
-        Package->MarkAsGarbage();
+        Package->ClearDirtyFlag();
     }
-    CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
 
     // Reload fresh from disk via LoadObject
     UWidgetBlueprint* ReloadedBP = LoadObject<UWidgetBlueprint>(nullptr, *AssetPath);
@@ -748,4 +629,53 @@ bool FCortexUMGAnimationBindingReloadAndCompileTest::RunTest(const FString& Para
     }
 
     return true;
+}
+
+// -----------------------------------------------------------------------------
+// Step 6: Create Integration Seed (/Game/UI/WBP_AnimationBindingFixture)
+// -----------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationBindingCreateIntegrationSeedTest,
+    "Cortex.UMG.AnimationBinding.CreateIntegrationSeed",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationBindingCreateIntegrationSeedTest::RunTest(const FString& Parameters)
+{
+    const FString PackageName = TEXT("/Game/UI/WBP_AnimationBindingFixture");
+    const FString DiskFilename = FPackageName::LongPackageNameToFilename(
+        PackageName, FPackageName::GetAssetPackageExtension());
+
+    if (IFileManager::Get().FileExists(*DiskFilename))
+    {
+        TestTrue(TEXT("Disk asset file exists"), true);
+        return true;
+    }
+
+    IFileManager::Get().MakeDirectory(*FPaths::GetPath(DiskFilename), true);
+
+    UPackage* SeedPackage = CreatePackage(*PackageName);
+    TestNotNull(TEXT("Seed package created"), SeedPackage);
+    if (!SeedPackage)
+    {
+        return false;
+    }
+
+    UWidgetBlueprint* WBP = CortexUMGAnimationBindingTestUtils::CreateAnimationBindingWidgetBlueprint(
+        SeedPackage, TEXT("WBP_AnimationBindingFixture"));
+    TestNotNull(TEXT("Seed WidgetBlueprint created"), WBP);
+    if (!WBP)
+    {
+        return false;
+    }
+
+    FSavePackageArgs SaveArgs;
+    SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+    SaveArgs.SaveFlags = SAVE_NoError;
+    const bool bSaved = UPackage::SavePackage(SeedPackage, WBP, *DiskFilename, SaveArgs);
+    TestTrue(TEXT("Seed package saved to disk"), bSaved);
+    SeedPackage->ClearDirtyFlag();
+
+    TestTrue(TEXT("Disk asset file exists"), IFileManager::Get().FileExists(*DiskFilename));
+    return bSaved;
 }

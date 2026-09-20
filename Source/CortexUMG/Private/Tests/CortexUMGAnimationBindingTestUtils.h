@@ -266,18 +266,13 @@ namespace CortexUMGAnimationBindingTestUtils
             }
         }
     }
-}
 
-struct FCortexUMGAnimationBindingFixture
-{
-    explicit FCortexUMGAnimationBindingFixture(FAutomationTestBase& Test)
-        : TestRef(Test)
+    inline UWidgetBlueprint* CreateAnimationBindingWidgetBlueprint(
+        UPackage* TargetPackage,
+        const FString& AssetName)
     {
-        UPackage* TestPackage = CreatePackage(
-            *(TEXT("/Temp/CortexUMGAnimationBindingFixture_") + FGuid::NewGuid().ToString()));
-
         UWidgetBlueprint* WBP = NewObject<UWidgetBlueprint>(
-            TestPackage, TEXT("WBP_AnimBindingFixture"), RF_Public | RF_Standalone | RF_Transactional);
+            TargetPackage, FName(*AssetName), RF_Public | RF_Standalone | RF_Transactional);
         WBP->ParentClass = UUserWidget::StaticClass();
         WBP->WidgetTree = NewObject<UWidgetTree>(WBP, TEXT("WidgetTree"));
 
@@ -394,6 +389,20 @@ struct FCortexUMGAnimationBindingFixture
         WBP->Animations.Add(IdleAnim);
 
         FKismetEditorUtilities::CompileBlueprint(WBP);
+        return WBP;
+    }
+}
+
+struct FCortexUMGAnimationBindingFixture
+{
+    explicit FCortexUMGAnimationBindingFixture(FAutomationTestBase& Test)
+        : TestRef(Test)
+    {
+        UPackage* TestPackage = CreatePackage(
+            *(TEXT("/Temp/CortexUMGAnimationBindingFixture_") + FGuid::NewGuid().ToString()));
+
+        UWidgetBlueprint* WBP = CortexUMGAnimationBindingTestUtils::CreateAnimationBindingWidgetBlueprint(
+            TestPackage, TEXT("WBP_AnimBindingFixture"));
         TestPackage->ClearDirtyFlag();
 
         Blueprint = TStrongObjectPtr<UWidgetBlueprint>(WBP);
