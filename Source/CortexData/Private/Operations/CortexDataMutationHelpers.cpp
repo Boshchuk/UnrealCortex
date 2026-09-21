@@ -3,6 +3,7 @@
 
 #include "CortexDataModule.h"
 #include "CortexEditorUtils.h"
+#include "CortexEngineCompat.h"
 #include "CortexSerializer.h"
 #include "Operations/CortexDataAssetOps.h"
 #include "Operations/CortexDataTableOps.h"
@@ -804,7 +805,7 @@ namespace CortexDataMutationHelpersPrivate
 
 		for (const TPair<FString, FString>& Entry : AfterEntries)
 		{
-			MutableTable->SetSourceString(Entry.Key, Entry.Value, FString());
+			CortexEngineCompat::SetStringTableSourceString(*MutableTable, Entry.Key, Entry.Value);
 		}
 	}
 
@@ -1116,7 +1117,7 @@ FCortexDataMutationResult FCortexDataMutationHelpers::BuildUpdateDatatableRowPla
 
 	for (const auto& Pair : Request.RowData->Values)
 	{
-		OutPlan.ModifiedFields.Add(CortexJson::KeyToString(Pair.Key));
+		OutPlan.ModifiedFields.Add(CortexEngineCompat::JsonKeyToString(Pair.Key));
 	}
 
 	TArray<FString> Warnings;
@@ -1173,18 +1174,18 @@ FCortexDataMutationResult FCortexDataMutationHelpers::PreviewUpdateDatatableRow(
 	TSharedPtr<FJsonObject> NewValues = FCortexSerializer::StructToJson(Plan.RowStruct, TempRowPtr);
 	for (const FString& Field : Plan.ModifiedFields)
 	{
-		const TSharedPtr<FJsonValue>* OldVal = CortexJson::FindField(OldValues, Field);
-		const TSharedPtr<FJsonValue>* NewVal = CortexJson::FindField(NewValues, Field);
+		const TSharedPtr<FJsonValue> OldVal = OldValues.IsValid() ? OldValues->TryGetField(Field) : nullptr;
+		const TSharedPtr<FJsonValue> NewVal = NewValues.IsValid() ? NewValues->TryGetField(Field) : nullptr;
 
 		TSharedRef<FJsonObject> ChangeEntry = MakeShared<FJsonObject>();
 		ChangeEntry->SetStringField(TEXT("field"), Field);
-		if (OldVal != nullptr && (*OldVal).IsValid())
+		if (OldVal.IsValid())
 		{
-			ChangeEntry->SetField(TEXT("old_value"), *OldVal);
+			ChangeEntry->SetField(TEXT("old_value"), OldVal);
 		}
-		if (NewVal != nullptr && (*NewVal).IsValid())
+		if (NewVal.IsValid())
 		{
-			ChangeEntry->SetField(TEXT("new_value"), *NewVal);
+			ChangeEntry->SetField(TEXT("new_value"), NewVal);
 		}
 		ChangesArray.Add(MakeShared<FJsonValueObject>(ChangeEntry));
 	}
@@ -1881,7 +1882,7 @@ FCortexDataMutationResult FCortexDataMutationHelpers::BuildUpdateDataAssetPlan(
 	OutPlan.AssetClass = DataAsset->GetClass();
 	for (const auto& Pair : Request.Properties->Values)
 	{
-		OutPlan.ModifiedFields.Add(CortexJson::KeyToString(Pair.Key));
+		OutPlan.ModifiedFields.Add(CortexEngineCompat::JsonKeyToString(Pair.Key));
 	}
 
 	TSharedPtr<FJsonObject> OldValues = FCortexSerializer::StructToJson(OutPlan.AssetClass, DataAsset);

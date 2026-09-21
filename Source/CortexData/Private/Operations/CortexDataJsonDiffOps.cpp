@@ -1,6 +1,7 @@
 #include "Operations/CortexDataJsonDiffOps.h"
 #include "CortexJsonCompat.h"
 
+#include "CortexEngineCompat.h"
 #include "CortexSafeFileContract.h"
 #include "CortexTypes.h"
 #include "Dom/JsonObject.h"
@@ -507,11 +508,17 @@ namespace
 		TSet<FString> FieldNames;
 		if (LeftFields.IsValid())
 		{
-			CortexJson::AppendFieldNames(LeftFields, FieldNames);
+			for (const auto& Pair : LeftFields->Values)
+			{
+				FieldNames.Add(CortexEngineCompat::JsonKeyToString(Pair.Key));
+			}
 		}
 		if (RightFields.IsValid())
 		{
-			CortexJson::AppendFieldNames(RightFields, FieldNames);
+			for (const auto& Pair : RightFields->Values)
+			{
+				FieldNames.Add(CortexEngineCompat::JsonKeyToString(Pair.Key));
+			}
 		}
 
 		TArray<FString> SortedFields = FieldNames.Array();

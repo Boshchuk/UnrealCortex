@@ -61,6 +61,7 @@ TSharedPtr<FCortexGenJobManager> CreateTestJobManager()
 {
     auto Manager = MakeShared<FCortexGenJobManager>();
     Manager->Initialize();
+    Manager->ClearTimingData();
     return Manager;
 }
 

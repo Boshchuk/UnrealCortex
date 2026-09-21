@@ -1,6 +1,7 @@
 #include "Misc/AutomationTest.h"
 #include "CortexJsonCompat.h"
 #include "CortexCommandRouter.h"
+#include "CortexEngineCompat.h"
 #include "CortexGraphCommandHandler.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -83,20 +84,24 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexGraphSetTextPinValueStringTableTest::RunTest(const FString& Parameters)
 {
-	UStringTable* TestTable = NewObject<UStringTable>(
-		GetTransientPackage(),
-		FName(TEXT("TestStringTable_GraphTextMutation")));
-	TestTable->GetMutableStringTable()->SetNamespace(TEXT("TestNS"));
-	TestTable->GetMutableStringTable()->SetSourceString(TEXT("Mail.Button.Pay"), TEXT("Pay"), FString());
-
 	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString TablePackageName = FString::Printf(TEXT("/Game/Temp/TestGraphTable_%s"), *Suffix);
+	UPackage* TablePackage = CreatePackage(*TablePackageName);
+	UStringTable* TestTable = NewObject<UStringTable>(
+		TablePackage,
+		FName(TEXT("TestStringTable_GraphTextMutation")),
+		RF_Public | RF_Standalone);
+	TestTable->GetMutableStringTable()->SetNamespace(TEXT("TestNS"));
+	CortexEngineCompat::SetStringTableSourceString(
+		*TestTable->GetMutableStringTable(), TEXT("Mail.Button.Pay"), TEXT("Pay"));
+
 	const FString PackageName = FString::Printf(TEXT("/Game/Temp/CortexGraphSetTextPinValueStringTable_%s"), *Suffix);
 	const FString BlueprintName = FString::Printf(TEXT("BP_SetTextPinValueStringTable_%s"), *Suffix);
 	UBlueprint* Blueprint = CreateTextPinBlueprint(*PackageName, *BlueprintName);
 	TestNotNull(TEXT("Blueprint created"), Blueprint);
 	if (Blueprint == nullptr)
 	{
-		TestTable->MarkAsGarbage();
+		TablePackage->MarkAsGarbage();
 		return false;
 	}
 
@@ -132,7 +137,7 @@ bool FCortexGraphSetTextPinValueStringTableTest::RunTest(const FString& Paramete
 			TEXT("Mail.Button.Pay"));
 	}
 
-	TestTable->MarkAsGarbage();
+	TablePackage->MarkAsGarbage();
 	DeleteTestBlueprintAsset(AssetPath);
 	return true;
 }

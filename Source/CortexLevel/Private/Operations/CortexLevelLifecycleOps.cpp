@@ -1,5 +1,6 @@
 #include "Operations/CortexLevelLifecycleOps.h"
 
+#include "CortexEngineCompat.h"
 #include "CortexTypes.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Editor.h"
@@ -204,7 +205,7 @@ FCortexCommandResult FCortexLevelLifecycleOps::CreateLevel(const TSharedPtr<FJso
 			if (!TemplateWorld)
 			{
 				// Fallback: scan the package for any UWorld
-				ForEachObjectWithPackage(TemplatePackage, [&TemplateWorld](UObject* Obj)
+				CortexEngineCompat::ForEachObjectWithPackage(TemplatePackage, [&TemplateWorld](UObject* Obj)
 				{
 					if (!TemplateWorld && Obj && Obj->IsA<UWorld>())
 					{
@@ -623,7 +624,7 @@ FCortexCommandResult FCortexLevelLifecycleOps::DeleteLevel(const TSharedPtr<FJso
 	if (!LevelAsset)
 	{
 		// Try finding any UWorld in the package
-		ForEachObjectWithPackage(Package, [&LevelAsset](UObject* Obj)
+		CortexEngineCompat::ForEachObjectWithPackage(Package, [&LevelAsset](UObject* Obj)
 		{
 			if (!LevelAsset && Obj && Obj->IsA<UWorld>())
 			{

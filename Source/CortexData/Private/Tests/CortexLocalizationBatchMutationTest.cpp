@@ -2,6 +2,7 @@
 #include "CortexJsonCompat.h"
 #include "CortexCommandRouter.h"
 #include "CortexDataCommandHandler.h"
+#include "CortexEngineCompat.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Internationalization/StringTable.h"
@@ -149,7 +150,8 @@ bool FCortexUpdateStringTableDryRunSafetyTest::RunTest(const FString& Parameters
 		return true;
 	}
 
-	Table->GetMutableStringTable()->SetSourceString(TEXT("entry.fireball.title"), TEXT("Entry Fireball"), FString());
+	CortexEngineCompat::SetStringTableSourceString(
+		*Table->GetMutableStringTable(), TEXT("entry.fireball.title"), TEXT("Entry Fireball"));
 
 	const FCortexCommandResult Result = ExecuteUpdateStringTable(
 		Table,
@@ -233,8 +235,10 @@ bool FCortexUpdateStringTableOrderedApplyTest::RunTest(const FString& Parameters
 		return true;
 	}
 
-	Table->GetMutableStringTable()->SetSourceString(TEXT("entry.fireball.title"), TEXT("Entry Fireball"), FString());
-	Table->GetMutableStringTable()->SetSourceString(TEXT("entry.fireball.body"), TEXT("Deals fire damage"), FString());
+	CortexEngineCompat::SetStringTableSourceString(
+		*Table->GetMutableStringTable(), TEXT("entry.fireball.title"), TEXT("Entry Fireball"));
+	CortexEngineCompat::SetStringTableSourceString(
+		*Table->GetMutableStringTable(), TEXT("entry.fireball.body"), TEXT("Deals fire damage"));
 
 	const FCortexCommandResult Result = ExecuteUpdateStringTable(
 		Table,
@@ -298,8 +302,10 @@ bool FCortexUpdateStringTableCollisionReportingTest::RunTest(const FString& Para
 		return true;
 	}
 
-	Table->GetMutableStringTable()->SetSourceString(TEXT("entry.fireball.title"), TEXT("Entry Fireball"), FString());
-	Table->GetMutableStringTable()->SetSourceString(TEXT("fireball.title"), TEXT("Existing Fireball"), FString());
+	CortexEngineCompat::SetStringTableSourceString(
+		*Table->GetMutableStringTable(), TEXT("entry.fireball.title"), TEXT("Entry Fireball"));
+	CortexEngineCompat::SetStringTableSourceString(
+		*Table->GetMutableStringTable(), TEXT("fireball.title"), TEXT("Existing Fireball"));
 
 	const FCortexCommandResult Result = ExecuteUpdateStringTable(
 		Table,
@@ -351,7 +357,8 @@ bool FCortexUpdateStringTableMissingKeyReportingTest::RunTest(const FString& Par
 		return true;
 	}
 
-	Table->GetMutableStringTable()->SetSourceString(TEXT("entry.fireball.title"), TEXT("Entry Fireball"), FString());
+	CortexEngineCompat::SetStringTableSourceString(
+		*Table->GetMutableStringTable(), TEXT("entry.fireball.title"), TEXT("Entry Fireball"));
 
 	const FCortexCommandResult Result = ExecuteUpdateStringTable(
 		Table,
@@ -401,7 +408,8 @@ bool FCortexUpdateStringTableAllowPartialIssueResultsAreNonBlockingTest::RunTest
 		return true;
 	}
 
-	Table->GetMutableStringTable()->SetSourceString(TEXT("entry.fireball.title"), TEXT("Entry Fireball"), FString());
+	CortexEngineCompat::SetStringTableSourceString(
+		*Table->GetMutableStringTable(), TEXT("entry.fireball.title"), TEXT("Entry Fireball"));
 
 	const FCortexCommandResult Result = ExecuteUpdateStringTable(
 		Table,
@@ -461,7 +469,8 @@ bool FCortexUpdateStringTableStrictBlockedBatchDoesNotReportAppliedOpsTest::RunT
 		return true;
 	}
 
-	Table->GetMutableStringTable()->SetSourceString(TEXT("entry.fireball.title"), TEXT("Entry Fireball"), FString());
+	CortexEngineCompat::SetStringTableSourceString(
+		*Table->GetMutableStringTable(), TEXT("entry.fireball.title"), TEXT("Entry Fireball"));
 
 	const FCortexCommandResult Result = ExecuteUpdateStringTable(
 		Table,

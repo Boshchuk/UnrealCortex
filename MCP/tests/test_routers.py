@@ -1,5 +1,6 @@
 """Unit tests for consolidated domain routers."""
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -7,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from cortex_mcp.capabilities import CORE_DOMAINS
-from cortex_mcp.tools.routers import make_router, register_router_tools
+from cortex_mcp.tools.routers import make_router, register_router_tools, strict_router_tool
 from cortex_mcp.tcp_client import EditorConnection, UECommandError
 from cortex_mcp import server
 
@@ -35,6 +36,15 @@ def _editor(port: int, pid: int, started_at: str) -> EditorConnection:
     )
 
 
+def _call_tool_payload(mcp, name: str, arguments: dict) -> dict:
+    content = asyncio.run(mcp.call_tool(name, arguments))
+    if isinstance(content, tuple):
+        content = content[0]
+    if isinstance(content, list):
+        content = content[0]
+    return json.loads(content.text)
+
+
 def test_make_router_dispatches_domain_command():
     connection = MagicMock()
     connection.send_command.return_value = {"success": True, "data": {"ok": True}}
@@ -46,6 +56,62 @@ def test_make_router_dispatches_domain_command():
     connection.send_command.assert_called_once_with(
         "data.query_datatable",
         {"table_path": "/Game/Data/DT_Test"},
+    )
+
+
+def test_core_router_handles_batch_query_without_controls():
+    """batch_query must still work with commands only."""
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {"ok": True}}
+
+    router = make_router("core", connection, "core docs")
+    commands = [{"command": "data.list_datatables", "params": {}}]
+    payload = json.loads(router("batch_query", {"commands": commands}))
+
+    assert payload["ok"] is True
+    connection.send_command.assert_called_once_with("batch", {"commands": commands})
+
+
+def test_core_router_batch_query_forwards_rollback_controls():
+    """The failure-atomic batch contract must survive the Python facade: stop_on_error,
+    rollback_on_error, and verify_rollback are forwarded to the editor unchanged."""
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {"ok": True}}
+
+    router = make_router("core", connection, "core docs")
+    commands = [{"command": "graph.add_node", "params": {"asset_path": "/Game/Test"}}]
+    payload = json.loads(router("batch_query", {
+        "commands": commands,
+        "stop_on_error": True,
+        "rollback_on_error": True,
+        "verify_rollback": True,
+    }))
+
+    assert payload["ok"] is True
+    connection.send_command.assert_called_once_with(
+        "batch",
+        {
+            "commands": commands,
+            "stop_on_error": True,
+            "rollback_on_error": True,
+            "verify_rollback": True,
+        },
+    )
+
+
+def test_core_router_batch_query_accepts_steps_alias_and_json_string():
+    """steps is a first-class alias for commands, and string commands are parsed."""
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {"ok": True}}
+
+    router = make_router("core", connection, "core docs")
+    commands = [{"command": "data.list_datatables", "params": {}}]
+    commands_json = json.dumps(commands)
+    router("batch_query", {"steps": commands_json, "rollback_on_error": True})
+
+    connection.send_command.assert_called_once_with(
+        "batch",
+        {"commands": commands, "rollback_on_error": True},
     )
 
 
@@ -545,4 +611,142 @@ def test_data_router_forwards_export_schema_json_payload():
     connection.send_command.assert_called_once_with(
         "data.export_schema_json",
         {"out_path": "Saved/CortexExports/schema.json"},
+    )
+
+
+def test_router_rejects_top_level_operation_fields():
+    connection = MagicMock()
+    router = make_router("graph", connection, "graph docs")
+    strict = strict_router_tool(router, "graph")
+    payload = json.loads(strict("add_node", None, node_class="UK2Node_VariableGet", asset_path="/Game/BP_X"))
+    assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    assert payload["canonical_shape"] == {"command": "string", "params": "object"}
+    connection.send_command.assert_not_called()
+
+
+def test_registered_router_rejects_top_level_operation_fields_locally():
+    from mcp.server.fastmcp import FastMCP
+
+    connection = MagicMock()
+    mcp = FastMCP("router-contract-test")
+    register_router_tools(mcp, connection, {"graph": "graph docs"}, domains=("graph",))
+
+    payload = _call_tool_payload(mcp, "graph_cmd", {
+        "command": "add_node",
+        "node_class": "UK2Node_VariableGet",
+        "asset_path": "/Game/BP_X",
+    })
+
+    assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    assert payload["canonical_shape"] == {"command": "string", "params": "object"}
+    connection.send_command.assert_not_called()
+
+
+def test_registered_router_rejects_non_object_params_locally():
+    from mcp.server.fastmcp import FastMCP
+
+    connection = MagicMock()
+    mcp = FastMCP("router-contract-test")
+    register_router_tools(mcp, connection, {"graph": "graph docs"}, domains=("graph",))
+
+    payload = _call_tool_payload(mcp, "graph_cmd", {
+        "command": "add_node",
+        "params": ["not", "an", "object"],
+    })
+
+    assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    assert payload["canonical_shape"] == {"command": "string", "params": "object"}
+    connection.send_command.assert_not_called()
+
+
+def test_batch_query_rejects_empty_commands_locally():
+    connection = MagicMock()
+    router = make_router("core", connection, "core docs")
+    strict = strict_router_tool(router, "core")
+    payload = json.loads(strict("batch_query", {"commands": []}))
+    assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    connection.send_command.assert_not_called()
+
+
+def test_batch_query_rejects_missing_commands_locally():
+    connection = MagicMock()
+    router = make_router("core", connection, "core docs")
+    strict = strict_router_tool(router, "core")
+    payload = json.loads(strict("batch_query", {}))
+    assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    connection.send_command.assert_not_called()
+
+
+def test_registered_batch_query_rejects_missing_commands_locally():
+    from mcp.server.fastmcp import FastMCP
+
+    connection = MagicMock()
+    mcp = FastMCP("router-contract-test")
+    register_router_tools(mcp, connection, {"core": "core docs"}, domains=("core",))
+
+    payload = _call_tool_payload(mcp, "core_cmd", {"command": "batch_query", "params": {}})
+
+    assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    assert payload["canonical_shape"] == {"command": "string", "params": "object"}
+    connection.send_command.assert_not_called()
+
+
+def test_batch_query_rejects_empty_steps_alias_locally():
+    connection = MagicMock()
+    router = make_router("core", connection, "core docs")
+    strict = strict_router_tool(router, "core")
+    payload = json.loads(strict("batch_query", {"steps": []}))
+    assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    connection.send_command.assert_not_called()
+
+
+def test_batch_query_forwards_steps_alias_as_commands():
+    connection = MagicMock()
+    connection.send_command.return_value = {
+        "success": True,
+        "data": {"results": [{"index": 0, "success": True}], "count": 1},
+    }
+    router = make_router("core", connection, "core docs")
+    strict = strict_router_tool(router, "core")
+    payload = json.loads(strict("batch_query", {
+        "steps": [{"command": "graph.add_node", "params": {"asset_path": "/Game/BP_X"}}],
+        "stop_on_error": True,
+        "rollback_on_error": True,
+        "verify_rollback": True,
+    }))
+    assert payload["count"] == 1
+    connection.send_command.assert_called_once_with(
+        "batch",
+        {
+            "commands": [{"command": "graph.add_node", "params": {"asset_path": "/Game/BP_X"}}],
+            "stop_on_error": True,
+            "rollback_on_error": True,
+            "verify_rollback": True,
+        },
+    )
+
+
+def test_batch_query_forwards_rollback_params():
+    connection = MagicMock()
+    connection.send_command.return_value = {
+        "success": True,
+        "data": {"results": [{"index": 0, "success": True}], "count": 1},
+    }
+    router = make_router("core", connection, "core docs")
+    strict = strict_router_tool(router, "core")
+    payload = json.loads(strict("batch_query", {
+        "commands": [{"command": "graph.add_node", "params": {"asset_path": "/Game/BP_X"}}],
+        "stop_on_error": True,
+        "rollback_on_error": True,
+        "verify_rollback": True,
+    }))
+    assert payload["count"] == 1
+    connection.send_command.assert_called_once_with(
+        "batch",
+        {
+            "commands": [{"command": "graph.add_node", "params": {"asset_path": "/Game/BP_X"}}],
+            "stop_on_error": True,
+            "rollback_on_error": True,
+            "verify_rollback": True,
+        },
     )

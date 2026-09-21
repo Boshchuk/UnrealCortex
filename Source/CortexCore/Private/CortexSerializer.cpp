@@ -2,6 +2,7 @@
 #include "CortexSerializer.h"
 #include "CortexJsonCompat.h"
 #include "CortexCoreModule.h"
+#include "CortexEngineCompat.h"
 #include "UObject/UnrealType.h"
 #include "UObject/TextProperty.h"
 #include "UObject/EnumProperty.h"
@@ -1211,7 +1212,7 @@ bool FCortexSerializer::JsonToStruct(const TSharedPtr<FJsonObject>& JsonObject, 
 	bool bSuccess = true;
 	for (const auto& Pair : JsonObject->Values)
 	{
-		const FString FieldName = CortexJson::KeyToString(Pair.Key);
+		const FString FieldName = CortexEngineCompat::JsonKeyToString(Pair.Key);
 		const TSharedPtr<FJsonValue>& JsonValue = Pair.Value;
 
 		// Skip internal metadata fields
@@ -1642,7 +1643,8 @@ bool FCortexSerializer::JsonToProperty(const TSharedPtr<FJsonValue>& JsonValue, 
 
 			// Import key from string
 			void* KeyPtr = MapHelper.GetKeyPtr(NewIndex);
-			MapProp->KeyProp->ImportText_Direct(*MapPair.Key, KeyPtr, nullptr, PPF_None);
+			const FString KeyString = CortexEngineCompat::JsonKeyToString(MapPair.Key);
+			MapProp->KeyProp->ImportText_Direct(*KeyString, KeyPtr, nullptr, PPF_None);
 
 			// Import value
 			void* MapValuePtr = MapHelper.GetValuePtr(NewIndex);

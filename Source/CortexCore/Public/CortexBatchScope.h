@@ -2,8 +2,34 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Templates/Function.h"
+#include "UObject/Package.h"
 
 class UMaterial;
+
+/**
+ * One reversible mutation recorded while executing a batch.
+ * Registered by domain operations (graph add_node/connect) via FCortexBatchScope
+ * so a failing batch can undo every mutation it created, in reverse order.
+ */
+struct CORTEXCORE_API FCortexBatchRollbackEntry
+{
+	FString Kind;
+	FString NodeId;
+	FString Description;
+	TFunction<bool()> Rollback;
+	TFunction<bool()> Verify;
+	TWeakObjectPtr<UPackage> Package;
+};
+
+/** Result of executing the rollback journal for a failing batch. */
+struct CORTEXCORE_API FCortexBatchRollbackResult
+{
+	bool bAttempted = true;
+	bool bVerified = true;
+	TArray<FString> CreatedNodeIds;
+	TArray<FString> ResidualChanges;
+};
 
 /**
  * RAII guard for batch execution.
@@ -33,10 +59,58 @@ public:
 	 */
 	static void AddCleanupAction(const FString& Key, FBatchCleanupCallback Callback);
 
+	/**
+	 * Register a reversible mutation (e.g. a node or connection created by the batch).
+	 * Only recorded while inside a batch and before rollback has executed.
+	 */
+	static void RegisterRollbackEntry(
+		const FString& Kind,
+		const FString& NodeId,
+		const FString& Description,
+		TFunction<bool()> Rollback,
+		TFunction<bool()> Verify,
+		TWeakObjectPtr<UPackage> Package = nullptr);
+
+	/**
+	 * Execute the rollback journal in reverse registration order.
+	 * Returns whether every journaled mutation was reverted and verified. Affected packages remain
+	 * dirty because verification is scoped to journaled graph nodes and direct links.
+	 */
+	static FCortexBatchRollbackResult ExecuteRollback();
+
+	/** Discard recorded rollback entries without executing them. */
+	static void DiscardRollbackEntries();
+
+	/** Snapshot packages that were already dirty before the rollback-safe batch starts. */
+	static void CaptureDirtyBaseline();
+
+	/** Whether the current batch rolls back on failure (`rollback_on_error`). Domain
+	 *  operations query this to reject mutations the rollback journal cannot undo atomically
+	 *  (e.g. graph connections that would replace existing links or create conversion nodes). */
+	static bool IsRollbackEnabled();
+
+	/** Set by HandleBatch for the current batch; the scope restores the outer value on exit. */
+	static void SetRollbackEnabled(bool bEnabled);
+
 private:
 	/** Materials that need PostEditChange when batch ends. */
 	static TSet<TWeakObjectPtr<UMaterial>> DirtyMaterials;
 
 	/** Generic cleanup actions keyed for deduplication. */
 	static TMap<FString, FBatchCleanupCallback> CleanupActions;
+
+	/** Reverse-order rollback journal for the current batch. */
+	static TArray<FCortexBatchRollbackEntry> RollbackEntries;
+
+	/** True once rollback has executed for the current outermost batch. */
+	static bool bRollbackExecuted;
+
+	/** Packages dirty before the batch; verified rollback never clears their unrelated edits. */
+	static TSet<UPackage*> PackagesDirtyBeforeBatch;
+
+	/** rollback_on_error of the current batch (set by HandleBatch). */
+	static bool bRollbackEnabled;
+
+	/** Value of bRollbackEnabled captured when this scope was created; restored on destruction. */
+	bool bRollbackEnabledBeforeBatch = false;
 };

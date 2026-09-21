@@ -3,6 +3,7 @@
 #include "CortexJsonCompat.h"
 #include "Operations/CortexDataMutationHelpers.h"
 #include "CortexDataModule.h"
+#include "CortexEngineCompat.h"
 #include "AssetRegistry/IAssetRegistry.h"
 #include "AssetRegistry/AssetData.h"
 #include "Internationalization/StringTable.h"
@@ -638,7 +639,7 @@ namespace
 
 		for (const TPair<FString, FString>& Entry : AfterEntries)
 		{
-			MutableTable->SetSourceString(Entry.Key, Entry.Value, FString());
+			CortexEngineCompat::SetStringTableSourceString(*MutableTable, Entry.Key, Entry.Value);
 		}
 	}
 

@@ -37,6 +37,7 @@ bool FCortexCliSessionConnectTest::RunTest(const FString& Parameters)
     (void)Parameters;
     FCortexSessionConfig Config;
     Config.SessionId = TEXT("test-connect");
+    Config.ProviderId = FName(TEXT("claude_code"));
     TSharedPtr<FCortexCliSession> Session = MakeShared<FCortexCliSession>(Config);
 
     TestEqual(TEXT("Should start Inactive"), Session->GetStateForTest(), ECortexSessionState::Inactive);

@@ -66,6 +66,9 @@ public:
     /** Get average generation time for a model. Returns 0 if fewer than 3 samples. */
     float GetAverageTime(const FString& ModelId) const;
 
+    /** Clear all recorded timing data (used in tests and reset). */
+    void ClearTimingData();
+
 private:
     static FString GenerateJobId();
     void TransitionJob(FCortexGenJobState& Job, ECortexGenJobStatus NewStatus);

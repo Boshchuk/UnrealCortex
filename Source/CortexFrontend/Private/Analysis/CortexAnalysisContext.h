@@ -5,6 +5,7 @@
 #include "CortexAnalysisTypes.h"
 #include "CortexConversionTypes.h"
 #include "Analysis/CortexFindingTypes.h"
+#include "CortexEngineCompat.h"
 #include "Engine/Blueprint.h"
 #include "UObject/GCObject.h"
 #include "UObject/UObjectHash.h"
@@ -84,7 +85,7 @@ struct FCortexAnalysisContext : public FGCObject
             // Find the transient Blueprint shell that owns the cloned graphs.
             // Graphs are cloned into a UBlueprint (not directly into the package) because
             // UK2Node_Event::FixupEventReference requires a UBlueprint in the outer chain.
-            ForEachObjectWithPackage(TempPackage, [this](UObject* Obj)
+            CortexEngineCompat::ForEachObjectWithPackage(TempPackage, [this](UObject* Obj)
             {
                 if (UBlueprint* BP = Cast<UBlueprint>(Obj))
                 {
@@ -97,7 +98,7 @@ struct FCortexAnalysisContext : public FGCObject
             // Index cloned graphs — graphs are direct children of TempBlueprint
             if (TempBlueprint)
             {
-                ForEachObjectWithPackage(TempPackage, [this](UObject* Obj)
+                CortexEngineCompat::ForEachObjectWithPackage(TempPackage, [this](UObject* Obj)
                 {
                     if (UEdGraph* Graph = Cast<UEdGraph>(Obj))
                     {

@@ -30,6 +30,8 @@ namespace CortexErrorCodes
 	static const FString BatchLimitExceeded = TEXT("BATCH_LIMIT_EXCEEDED");
 	static const FString BatchRecursionBlocked = TEXT("BATCH_RECURSION_BLOCKED");
 	static const FString BatchRefResolutionFailed = TEXT("BATCH_REF_RESOLUTION_FAILED");
+	static const FString InvalidInvocationShape = TEXT("INVALID_INVOCATION_SHAPE");
+	static const FString DirtyEditorState = TEXT("DIRTY_EDITOR_STATE");
 	static const FString StalePrecondition = TEXT("STALE_PRECONDITION");
 	static const FString GraphNotFound = TEXT("GRAPH_NOT_FOUND");
 	static const FString SubgraphNotFound = TEXT("SUBGRAPH_NOT_FOUND");
@@ -59,6 +61,9 @@ namespace CortexErrorCodes
 	static const FString AnimationNotFound = TEXT("ANIMATION_NOT_FOUND");
 	static const FString AnimationExists = TEXT("ANIMATION_EXISTS");
 	static const FString TrackNotFound = TEXT("TRACK_NOT_FOUND");
+	static const FString AnimationBindingNotFound = TEXT("ANIMATION_BINDING_NOT_FOUND");
+	static const FString AnimationBindingAmbiguous = TEXT("ANIMATION_BINDING_AMBIGUOUS");
+	static const FString AnimationBindingUnsupported = TEXT("ANIMATION_BINDING_UNSUPPORTED");
 	static const FString InvalidPropertyPath = TEXT("INVALID_PROPERTY_PATH");
 	static const FString InvalidPropertyValue = TEXT("INVALID_PROPERTY_VALUE");
 	static const FString NotTextWidget = TEXT("NOT_TEXT_WIDGET");
@@ -139,6 +144,7 @@ namespace CortexErrorCodes
 	// Gen errors
 	static const FString ProviderNotFound = TEXT("PROVIDER_NOT_FOUND");
 	static const FString CapabilityNotSupported = TEXT("CAPABILITY_NOT_SUPPORTED");
+	static const FString CapabilityCommandNotFound = TEXT("CAPABILITY_COMMAND_NOT_FOUND");
 	static const FString JobNotFound = TEXT("JOB_NOT_FOUND");
 	static const FString JobNotRetryable = TEXT("JOB_NOT_RETRYABLE");
 	static const FString JobLimitReached = TEXT("JOB_LIMIT_REACHED");

@@ -31,6 +31,10 @@ FCortexCommandResult FCortexUMGCommandHandler::Execute(
     {
         return FCortexUMGWidgetTreeOps::GetWidget(Params);
     }
+    if (Command == TEXT("set_widget_variable"))
+    {
+        return FCortexUMGWidgetTreeOps::SetWidgetVariable(Params);
+    }
     if (Command == TEXT("list_widget_classes"))
     {
         return FCortexUMGWidgetTreeOps::ListWidgetClasses(Params);
@@ -100,6 +104,14 @@ FCortexCommandResult FCortexUMGCommandHandler::Execute(
     {
         return FCortexUMGWidgetAnimationOps::RemoveAnimation(Params);
     }
+    if (Command == TEXT("list_animation_bindings"))
+    {
+        return FCortexUMGWidgetAnimationOps::ListAnimationBindings(Params);
+    }
+    if (Command == TEXT("remove_animation_binding"))
+    {
+        return FCortexUMGWidgetAnimationOps::RemoveAnimationBinding(Params);
+    }
 
     return FCortexCommandRouter::Error(
         CortexErrorCodes::UnknownCommand,
@@ -129,6 +141,11 @@ TArray<FCortexCommandInfo> FCortexUMGCommandHandler::GetSupportedCommands() cons
         FCortexCommandInfo{ TEXT("get_widget"), TEXT("Get single widget details") }
             .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
             .Required(TEXT("widget_name"), TEXT("string"), TEXT("Widget to inspect")),
+        FCortexCommandInfo{ TEXT("set_widget_variable"), TEXT("Set whether a designer widget becomes a Blueprint variable") }
+            .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
+            .Required(TEXT("widget_name"), TEXT("string"), TEXT("Widget to modify"))
+            .Required(TEXT("is_variable"), TEXT("boolean"), TEXT("True makes the widget referenceable from graphs"))
+            .Optional(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Optional stale-write guard")),
         FCortexCommandInfo{ TEXT("list_widget_classes"), TEXT("List available widget classes") }
             .Optional(TEXT("category"), TEXT("string"), TEXT("Widget class category filter")),
         FCortexCommandInfo{ TEXT("duplicate_widget"), TEXT("Duplicate widget and subtree") }
@@ -206,5 +223,18 @@ TArray<FCortexCommandInfo> FCortexUMGCommandHandler::GetSupportedCommands() cons
         FCortexCommandInfo{ TEXT("remove_animation"), TEXT("Remove an animation") }
             .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
             .Required(TEXT("animation_name"), TEXT("string"), TEXT("Animation to remove")),
+        FCortexCommandInfo{ TEXT("list_animation_bindings"), TEXT("List canonical UMG animation bindings and correlated MovieScene data") }
+            .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
+            .Required(TEXT("animation_name"), TEXT("string"), TEXT("Animation name to inspect"))
+            .Optional(TEXT("offset"), TEXT("number"), TEXT("0-based pagination offset"))
+            .Optional(TEXT("limit"), TEXT("number"), TEXT("Maximum bindings to return (1-200, default: 50)"))
+            .Optional(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Optional content guard fingerprint")),
+        FCortexCommandInfo{ TEXT("remove_animation_binding"), TEXT("Remove a single UMG animation binding record with optimistic locking and preview") }
+            .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
+            .Required(TEXT("animation_name"), TEXT("string"), TEXT("Animation name"))
+            .Required(TEXT("selector"), TEXT("object"), TEXT("Exact binding selector"))
+            .Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Content guard fingerprint from prior read"))
+            .Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("If true, previews changes without mutating (default: true)"))
+            .Optional(TEXT("save"), TEXT("boolean"), TEXT("If true, persists package to disk after mutation (default: false)")),
     };
 }

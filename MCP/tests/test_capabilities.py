@@ -22,6 +22,13 @@ from cortex_mcp._fallback_generated import FALLBACK_COMMANDS as _FALLBACK_STRUCT
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
+def test_capabilities_fixture_reports_current_plugin_version():
+    fixture = json.loads(
+        (FIXTURES_DIR / "capabilities_cache_full.json").read_text(encoding="utf-8")
+    )
+    assert fixture["plugin_version"] == "0.1.16"
+
+
 def test_load_capabilities_cache_reads_saved_cortex_file(tmp_path):
     """Capabilities cache should be read from Saved/Cortex/capabilities-cache.json."""
     project_dir = tmp_path
@@ -133,6 +140,30 @@ def test_fallback_editor_has_python_and_cvars_without_defer():
     assert "code" in run_python_params
     assert "run_next_tick" in run_python_params
     assert "defer" not in run_python_params
+
+
+def test_fallback_batch_query_exposes_rollback_controls():
+    """Fallback core batch_query metadata must advertise the failure-atomic controls so a
+    no-cache session can still invoke rollback-enabled batches."""
+    fallback_commands = {cmd["name"]: cmd for cmd in _FALLBACK_STRUCTURED["core"]}
+    batch_params = {param["name"] for param in fallback_commands["batch_query"].get("params", [])}
+    assert "commands" in batch_params
+    assert "steps" in batch_params
+    assert "stop_on_error" in batch_params
+    assert "rollback_on_error" in batch_params
+    assert "verify_rollback" in batch_params
+
+
+def test_fallback_graph_includes_describe_node():
+    """Fallback graph metadata must expose describe_node alongside the authoring commands."""
+    command_names = {cmd["name"] for cmd in _FALLBACK_STRUCTURED["graph"]}
+    assert "describe_node" in command_names
+
+
+def test_fallback_umg_includes_set_widget_variable():
+    """Fallback umg metadata must expose the is_variable repair command."""
+    command_names = {cmd["name"] for cmd in _FALLBACK_STRUCTURED["umg"]}
+    assert "set_widget_variable" in command_names
 
 
 def test_anim_absent_from_fallback_fixture_until_promoted():
@@ -618,6 +649,42 @@ def test_graph_set_pin_value_capability_includes_typed_text():
     assert params["expected_fingerprint"]["type"] == "object"
     assert params["graph_kind"]["required"] is False
     assert params["owning_interface"]["required"] is False
+
+
+def test_live_operation_schema_commands_advertised():
+    fixture = json.loads((FIXTURES_DIR / "capabilities_cache_full.json").read_text(encoding="utf-8"))
+    core_cmds = {cmd["name"] for cmd in fixture["domains"]["core"]["commands"]}
+    graph_cmds = {cmd["name"] for cmd in fixture["domains"]["graph"]["commands"]}
+    umg_cmds = {cmd["name"] for cmd in fixture["domains"]["umg"]["commands"]}
+    assert "get_operation_schema" in core_cmds
+    assert "describe_node" in graph_cmds
+    assert "set_widget_variable" in umg_cmds
+    fallback_core = {cmd["name"] for cmd in _FALLBACK_STRUCTURED["core"]}
+    assert "get_operation_schema" in fallback_core
+
+
+def test_batch_query_aliases_are_not_independently_required():
+    fixture = json.loads((FIXTURES_DIR / "capabilities_cache_full.json").read_text(encoding="utf-8"))
+    fixture_batch = next(
+        command for command in fixture["domains"]["core"]["commands"]
+        if command["name"] == "batch_query"
+    )
+    fallback_batch = next(
+        command for command in _FALLBACK_STRUCTURED["core"]
+        if command["name"] == "batch_query"
+    )
+
+    for batch_contract in (fixture_batch, fallback_batch):
+        params = {param["name"]: param for param in batch_contract["params"]}
+        assert params["commands"]["required"] is False
+        assert params["steps"]["required"] is False
+
+
+def test_core_router_hint_requires_live_editor_proof():
+    capabilities = json.loads((FIXTURES_DIR / "capabilities_cache_full.json").read_text(encoding="utf-8"))
+    docstrings = build_router_docstrings(capabilities)
+    assert "never proves a command is executable" in docstrings["core"]
+    assert "graph.describe_node before graph.add_node" in docstrings["core"]
 
 
 class TestCompositeHints:

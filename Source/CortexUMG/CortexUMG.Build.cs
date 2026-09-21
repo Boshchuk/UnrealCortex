@@ -19,11 +19,13 @@ public class CortexUMG : ModuleRules
             "Json",
             "JsonUtilities",
             "UnrealEd",
+            "BlueprintGraph",
             "UMG",
             "UMGEditor",
             "Slate",
             "SlateCore",
             "MovieScene",
+            "MovieSceneTracks",
         });
     }
 }
