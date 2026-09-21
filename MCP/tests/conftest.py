@@ -266,7 +266,9 @@ def _map_tool_call(name: str, args: dict) -> tuple[str, dict]:
         "duplicate_widget", "set_widget_variable", "set_color", "set_text", "set_font", "set_brush",
         "set_padding", "set_anchor", "set_alignment", "set_size", "set_visibility", "set_property",
         "get_property", "get_schema", "create_animation", "list_animations", "remove_animation",
+        "list_animation_bindings", "remove_animation_binding",
     }
+
     if name in umg_names:
         return "umg_cmd", {"command": name, "params": args}
 

@@ -489,3 +489,252 @@ class TestPaginationEdgeCases:
         assert meta["total"] == 10
         assert meta["has_more"] is False
         assert meta["next_cursor"] is None
+
+
+class TestMutationResponseBounds:
+    """Bounded responses for mutations preserve essential outcomes and truncate remaining_bindings."""
+
+    def test_essential_outcomes_preserved_above_40k(self):
+        data = {
+            "asset_path": "/Game/UI/WBP_EmailList",
+            "animation_name": "appearance",
+            "dry_run": False,
+            "changed": True,
+            "save_attempted": True,
+            "saved": True,
+            "fingerprint": {"domain_signature": {"digest": "abc"}},
+            "matched_selector": {"binding_guid": "{123}", "widget_name": "Icon"},
+            "before": {"umg_binding_count": 50},
+            "after": {"umg_binding_count": 49},
+            "scene_data_removed": True,
+            "remaining_bindings": [
+                {"index": i, "widget_name": f"Widget_{i}_" + "x" * 1000}
+                for i in range(50)
+            ],
+            "_remaining_bindings_truncated": False,
+            "_remaining_bindings_total": 49,
+            "save_error": None,
+        }
+        formatted = format_response(data, "umg_cmd")
+        assert len(formatted) <= _MAX_RESPONSE_CHARS
+        res = json.loads(formatted)
+        assert res.get("_error") != "RESPONSE_TOO_LARGE"
+        assert res["changed"] is True
+        assert res["saved"] is True
+        assert res["_remaining_bindings_truncated"] is True
+        assert res["_remaining_bindings_total"] == 49
+        assert "umg.list_animation_bindings" in (
+            res.get("_suggestion", "") + res.get("_remaining_bindings_instructions", "")
+        )
+
+    def test_fewer_than_ten_large_entries_truncates_list_instead_of_generic_error(self):
+        data = {
+            "changed": True,
+            "dry_run": False,
+            "save_attempted": True,
+            "saved": True,
+            "remaining_bindings": [
+                {"index": i, "data": "x" * 20_000}
+                for i in range(3)
+            ],
+            "_remaining_bindings_truncated": False,
+            "_remaining_bindings_total": 3,
+        }
+        formatted = format_response(data, "umg_cmd")
+        assert len(formatted) <= _MAX_RESPONSE_CHARS
+        res = json.loads(formatted)
+        assert res.get("_error") != "RESPONSE_TOO_LARGE"
+        assert res["changed"] is True
+        assert res["_remaining_bindings_truncated"] is True
+        assert res["_remaining_bindings_total"] == 3
+        assert len(res["remaining_bindings"]) < 3
+
+    def test_pagination_reconciled_with_array_truncation(self):
+        """When an array with pagination metadata is truncated, pagination is reconciled (UC-4)."""
+        # 50 large bindings exceeding 40k limit
+        total_items = 50
+        bindings = [
+            {"index": i, "selector": f"selector_{i}", "details": "d" * 2000}
+            for i in range(total_items)
+        ]
+        data = {
+            "asset_path": "/Game/UI/WBP_Test",
+            "animation_name": "appearance",
+            "bindings": bindings,
+            "pagination": {
+                "total": total_items,
+                "offset": 0,
+                "limit": total_items,
+                "returned": total_items,
+                "next_offset": None,
+                "is_complete": True,
+            },
+        }
+
+        formatted = format_response(data, "umg_cmd")
+        assert len(formatted) <= _MAX_RESPONSE_CHARS
+        res = json.loads(formatted)
+        returned_count = len(res["bindings"])
+        assert returned_count < total_items
+        p = res["pagination"]
+        assert p["returned"] == returned_count
+        assert p["next_offset"] == returned_count
+        assert p["is_complete"] is False
+
+    def test_iterating_next_offset_retrieves_all_selectors_under_limit(self):
+        """Simulate paginating through all records using next_offset under 40k limit (UC-4)."""
+        total_items = 50
+        all_items = [
+            {"index": i, "selector": f"sel_{i}", "payload": "x" * 1500}
+            for i in range(total_items)
+        ]
+
+        retrieved_selectors = []
+        offset = 0
+
+        while offset is not None and offset < total_items:
+            page_slice = all_items[offset:]
+            raw_page = {
+                "bindings": page_slice,
+                "pagination": {
+                    "total": total_items,
+                    "offset": offset,
+                    "limit": len(page_slice),
+                    "returned": len(page_slice),
+                    "next_offset": None,
+                    "is_complete": True,
+                },
+            }
+            formatted = format_response(raw_page, "umg_cmd")
+            assert len(formatted) <= _MAX_RESPONSE_CHARS
+            res = json.loads(formatted)
+            for item in res["bindings"]:
+                retrieved_selectors.append(item["selector"])
+            offset = res["pagination"]["next_offset"]
+
+        assert len(retrieved_selectors) == total_items
+        assert retrieved_selectors == [f"sel_{i}" for i in range(total_items)]
+
+    def test_diagnostics_dominant_response_preserves_bindings_and_binding_pagination(self):
+        """When diagnostics is the largest array, truncating diagnostics must not corrupt binding pagination (UC-4)."""
+        bindings = [
+            {
+                "binding_guid": f"{{{i:08x}-0000-0000-0000-000000000000}}",
+                "widget_name": f"Widget_{i}",
+                "slot_widget_name": "",
+                "is_root_widget": False,
+                "tracks": [{"track_name": "PropertyTrack", "section_count": 1}],
+            }
+            for i in range(10)
+        ]
+        diagnostics = [f"Diagnostic message {i}: detailed warning about property or track layout" * 5 for i in range(600)]
+        data = {
+            "asset_path": "/Game/UI/WBP_Test",
+            "animation_name": "appearance",
+            "bindings": bindings,
+            "diagnostics": diagnostics,
+            "pagination": {
+                "total": 10,
+                "offset": 0,
+                "limit": 10,
+                "returned": 10,
+                "next_offset": None,
+                "is_complete": True,
+            },
+        }
+        formatted = format_response(data, "umg_cmd")
+        assert len(formatted) <= _MAX_RESPONSE_CHARS
+        res = json.loads(formatted)
+        # All 10 bindings should be preserved
+        assert len(res["bindings"]) == 10
+        # Pagination must belong to bindings, NOT diagnostics!
+        p = res["pagination"]
+        assert p["returned"] == 10
+        assert p["total"] == 10
+        assert p["is_complete"] is True
+        # Diagnostics should be truncated with separate metadata
+        assert len(res["diagnostics"]) < 600
+        assert res.get("_diagnostics_truncated") is True or "_diagnostics" in str(res)
+
+    def test_single_oversized_binding_bounds_nested_tracks_and_retains_selector(self):
+        """A single binding with 250 track summaries must bound nested tracks so the selector is retrievable (UC-4)."""
+        tracks = [
+            {"track_name": f"Track_{i}", "property_name": f"Property_{i}", "data": "x" * 200}
+            for i in range(250)
+        ]
+        binding = {
+            "binding_guid": "{11111111-2222-3333-4444-555555555555}",
+            "widget_name": "OversizedWidget",
+            "slot_widget_name": "",
+            "is_root_widget": False,
+            "tracks": tracks,
+        }
+        data = {
+            "asset_path": "/Game/UI/WBP_Test",
+            "animation_name": "appearance",
+            "bindings": [binding],
+            "pagination": {
+                "total": 1,
+                "offset": 0,
+                "limit": 1,
+                "returned": 1,
+                "next_offset": None,
+                "is_complete": True,
+            },
+        }
+        formatted = format_response(data, "umg_cmd")
+        assert len(formatted) <= _MAX_RESPONSE_CHARS
+        res = json.loads(formatted)
+        assert res.get("_error") != "RESPONSE_TOO_LARGE"
+        assert len(res["bindings"]) == 1
+        ret_b = res["bindings"][0]
+        # Canonical selector fields must be present and intact
+        assert ret_b["binding_guid"] == "{11111111-2222-3333-4444-555555555555}"
+        assert ret_b["widget_name"] == "OversizedWidget"
+        assert ret_b["slot_widget_name"] == ""
+        assert ret_b["is_root_widget"] is False
+        # Tracks must be bounded/truncated
+        assert len(ret_b["tracks"]) < 250
+        assert ret_b.get("_tracks_truncated") is True or "_tracks" in str(ret_b)
+
+    def test_ten_individually_oversized_bindings_make_forward_progress(self):
+        """Ten individually oversized bindings must bound nested details and make forward progress (UC-4)."""
+        bindings = [
+            {
+                "binding_guid": f"{{{i:08x}-0000-0000-0000-000000000000}}",
+                "widget_name": f"Widget_{i}",
+                "slot_widget_name": "",
+                "is_root_widget": False,
+                "tracks": [
+                    {"track_name": f"Track_{t}", "property_name": f"Prop_{t}", "data": "x" * 200}
+                    for t in range(50)
+                ],
+            }
+            for i in range(10)
+        ]
+        data = {
+            "asset_path": "/Game/UI/WBP_Test",
+            "animation_name": "appearance",
+            "bindings": bindings,
+            "pagination": {
+                "total": 10,
+                "offset": 0,
+                "limit": 10,
+                "returned": 10,
+                "next_offset": None,
+                "is_complete": True,
+            },
+        }
+        formatted = format_response(data, "umg_cmd")
+        assert len(formatted) <= _MAX_RESPONSE_CHARS
+        res = json.loads(formatted)
+        assert res.get("_error") != "RESPONSE_TOO_LARGE"
+        assert len(res["bindings"]) > 0
+        p = res["pagination"]
+        assert p["returned"] == len(res["bindings"])
+        assert p["returned"] > 0
+        if not p["is_complete"]:
+            assert p["next_offset"] == p["returned"]
+            assert p["next_offset"] > 0
+
+

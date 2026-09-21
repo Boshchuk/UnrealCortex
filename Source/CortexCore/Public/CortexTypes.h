@@ -61,6 +61,9 @@ namespace CortexErrorCodes
 	static const FString AnimationNotFound = TEXT("ANIMATION_NOT_FOUND");
 	static const FString AnimationExists = TEXT("ANIMATION_EXISTS");
 	static const FString TrackNotFound = TEXT("TRACK_NOT_FOUND");
+	static const FString AnimationBindingNotFound = TEXT("ANIMATION_BINDING_NOT_FOUND");
+	static const FString AnimationBindingAmbiguous = TEXT("ANIMATION_BINDING_AMBIGUOUS");
+	static const FString AnimationBindingUnsupported = TEXT("ANIMATION_BINDING_UNSUPPORTED");
 	static const FString InvalidPropertyPath = TEXT("INVALID_PROPERTY_PATH");
 	static const FString InvalidPropertyValue = TEXT("INVALID_PROPERTY_VALUE");
 	static const FString NotTextWidget = TEXT("NOT_TEXT_WIDGET");
