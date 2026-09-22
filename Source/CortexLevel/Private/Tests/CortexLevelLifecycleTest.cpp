@@ -7,6 +7,7 @@
 #include "FileHelpers.h"
 #include "HAL/FileManager.h"
 #include "Misc/PackageName.h"
+#include "Misc/Paths.h"
 #include "UObject/Package.h"
 
 namespace
@@ -578,6 +579,81 @@ bool FCortexLevelOpenLevelDirtyTest::RunTest(const FString& Parameters)
 	}
 	const FString TestDir = FPackageName::LongPackageNameToFilename(TEXT("/Game/Maps/_CortexTest/"));
 	IFileManager::Get().DeleteDirectory(*TestDir, false, true);
+
+	return true;
+}
+
+// A plugin's content mounts at its own root (/MyPlugin/...), not under "/Plugins/".
+// The old prefix test therefore rejected every level living in a plugin before it ever
+// looked for the asset. These three pin the boundary from both sides: a registered
+// non-/Game mount must get past validation, while an unregistered root and the engine
+// root must still be refused.
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexLevelOpenLevelRegisteredMountTest,
+	"Cortex.Level.Lifecycle.OpenLevel.RegisteredNonGameMount",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexLevelOpenLevelRegisteredMountTest::RunTest(const FString& Parameters)
+{
+	const FString MountRoot = TEXT("/CortexLifecycleTestMount/");
+	const FString MountDir = FPaths::ProjectSavedDir() / TEXT("CortexLifecycleTestMount");
+	FPackageName::RegisterMountPoint(MountRoot, MountDir);
+
+	FCortexCommandRouter Router = CreateLifecycleRouter();
+
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("path"), MountRoot + TEXT("Maps/NoSuchLevel_XYZ"));
+
+	FCortexCommandResult Result = Router.Execute(TEXT("level.open_level"), Params);
+
+	// It must fail because the asset is absent, NOT because the path was rejected.
+	// INVALID_PARAMETER here is the regression this test exists to catch.
+	TestNotEqual(TEXT("A registered non-/Game mount must pass path validation"),
+		Result.ErrorCode, TEXT("INVALID_PARAMETER"));
+	TestEqual(TEXT("Error should be ASSET_NOT_FOUND"), Result.ErrorCode, TEXT("ASSET_NOT_FOUND"));
+
+	FPackageName::UnRegisterMountPoint(MountRoot, MountDir);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexLevelOpenLevelUnregisteredMountTest,
+	"Cortex.Level.Lifecycle.OpenLevel.UnregisteredMountRejected",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexLevelOpenLevelUnregisteredMountTest::RunTest(const FString& Parameters)
+{
+	FCortexCommandRouter Router = CreateLifecycleRouter();
+
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("path"), TEXT("/NotAMountedRoot_XYZ/Maps/Foo"));
+
+	FCortexCommandResult Result = Router.Execute(TEXT("level.open_level"), Params);
+	TestFalse(TEXT("Should fail for an unregistered mount root"), Result.bSuccess);
+	TestEqual(TEXT("Error code should be INVALID_PARAMETER"), Result.ErrorCode, TEXT("INVALID_PARAMETER"));
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexLevelOpenLevelEngineRootRejectedTest,
+	"Cortex.Level.Lifecycle.OpenLevel.EngineRootRejected",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexLevelOpenLevelEngineRootRejectedTest::RunTest(const FString& Parameters)
+{
+	FCortexCommandRouter Router = CreateLifecycleRouter();
+
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("path"), TEXT("/Engine/Maps/Entry"));
+
+	FCortexCommandResult Result = Router.Execute(TEXT("level.open_level"), Params);
+	TestFalse(TEXT("Engine content is never a valid lifecycle target"), Result.bSuccess);
+	TestEqual(TEXT("Error code should be INVALID_PARAMETER"), Result.ErrorCode, TEXT("INVALID_PARAMETER"));
 
 	return true;
 }
