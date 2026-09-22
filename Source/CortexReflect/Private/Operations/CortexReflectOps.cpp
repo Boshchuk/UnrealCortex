@@ -187,6 +187,30 @@ UClass* FCortexReflectOps::FindClassByName(const FString& ClassName, FCortexComm
 	return nullptr;
 }
 
+namespace
+{
+	// Mirrors the module-binary test in IsProjectClass below: an asset is project-owned when
+	// its package file lives under the project directory. That covers /Game/ content and
+	// project-plugin content alike. Uses IsUnderDirectory rather than a string prefix so a
+	// sibling directory sharing a prefix cannot false-match.
+	bool IsPackageUnderProjectDir(const FString& PackageName)
+	{
+		FString Filename;
+		if (!FPackageName::TryConvertLongPackageNameToFilename(PackageName, Filename))
+		{
+			return false;
+		}
+
+		FString AssetDir = FPaths::ConvertRelativePathToFull(FPaths::GetPath(Filename));
+		FPaths::NormalizeDirectoryName(AssetDir);
+
+		FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+		FPaths::NormalizeDirectoryName(ProjectDir);
+
+		return FPaths::IsUnderDirectory(AssetDir, ProjectDir);
+	}
+}
+
 bool FCortexReflectOps::IsProjectClass(const UClass* Class)
 {
 	if (!Class)
@@ -194,11 +218,13 @@ bool FCortexReflectOps::IsProjectClass(const UClass* Class)
 		return false;
 	}
 
-	// Blueprint in /Game/ is a project class
+	// Blueprint: decide by where the package actually lives. A "/Game/" prefix excluded every
+	// Blueprint in a project plugin, contradicting the C++ branch below, which deliberately
+	// counts "project modules and project-local plugins".
 	if (const UBlueprintGeneratedClass* BPGC = Cast<UBlueprintGeneratedClass>(Class))
 	{
 		UBlueprint* BP = Cast<UBlueprint>(BPGC->ClassGeneratedBy);
-		return BP && BP->GetPathName().StartsWith(TEXT("/Game/"));
+		return BP && IsPackageUnderProjectDir(BP->GetOutermost()->GetName());
 	}
 
 	// C++ class: resolve the owning module binary first. This distinguishes
