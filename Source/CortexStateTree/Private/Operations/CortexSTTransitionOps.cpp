@@ -1,6 +1,7 @@
 ﻿#include "Operations/CortexSTTransitionOps.h"
 
 #include "CortexCommandRouter.h"
+#include "CortexEngineCompat.h"
 #include "CortexSTCompat.h"
 #include "CortexSTTypes.h"
 #include "CortexStateTreeModule.h"
@@ -687,12 +688,13 @@ bool ApplyTransitionPropertiesPatch(
 	const TArray<FString> AllowedFields = GetAllowedTransitionFields();
 	TSet<FString> AllowedFieldSet(AllowedFields);
 
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Entry : Properties->Values)
+	for (const auto& Entry : Properties->Values)
 	{
-		if (!AllowedFieldSet.Contains(Entry.Key))
+		const FString FieldName = CortexEngineCompat::JsonKeyToString(Entry.Key);
+		if (!AllowedFieldSet.Contains(FieldName))
 		{
 			OutError = MakeTransitionInvalidFieldError(
-				FString::Printf(TEXT("Unsupported transition property: %s"), *Entry.Key),
+				FString::Printf(TEXT("Unsupported transition property: %s"), *FieldName),
 				AllowedFields);
 			return false;
 		}

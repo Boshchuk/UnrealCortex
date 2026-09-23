@@ -1,5 +1,6 @@
 #include "Operations/CortexBPClassDefaultsOps.h"
 
+#include "CortexEngineCompat.h"
 #include "Operations/CortexBPAssetOps.h"
 #include "Operations/CortexBPSCSDiagnostics.h"
 #include "CortexAssetFingerprint.h"
@@ -276,7 +277,7 @@ namespace
 			return Copy;
 		}
 
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Source->Values)
+		for (const auto& Pair : Source->Values)
 		{
 			Copy->SetField(Pair.Key, Pair.Value);
 		}
@@ -1074,9 +1075,9 @@ FCortexCommandResult FCortexBPClassDefaultsOps::SetClassDefaults(const TSharedPt
 			}
 		};
 
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Entry : (*PropertiesObject)->Values)
+		for (const auto& Entry : (*PropertiesObject)->Values)
 		{
-			const FString& PropertyName = Entry.Key;
+			const FString PropertyName = CortexEngineCompat::JsonKeyToString(Entry.Key);
 			const TSharedPtr<FJsonValue>& JsonValue = Entry.Value;
 
 			FProperty* Property = nullptr;

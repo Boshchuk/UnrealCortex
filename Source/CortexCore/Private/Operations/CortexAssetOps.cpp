@@ -44,7 +44,7 @@ TSharedPtr<FJsonObject> CopyJsonObject(const TSharedPtr<FJsonObject>& Source)
 		return Copy;
 	}
 
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Source->Values)
+	for (const auto& Pair : Source->Values)
 	{
 		Copy->SetField(Pair.Key, Pair.Value);
 	}
