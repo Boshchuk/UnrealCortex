@@ -58,6 +58,12 @@ struct FCortexGraphPreparedPatch
 	/** Durable `retire_entries` plan when the request selected the compile-invalid retirement shell. */
 	TSharedPtr<FJsonObject> RetirementPlan;
 	/**
+	 * Durable `replace_call_output` plan when the request selected the guarded orphan-output repair
+	 * shell: the call identity, both pin identities, the reviewed consumer edge set and the call's
+	 * surviving-pin capture.
+	 */
+	TSharedPtr<FJsonObject> RewirePlan;
+	/**
 	 * True when an accepted replay named a source locator that no longer exists. The apply consumed
 	 * the stale entry and that provenance is not inventoried, so it is reported instead of inferred.
 	 */
@@ -66,6 +72,7 @@ struct FCortexGraphPreparedPatch
 	bool bIsTransfer() const { return TransferPlan.IsValid(); }
 	bool bIsPrune() const { return PrunePlan.IsValid(); }
 	bool bIsRetirement() const { return RetirementPlan.IsValid(); }
+	bool bIsRewire() const { return RewirePlan.IsValid(); }
 
 	/** Prepared state never owns transient UObject pointers. */
 	bool HasTransientObjects() const { return false; }
@@ -136,6 +143,12 @@ struct FCortexGraphPatchOutcome
 	TSharedPtr<FJsonObject> PruneInventory;
 	/** Bounded inventory of a retirement request, published with preview and apply results. */
 	TSharedPtr<FJsonObject> RetirementInventory;
+	/**
+	 * Bounded inventory of a `replace_call_output` request (the call identity, both pin identities and
+	 * the reviewed consumer edge set), published with preview and apply results so the caller reviews
+	 * the exact rewired edges instead of reading the durable plan.
+	 */
+	TSharedPtr<FJsonObject> RewireInventory;
 	TArray<FString> Diagnostics;
 	FCortexGraphPatchLocators Locators;
 };

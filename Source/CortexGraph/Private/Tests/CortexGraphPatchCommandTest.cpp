@@ -1064,8 +1064,16 @@ bool FCortexGraphPatchCommandSchemaTest::RunTest(const FString& Parameters)
 			MigrationParam->Description.Contains(TEXT("entry_node_guids")));
 		TestTrue(TEXT("retirement request publishes the approved node set"),
 			MigrationParam->Description.Contains(TEXT("approved_node_guids")));
-		TestTrue(TEXT("retirement requires override-style UK2Node_Event entries"),
-			MigrationParam->Description.Contains(TEXT("UK2Node_Event")));
+		TestTrue(TEXT("retirement names its native lifecycle entry class"),
+			MigrationParam->Description.Contains(TEXT("Widget lifecycle override")));
+		TestTrue(TEXT("retirement names its component-bound entry class"),
+			MigrationParam->Description.Contains(TEXT("component-bound delegate event")));
+		TestTrue(TEXT("replace_call_output is published"),
+			MigrationParam->Description.Contains(TEXT("replace_call_output")));
+		TestTrue(TEXT("the published call-output selector names its call identity"),
+			MigrationParam->Description.Contains(TEXT("call_node_guid")));
+		TestTrue(TEXT("the published call-output selector names the reviewed edge echo"),
+			MigrationParam->Description.Contains(TEXT("migration.edges")));
 		TestTrue(TEXT("retirement explicitly permits repair of compile-invalid assets"),
 			MigrationParam->Description.Contains(TEXT("compile-invalid")));
 	}

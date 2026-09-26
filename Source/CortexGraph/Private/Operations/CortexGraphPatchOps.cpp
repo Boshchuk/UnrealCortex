@@ -28,6 +28,7 @@
 #include "K2Node_CallParentFunction.h"
 #include "K2Node_CustomEvent.h"
 #include "K2Node_CallFunction.h"
+#include "K2Node_ComponentBoundEvent.h"
 #include "K2Node_Variable.h"
 #include "K2Node_VariableSet.h"
 #include "K2Node_DynamicCast.h"
@@ -1381,11 +1382,88 @@ bool FCortexGraphPatchOps::Preflight(
 			const bool bIsTransferOp = MigrationOp == TEXT("copy_subgraph") || MigrationOp == TEXT("move_subgraph");
 			const bool bIsPruneOp = MigrationOp == TEXT("prune_island");
 			const bool bIsRetireOp = MigrationOp == TEXT("retire_entries");
-			if (!bIsTransferOp && !bIsPruneOp && !bIsRetireOp)
+			const bool bIsCallOutputOp = MigrationOp == TEXT("replace_call_output");
+			if (!bIsTransferOp && !bIsPruneOp && !bIsRetireOp && !bIsCallOutputOp)
 			{
 				OutError = FCortexCommandRouter::Error(CortexErrorCodes::UnsupportedOperation,
-					FString::Printf(TEXT("Unsupported migration operation '%s'; the published migration operations are replace_entry, copy_subgraph, move_subgraph, prune_island and retire_entries"), *MigrationOp));
+					FString::Printf(TEXT("Unsupported migration operation '%s'; the published migration operations are replace_entry, copy_subgraph, move_subgraph, prune_island, retire_entries and replace_call_output"), *MigrationOp));
 				return false;
+			}
+			if (bIsCallOutputOp)
+			{
+				// The orphan-output repair addresses its one graph inside the migration object, so the
+				// implementation target of `replace_entry` must be absent instead of ignored.
+				if (Params->HasField(TEXT("target")))
+				{
+					OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+						TEXT("a replace_call_output request addresses its graph through migration.source; 'target' must be absent"));
+					return false;
+				}
+				FCortexGraphMigrationCallOutputPlan CallOutputPlan;
+				bool bCallOutputReused = false;
+				if (!FCortexGraphMigrationOps::PlanCallOutput(
+					Blueprint, *MigrationPtr, CallOutputPlan, bCallOutputReused, OutError))
+				{
+					return false;
+				}
+				if (!bDryRun && CallOutputPlan.bAwaitingApproval)
+				{
+					OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+						TEXT("a replace_call_output apply requires the migration.edges of the preview; the preview that published the consumer set must be reviewed before anything is rewired"));
+					return false;
+				}
+				OutPrepared.RewirePlan = CallOutputPlan.ToJson();
+				OutPrepared.GraphGuid = CallOutputPlan.GraphGuid;
+				OutPrepared.SubgraphPath = CallOutputPlan.SubgraphPath;
+				OutPrepared.bHasEntryNode = false;
+				// A published-inventory preview has nothing to apply, and a reconciled replay has nothing
+				// left to rewire: both are change-free without being a reuse of created identities.
+				OutPrepared.bFullyReused = bCallOutputReused || CallOutputPlan.bAwaitingApproval;
+				OutPrepared.bChanged = !OutPrepared.bFullyReused;
+				OutPrepared.bReplayedWithAbsentSource = bCallOutputReused;
+
+				TSharedPtr<FJsonObject> Normalized = MakeShared<FJsonObject>();
+				Normalized->SetStringField(TEXT("asset_path"), Blueprint->GetPathName());
+				Normalized->SetStringField(TEXT("patch_id"), OutPrepared.PatchId);
+				Normalized->SetObjectField(TEXT("expected_fingerprint"), *FingerprintPtr);
+				Normalized->SetArrayField(TEXT("nodes"), TArray<TSharedPtr<FJsonValue>>());
+				Normalized->SetArrayField(TEXT("connections"), TArray<TSharedPtr<FJsonValue>>());
+				Normalized->SetArrayField(TEXT("pin_updates"), TArray<TSharedPtr<FJsonValue>>());
+				Normalized->SetObjectField(TEXT("migration"), OutPrepared.RewirePlan);
+				TSharedPtr<FJsonObject> CallOutputLocator = MakeShared<FJsonObject>();
+				CallOutputLocator->SetStringField(TEXT("graph_guid"), CallOutputPlan.GraphGuid);
+				if (!CallOutputPlan.SubgraphPath.IsEmpty())
+				{
+					CallOutputLocator->SetStringField(TEXT("subgraph_path"), CallOutputPlan.SubgraphPath);
+				}
+				TSharedPtr<FJsonObject> NormalizedTarget = MakeShared<FJsonObject>();
+				NormalizedTarget->SetObjectField(TEXT("graph_ref"), CallOutputLocator);
+				Normalized->SetObjectField(TEXT("target"), NormalizedTarget);
+				OutPrepared.NormalizedRequest = Normalized;
+
+				FString CallOutputIntent;
+				CallOutputIntent += TEXT("graph_patch_v1|");
+				CallOutputIntent += CanonicalObject(Normalized);
+				CallOutputIntent += TEXT("|fingerprint=");
+				CallOutputIntent += OutPrepared.FingerprintBefore->GetStringField(TEXT("graph_authoring_hash"));
+				CallOutputIntent += TEXT("|engine=UE5.8|schema=K2");
+				FTCHARToUTF8 CallOutputUtf8(*CallOutputIntent);
+				const FIoHash CallOutputDigest = FIoHash::HashBuffer(
+					reinterpret_cast<const uint8*>(CallOutputUtf8.Get()), CallOutputUtf8.Length());
+				OutPrepared.ValidationHash = LexToString(CallOutputDigest);
+
+				if (!bDryRun)
+				{
+					FString ExpectedToken;
+					Params->TryGetStringField(TEXT("expected_validation_hash"), ExpectedToken);
+					if (ExpectedToken != OutPrepared.ValidationHash)
+					{
+						OutError = FCortexCommandRouter::Error(CortexErrorCodes::StalePrecondition,
+							TEXT("expected_validation_hash does not match current preflight intent"));
+						return false;
+					}
+				}
+				return true;
 			}
 			if (bIsRetireOp)
 			{
@@ -2314,17 +2392,32 @@ struct FGraphPatchJournal
 	{
 		FGuid NodeGuid;
 		FName PinName;
+		/** A name can belong to an input and an output at once, so a link target needs its direction. */
+		EEdGraphPinDirection Direction = EGPD_Input;
 	};
 
 	struct FPinStateEntry
 	{
 		FName PinName;
 		EEdGraphPinDirection Direction = EGPD_Input;
+		/**
+		 * Pre-request pin identity. `FindPinById` and `FEdGraphPinReference` resolve a pin by it, so a
+		 * recovered pin recreated from its name and direction alone would carry a fresh GUID and leave
+		 * every existing pin-ID reference dangling although the name-based readback reports a restore.
+		 */
+		FGuid PinId;
 		FEdGraphPinType PinType;
 		FString DefaultValue;
 		FString DefaultObjectPath;
 		FText DefaultTextValue;
 		bool bSplitChild = false;
+		/**
+		 * Orphan/connectability flags the authoring fingerprint cannot see. They are restored in a
+		 * post-pass after link reconciliation: the schema refuses any new connection involving an
+		 * orphaned pin, so setting them before the links are back would make every recovery fail.
+		 */
+		bool bOrphanedPin = false;
+		bool bNotConnectable = false;
 		TArray<FPinLinkTarget> LinkedTo;
 	};
 
@@ -2360,6 +2453,16 @@ struct FGraphPatchJournal
 		bool bOverrideFunction = false;
 		FName MemberName = NAME_None;
 		UClass* MemberParentClass = nullptr;
+		/**
+		 * Class-specific identity the authoring fingerprint cannot see: a component-bound event is
+		 * hashed as a plain event and a custom event only by its custom name, so recovery proves the
+		 * component property, delegate and generated function names field by field here.
+		 */
+		FName CustomFunctionName = NAME_None;
+		FName ComponentPropertyName = NAME_None;
+		FName DelegatePropertyName = NAME_None;
+		UClass* DelegateOwnerClass = nullptr;
+		bool bCallInEditor = false;
 		UEdGraphNode* Node = nullptr;
 		FNodePinSnapshot Snapshot;
 	};
@@ -2429,16 +2532,19 @@ FGraphPatchJournal::FNodePinSnapshot MakeNodePinSnapshot(UEdGraphNode* Node)
 		FGraphPatchJournal::FPinStateEntry Entry;
 		Entry.PinName = Pin->PinName;
 		Entry.Direction = Pin->Direction;
+		Entry.PinId = Pin->PinId;
 		Entry.PinType = Pin->PinType;
 		Entry.DefaultValue = Pin->DefaultValue;
 		Entry.DefaultObjectPath = Pin->DefaultObject ? Pin->DefaultObject->GetPathName() : FString();
 		Entry.DefaultTextValue = Pin->DefaultTextValue;
 		Entry.bSplitChild = Pin->ParentPin != nullptr;
+		Entry.bOrphanedPin = Pin->bOrphanedPin;
+		Entry.bNotConnectable = Pin->bNotConnectable;
 		for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
 		{
 			UEdGraphNode* LinkedNode = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
 			if (!LinkedNode || !LinkedNode->NodeGuid.IsValid()) continue;
-			Entry.LinkedTo.Add({ LinkedNode->NodeGuid, LinkedPin->PinName });
+			Entry.LinkedTo.Add({ LinkedNode->NodeGuid, LinkedPin->PinName, LinkedPin->Direction });
 		}
 		Snapshot.Pins.Add(MoveTemp(Entry));
 	}
@@ -2488,6 +2594,7 @@ void JournalNodeRemoved(UEdGraphNode* Node, FGraphPatchJournal& Journal)
 		Entry.bOverrideFunction = Event->bOverrideFunction;
 		Entry.MemberName = Event->EventReference.GetMemberName();
 		Entry.MemberParentClass = Event->EventReference.GetMemberParentClass();
+		Entry.CustomFunctionName = Event->CustomFunctionName;
 	}
 	else if (const UK2Node_FunctionEntry* FunctionEntry = Cast<UK2Node_FunctionEntry>(Node))
 	{
@@ -2503,6 +2610,16 @@ void JournalNodeRemoved(UEdGraphNode* Node, FGraphPatchJournal& Journal)
 	{
 		Entry.MemberName = Variable->VariableReference.GetMemberName();
 		Entry.MemberParentClass = Variable->VariableReference.GetMemberParentClass();
+	}
+	if (const UK2Node_CustomEvent* const CustomEvent = Cast<UK2Node_CustomEvent>(Node))
+	{
+		Entry.bCallInEditor = CustomEvent->bCallInEditor;
+	}
+	if (const UK2Node_ComponentBoundEvent* const BoundEvent = Cast<UK2Node_ComponentBoundEvent>(Node))
+	{
+		Entry.ComponentPropertyName = BoundEvent->ComponentPropertyName;
+		Entry.DelegatePropertyName = BoundEvent->DelegatePropertyName;
+		Entry.DelegateOwnerClass = BoundEvent->DelegateOwnerClass;
 	}
 	Entry.Node = Node;
 	Entry.Snapshot = MakeNodePinSnapshot(Node);
@@ -2583,6 +2700,19 @@ bool RestoreRemovedNodes(UBlueprint* Blueprint, const FGraphPatchJournal& Journa
 		else if (UK2Node_Variable* Variable = Cast<UK2Node_Variable>(Node))
 		{
 			if (Entry.MemberParentClass) Variable->VariableReference.SetExternalMember(Entry.MemberName, Entry.MemberParentClass);
+		}
+		// The authoring fingerprint of a component-bound event sees only its class and override flag,
+		// so the binding identity it must bring back is compared field by field instead of being
+		// assumed restored from an equal hash.
+		if (const UK2Node_ComponentBoundEvent* const BoundEvent = Cast<UK2Node_ComponentBoundEvent>(Node))
+		{
+			if (BoundEvent->ComponentPropertyName != Entry.ComponentPropertyName
+				|| BoundEvent->DelegatePropertyName != Entry.DelegatePropertyName
+				|| BoundEvent->DelegateOwnerClass.Get() != Entry.DelegateOwnerClass
+				|| BoundEvent->CustomFunctionName != Entry.CustomFunctionName)
+			{
+				return false;
+			}
 		}
 		if (!RestoreNodePinState(Blueprint, Journal, Entry.Snapshot)) return false;
 		Graph->NotifyGraphChanged();
@@ -2713,9 +2843,21 @@ bool RestorePinState(UEdGraphPin* Pin, const FGraphPatchJournal::FPinStateEntry&
 	return true;
 }
 
-FString LinkTargetKey(const FGuid& NodeGuid, const FName PinName)
+/**
+ * Canonical identity of one journaled link endpoint. The direction is part of it because one node can
+ * carry an input and an output under the same name, and a direction-blind key would resolve the link
+ * to the wrong pin.
+ */
+FString LinkTargetKey(const FGuid& NodeGuid, const FName PinName, const EEdGraphPinDirection Direction)
 {
-	return FString::Printf(TEXT("%s.%s"), *NodeGuid.ToString(), *PinName.ToString());
+	return FString::Printf(TEXT("%s.%s|dir=%d"), *NodeGuid.ToString(), *PinName.ToString(),
+		static_cast<int32>(Direction));
+}
+
+/** Canonical identity of one journaled pin of a node: its name and its direction. */
+FString SnapshotPinKey(const FName PinName, const EEdGraphPinDirection Direction)
+{
+	return FString::Printf(TEXT("%s|dir=%d"), *PinName.ToString(), static_cast<int32>(Direction));
 }
 
 /**
@@ -2742,11 +2884,19 @@ bool RestoreNodePinState(
 		Graph->Modify();
 	}
 
+	// Every lookup resolves a journaled pin by its name *and* its direction: a migrated native
+	// signature can leave an input and a historic output under one name on the same node, and a
+	// name-only lookup would adopt the wrong pin, then restore the output's state onto the input.
+	auto FindJournaledPin = [Node](const FGraphPatchJournal::FPinStateEntry& Entry)
+	{
+		return Node->FindPin(Entry.PinName, Entry.Direction);
+	};
+
 	// 1. Put every pin the node still has back into its journaled state. The class default has to
 	//    be restored before the replay, because the replay rebuilds pins from the class it reads.
 	for (const FGraphPatchJournal::FPinStateEntry& Entry : Snapshot.Pins)
 	{
-		if (UEdGraphPin* Pin = Node->FindPin(Entry.PinName))
+		if (UEdGraphPin* Pin = FindJournaledPin(Entry))
 		{
 			if (!RestorePinState(Pin, Entry)) return false;
 		}
@@ -2767,25 +2917,27 @@ bool RestoreNodePinState(
 	}
 
 	// 3. Reconcile the pin set: drop what the reconstruction added, recreate what it removed.
-	TSet<FName> SnapshotPinNames;
+	TSet<FString> SnapshotPinKeys;
 	for (const FGraphPatchJournal::FPinStateEntry& Entry : Snapshot.Pins)
 	{
-		SnapshotPinNames.Add(Entry.PinName);
+		SnapshotPinKeys.Add(SnapshotPinKey(Entry.PinName, Entry.Direction));
 	}
 	TArray<UEdGraphPin*> CurrentPins = Node->Pins;
 	for (UEdGraphPin* Pin : CurrentPins)
 	{
 		if (!Pin || Pin->ParentPin != nullptr) continue;
-		if (SnapshotPinNames.Contains(Pin->PinName)) continue;
+		if (SnapshotPinKeys.Contains(SnapshotPinKey(Pin->PinName, Pin->Direction))) continue;
+		const FName RemovedPinName = Pin->PinName;
+		const EEdGraphPinDirection RemovedDirection = Pin->Direction;
 		Node->RemovePin(Pin);
-		if (Node->FindPin(Pin->PinName))
+		if (Node->FindPin(RemovedPinName, RemovedDirection))
 		{
 			return false;
 		}
 	}
 	for (const FGraphPatchJournal::FPinStateEntry& Entry : Snapshot.Pins)
 	{
-		UEdGraphPin* Pin = Node->FindPin(Entry.PinName);
+		UEdGraphPin* Pin = FindJournaledPin(Entry);
 		if (!Pin)
 		{
 			if (Entry.bSplitChild)
@@ -2799,13 +2951,32 @@ bool RestoreNodePinState(
 		{
 			return false;
 		}
+		if (Entry.PinId.IsValid())
+		{
+			// Reinstate the journaled identity. `FindPinById` and `FEdGraphPinReference` resolve a pin
+			// by its GUID, so a recreated pin that kept only its name and direction would leave every
+			// existing pin-ID reference dangling although the readback reports the pin as restored.
+			Pin->PinId = Entry.PinId;
+		}
 	}
 
 	// 4. Reconcile the durable link set through the schema.
 	const UEdGraphSchema* Schema = Graph ? Graph->GetSchema() : nullptr;
+	// 4a. Clear the orphan/connectability flags first: the K2 schema refuses any new connection that
+	//     involves an orphaned pin, so a link could never be re-created while the pin still claims its
+	//     pre-request orphan state. The journaled values are restored in step 5, after every link is
+	//     back, which is why a rolled-back orphan pin must never be reported as restored before them.
 	for (const FGraphPatchJournal::FPinStateEntry& Entry : Snapshot.Pins)
 	{
-		UEdGraphPin* Pin = Node->FindPin(Entry.PinName);
+		if (UEdGraphPin* Pin = FindJournaledPin(Entry))
+		{
+			Pin->bOrphanedPin = false;
+			Pin->bNotConnectable = false;
+		}
+	}
+	for (const FGraphPatchJournal::FPinStateEntry& Entry : Snapshot.Pins)
+	{
+		UEdGraphPin* Pin = FindJournaledPin(Entry);
 		if (!Pin)
 		{
 			return false;
@@ -2813,13 +2984,14 @@ bool RestoreNodePinState(
 		TSet<FString> DesiredLinks;
 		for (const FGraphPatchJournal::FPinLinkTarget& Link : Entry.LinkedTo)
 		{
-			DesiredLinks.Add(LinkTargetKey(Link.NodeGuid, Link.PinName));
+			DesiredLinks.Add(LinkTargetKey(Link.NodeGuid, Link.PinName, Link.Direction));
 		}
 		TArray<UEdGraphPin*> CurrentLinks = Pin->LinkedTo;
 		for (UEdGraphPin* LinkedPin : CurrentLinks)
 		{
 			UEdGraphNode* LinkedNode = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
-			if (!LinkedNode || !DesiredLinks.Contains(LinkTargetKey(LinkedNode->NodeGuid, LinkedPin->PinName)))
+			if (!LinkedNode || !DesiredLinks.Contains(
+				LinkTargetKey(LinkedNode->NodeGuid, LinkedPin->PinName, LinkedPin->Direction)))
 			{
 				Pin->BreakLinkTo(LinkedPin);
 			}
@@ -2828,7 +3000,7 @@ bool RestoreNodePinState(
 		{
 			UEdGraphNode* LinkedNode = nullptr;
 			FindNodeByGuid(Blueprint, Link.NodeGuid, LinkedNode);
-			UEdGraphPin* LinkedPin = LinkedNode ? LinkedNode->FindPin(Link.PinName) : nullptr;
+			UEdGraphPin* LinkedPin = LinkedNode ? LinkedNode->FindPin(Link.PinName, Link.Direction) : nullptr;
 			if (!LinkedPin)
 			{
 				return false;
@@ -2839,6 +3011,21 @@ bool RestoreNodePinState(
 				return false;
 			}
 		}
+	}
+
+	// 5. Restore the orphan/connectability flags only after every link is back. The schema refuses any
+	//    new connection involving an orphaned pin, so setting these during step 4 would make every
+	//    recovery of an orphaned pin fail closed. The authoring fingerprint cannot see either flag,
+	//    which is why recovery proves them here instead of inferring them from the hash.
+	for (const FGraphPatchJournal::FPinStateEntry& Entry : Snapshot.Pins)
+	{
+		UEdGraphPin* Pin = FindJournaledPin(Entry);
+		if (!Pin)
+		{
+			return false;
+		}
+		Pin->bOrphanedPin = Entry.bOrphanedPin;
+		Pin->bNotConnectable = Entry.bNotConnectable;
 	}
 
 	if (Graph)
@@ -3928,7 +4115,7 @@ bool VerifyAppliedState(
 			OutFailure = PlanError.ErrorMessage;
 			return false;
 		}
-		return FCortexGraphMigrationOps::VerifyRetirementAgainstNative(Blueprint, RetirePlan, OutFailure);
+		return FCortexGraphMigrationOps::VerifyRetirementAgainstNative(Blueprint, RetirePlan, bCompiled, OutFailure);
 	}
 	if (Prepared.MigrationPlan.IsValid())
 	{
@@ -3940,6 +4127,17 @@ bool VerifyAppliedState(
 			return false;
 		}
 		return FCortexGraphMigrationOps::VerifyReplacementAgainstNative(Blueprint, Plan, bCompiled, true, OutFailure);
+	}
+	if (Prepared.RewirePlan.IsValid())
+	{
+		FCortexGraphMigrationCallOutputPlan Plan;
+		FCortexCommandResult PlanError;
+		if (!FCortexGraphMigrationCallOutputPlan::FromJson(Prepared.RewirePlan, Plan, PlanError))
+		{
+			OutFailure = PlanError.ErrorMessage;
+			return false;
+		}
+		return FCortexGraphMigrationOps::VerifyCallOutputAgainstNative(Blueprint, Plan, OutFailure);
 	}
 	return true;
 }
@@ -4325,6 +4523,145 @@ bool ApplyPrepared(
 			return Fail(TEXT("Test fault injected after the approved retirement nodes were removed"));
 		}
 		RetirementGraph->NotifyGraphChanged();
+		return true;
+	}
+
+	if (Prepared.RewirePlan.IsValid())
+	{
+		// The orphan-output repair: the reviewed consumers of an in-use orphan output are reconnected
+		// to the call's current output of the same canonical type, then the unlinked orphan pin is
+		// removed. Nothing is created or re-authored, so the call node is never reconstructed.
+		FCortexGraphMigrationCallOutputPlan Plan;
+		if (!FCortexGraphMigrationCallOutputPlan::FromJson(Prepared.RewirePlan, Plan, OutError))
+		{
+			return false;
+		}
+		FGuid RewireGraphGuid;
+		if (!FGuid::Parse(Plan.GraphGuid, RewireGraphGuid))
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				TEXT("the prepared call-output plan carries an invalid graph identity"));
+			return false;
+		}
+		UEdGraph* const RewireGraph = FCortexGraphMigrationOps::FindGraphByGuid(Blueprint, RewireGraphGuid);
+		if (!RewireGraph)
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				TEXT("the planned call-output graph did not re-resolve after the final guard"));
+			return false;
+		}
+		FGuid RewireCallGuid;
+		if (!FGuid::Parse(Plan.CallNodeGuid, RewireCallGuid))
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				TEXT("the prepared call-output plan carries an invalid call identity"));
+			return false;
+		}
+		UEdGraphNode* const RewireCallNode = FCortexGraphMigrationOps::FindNodeByGuidInGraph(RewireGraph, RewireCallGuid);
+		if (!RewireCallNode)
+		{
+			return Fail(TEXT("the planned call node no longer resolves in the named graph"));
+		}
+		if (RewireCallNode->GetClass()->GetPathName() != Plan.CallNodeClassPath)
+		{
+			return Fail(TEXT("the planned call node class changed after the final guard"));
+		}
+		Journal.Locators.GraphGuid = RewireGraph->GraphGuid;
+		Journal.Locators.SubgraphPath = Plan.SubgraphPath;
+		// The retained graph carries one preservation contract, verified by the readback and again by
+		// recovery, so a restored body is proven instead of assumed. The call node is excluded because
+		// the reviewed consumer links, not a capture, prove it.
+		Journal.PreservationContracts = { Plan.Preservation };
+
+		UEdGraphPin* const StalePin = RewireCallNode->FindPin(FName(*Plan.StalePinName), EGPD_Output);
+		UEdGraphPin* const ReplacementPin = RewireCallNode->FindPin(FName(*Plan.ReplacementPinName), EGPD_Output);
+		if (!StalePin || !StalePin->bOrphanedPin)
+		{
+			return Fail(FString::Printf(
+				TEXT("the planned stale orphan output pin '%s' no longer resolves as an orphan"), *Plan.StalePinName));
+		}
+		if (!ReplacementPin || ReplacementPin->bOrphanedPin)
+		{
+			return Fail(FString::Printf(
+				TEXT("the planned replacement output pin '%s' no longer resolves as a live output"), *Plan.ReplacementPinName));
+		}
+		const UEdGraphSchema* const Schema = RewireGraph->GetSchema();
+		if (!Schema)
+		{
+			return Fail(TEXT("the target graph has no schema"));
+		}
+		// The rollback primitive for the broken links, captured before the first mutation: the call
+		// node's complete pin identity recreates the orphan pin and its original links on recovery.
+		JournalNodePins(RewireCallNode, Journal);
+		RewireCallNode->Modify();
+		RewireGraph->Modify();
+
+		for (int32 EdgeIndex = 0; EdgeIndex < Plan.Edges.Num(); ++EdgeIndex)
+		{
+			const FCortexGraphCallOutputEdge& Edge = Plan.Edges[EdgeIndex];
+			FGuid FarGuid;
+			UEdGraphNode* const FarNode = FGuid::Parse(Edge.FarGuid, FarGuid)
+				? FCortexGraphMigrationOps::FindNodeByGuidInGraph(RewireGraph, FarGuid)
+				: nullptr;
+			UEdGraphPin* const FarPin = FarNode ? FarNode->FindPin(FName(*Edge.FarPin), EGPD_Input) : nullptr;
+			if (!FarPin)
+			{
+				return Fail(FString::Printf(TEXT("the reviewed consumer '%s.%s' no longer resolves in the named graph"),
+					*Edge.FarGuid, *Edge.FarPin));
+			}
+			if (!FarPin->LinkedTo.Contains(StalePin))
+			{
+				return Fail(FString::Printf(
+					TEXT("the reviewed consumer '%s.%s' is no longer linked to the stale orphan output pin"),
+					*Edge.FarGuid, *Edge.FarPin));
+			}
+			// The consumer is journaled before its first changed link: `TryCreateConnection` notifies
+			// both endpoint nodes, and a K2 consumer can retype its own pins and reset their defaults in
+			// that callback. Without the snapshot a later failure could only restore the call node, so
+			// the consumer-side change would survive and the rollback could not be verified.
+			JournalNodePins(FarNode, Journal);
+			// Only the reviewed old link is broken, and only through this explicit break: the schema's
+			// BREAK_OTHERS response is never allowed to drop a link the caller did not approve.
+			StalePin->BreakLinkTo(FarPin);
+			const FPinConnectionResponse Response = Schema->CanCreateConnection(ReplacementPin, FarPin);
+			if (Response.Response != CONNECT_RESPONSE_MAKE || !Schema->TryCreateConnection(ReplacementPin, FarPin))
+			{
+				return Fail(FString::Printf(
+					TEXT("the reviewed replacement edge '%s.%s' is no longer a direct connection: %s"),
+					*Edge.FarGuid, *Edge.FarPin, *Response.Message.ToString()));
+			}
+			Journal.Links.Add({ ReplacementPin->GetOwningNode()->NodeGuid, ReplacementPin->PinName,
+				FarPin->GetOwningNode()->NodeGuid, FarPin->PinName });
+			if (EdgeIndex == 0 && ShouldInjectApplyFault(TEXT("migration_rewire_after_first_reconnect")))
+			{
+				return Fail(TEXT("Test fault injected after the first rewired consumer edge"));
+			}
+		}
+		if (!StalePin->LinkedTo.IsEmpty())
+		{
+			return Fail(TEXT("the orphan output pin still carries a link after the reviewed edges were rewired"));
+		}
+		// RemovePin deliberately does not break links, so every link was broken explicitly above. The
+		// call node is never reconstructed: the surviving pin set the readback proves would not survive
+		// a rebuild.
+		RewireCallNode->Modify();
+		// The removal is re-resolved by direction as well as name, exactly as the planner and the native
+		// readback resolve the stale pin: a migrated signature can leave a surviving *input* carrying the
+		// historic output's name, so a name-only lookup would find that input after a successful removal
+		// and report it as a failure, rolling a correct repair back. The pin's identity is read before the
+		// removal because RemovePin invalidates the pin object.
+		const FName RemovedPinName = StalePin->PinName;
+		const EEdGraphPinDirection RemovedPinDirection = StalePin->Direction;
+		RewireCallNode->RemovePin(StalePin);
+		if (RewireCallNode->FindPin(RemovedPinName, RemovedPinDirection))
+		{
+			return Fail(TEXT("the stale orphan output pin could not be removed from the call node"));
+		}
+		if (ShouldInjectApplyFault(TEXT("migration_rewire_after_removal")))
+		{
+			return Fail(TEXT("Test fault injected after the orphan output pin was removed"));
+		}
+		RewireGraph->NotifyGraphChanged();
 		return true;
 	}
 
@@ -4866,18 +5203,20 @@ bool FCortexGraphPatchOps::ValidateEligibility(
 
 	const TSharedPtr<FJsonObject>* Migration = nullptr;
 	FString Op;
-	const bool bRetirement =
+	const bool bMigrationOp =
 		Params.IsValid()
 		&& Params->TryGetObjectField(TEXT("migration"), Migration)
 		&& Migration && Migration->IsValid()
-		&& (*Migration)->TryGetStringField(TEXT("op"), Op)
-		&& Op == TEXT("retire_entries");
+		&& (*Migration)->TryGetStringField(TEXT("op"), Op);
+	// The two repair operations exist to clear a compiler-invalid state, so they are the only
+	// migrations a BS_Error asset accepts. Everything else still refuses to touch a broken asset.
+	const bool bRepairOp = bMigrationOp && (Op == TEXT("retire_entries") || Op == TEXT("replace_call_output"));
 
-	if (Blueprint->Status == BS_Error && !bRetirement)
+	if (Blueprint->Status == BS_Error && !bRepairOp)
 	{
 		OutError = FCortexCommandRouter::Error(
 			CortexErrorCodes::InvalidOperation,
-			TEXT("Blueprint has pre-existing compiler errors; only retire_entries may repair this state through graph.apply_patch"));
+			TEXT("Blueprint has pre-existing compiler errors; only retire_entries and replace_call_output may repair this state through graph.apply_patch"));
 		return false;
 	}
 	return true;
@@ -4933,6 +5272,7 @@ bool FCortexGraphPatchOps::Execute(
 	OutOutcome.TransferInventory = FCortexGraphMigrationOps::MakeTransferInventory(Prepared.TransferPlan);
 	OutOutcome.PruneInventory = FCortexGraphMigrationOps::MakePruneInventory(Prepared.PrunePlan);
 	OutOutcome.RetirementInventory = FCortexGraphMigrationOps::MakeRetirementInventory(Prepared.RetirementPlan);
+	OutOutcome.RewireInventory = FCortexGraphMigrationOps::MakeCallOutputInventory(Prepared.RewirePlan);
 	OutOutcome.bChanged = Prepared.bChanged;
 	OutOutcome.ReusedClientIds = Prepared.ReusedClientIds;
 	OutOutcome.bReplayedWithAbsentSource = Prepared.bReplayedWithAbsentSource;
@@ -5008,6 +5348,22 @@ bool FCortexGraphPatchOps::Execute(
 		return Refuse();
 	}
 	OutOutcome.ReadbackStatus = TEXT("matched");
+
+	// A class-specific retirement leaves a compiled artefact behind: the removed component-bound
+	// event and the removed custom event were registered in the generated class by the previous
+	// compile, and only the next successful compile rebuilds those bindings from the surviving nodes.
+	// A staged apply therefore says so instead of reporting a runtime-safe result it cannot prove,
+	// and it can never be persisted because save=true already requires compile=true.
+	bool bRetirementRequiresCompile = false;
+	if (OutOutcome.RetirementInventory.IsValid())
+	{
+		OutOutcome.RetirementInventory->TryGetBoolField(TEXT("requires_compile"), bRetirementRequiresCompile);
+	}
+	if (bRetirementRequiresCompile && !Prepared.bCompile)
+	{
+		OutOutcome.Diagnostics.Add(TEXT(
+			"staged class-specific retirement: the node removal and the retained graph are verified, but the stale generated class still carries the retired component delegate binding and generated function until a successful compile; compile=true is required before this result is runtime-safe"));
+	}
 
 	// Only a verified in-memory result is ever persisted, and only when the request asked for it.
 	if (Prepared.bSave && !SaveVerifiedTargetPackage(Blueprint, OutOutcome, OutError))

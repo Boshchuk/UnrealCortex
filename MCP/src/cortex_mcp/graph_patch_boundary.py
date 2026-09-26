@@ -32,7 +32,7 @@ _OUTCOME_FIELDS = (
 )
 
 
-_COMPLETE_APPROVAL_MIGRATIONS = {"prune_island", "retire_entries"}
+_COMPLETE_APPROVAL_MIGRATIONS = {"prune_island", "retire_entries", "replace_call_output"}
 
 
 def complete_approval_migration_op(request: dict[str, Any]) -> str | None:
@@ -450,21 +450,48 @@ def dispatch_graph_apply_patch(connection, request: dict[str, Any], *, tool_name
             f"The {operation} validation hash changed after the caller's preview; review and approve a fresh preview.",
         )
 
-    requested_approved = migration.get("approved_node_guids")
-    caller_approved = _canonical_guid_array(requested_approved)
-    native_approved = _canonical_guid_array(preview.get("approved_guids"))
-    if (
-        caller_approved is None
-        or not caller_approved
-        or native_approved is None
-        or native_approved != caller_approved
-    ):
-        return _stale_precondition(
-            request,
-            "The native approved GUID set differs from the nonempty GUID set explicitly approved by the caller.",
-        )
+    if operation == "replace_call_output":
+        requested_edges = migration.get("edges")
+        native_edges = preview.get("edges")
 
-    approved = requested_approved
+        def edge_keys(edges, *, reviewed=False):
+            if not isinstance(edges, list) or not edges:
+                return None
+            keys = []
+            for edge in edges:
+                if not isinstance(edge, dict):
+                    return None
+                fields = set(edge)
+                if (reviewed and fields != {"far_node_guid", "far_pin"}) or not {"far_node_guid", "far_pin"} <= fields:
+                    return None
+                guid, pin = edge["far_node_guid"], edge["far_pin"]
+                if not isinstance(guid, str) or not isinstance(pin, str) or not pin:
+                    return None
+                keys.append((guid, pin))
+            return sorted(keys) if len(set(keys)) == len(keys) else None
+
+        reviewed_keys = edge_keys(requested_edges, reviewed=True)
+        if reviewed_keys is None or reviewed_keys != edge_keys(native_edges):
+            return _stale_precondition(
+                request,
+                "The native consumer edge set differs from the nonempty edge set explicitly approved by the caller.",
+            )
+        approved = requested_edges
+    else:
+        requested_approved = migration.get("approved_node_guids")
+        caller_approved = _canonical_guid_array(requested_approved)
+        native_approved = _canonical_guid_array(preview.get("approved_guids"))
+        if (
+            caller_approved is None
+            or not caller_approved
+            or native_approved is None
+            or native_approved != caller_approved
+        ):
+            return _stale_precondition(
+                request,
+                "The native approved GUID set differs from the nonempty GUID set explicitly approved by the caller.",
+            )
+        approved = requested_approved
     prospective_size = _prospective_apply_size(preview, request, approved)
     removable = preview.get("removable")
     removable_count = len(removable) if isinstance(removable, list) else 0
