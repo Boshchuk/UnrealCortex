@@ -1337,8 +1337,15 @@ bool FCortexGraphMigrationRetireLateRetainedProducerTest::RunTest(const FString&
 	TestFalse(TEXT("the reviewed retirement refuses instead of severing the retained execution link"),
 		PrepareApprovedRequest(Fixture, TEXT("00000000-0000-0000-0000-000000107601"), Request, Approved, ReviewError));
 	TestTrue(TEXT("the reviewed refusal is diagnostic"), !ReviewError.ErrorMessage.IsEmpty());
-	TestTrue(TEXT("the reviewed refusal names the blocked selected entry instead of a malformed request"),
-		ReviewError.ErrorMessage.Contains(TEXT("blocked")));
+	// The approved set is the preview's removable set, which excludes the retained selected entry Alpha, so
+	// the guard that refuses first is the approval-inclusion guard (`approved_node_guids must include
+	// selected entry '<Alpha>'`, CortexGraphMigrationOps.cpp:7111) rather than the later blocked/retained
+	// refusal (:7278). Naming Alpha as the selected entry its approved set could not include is therefore the
+	// honest refusal reason, and it cannot be produced by a malformed request: an invalid patch_id names
+	// neither a selected entry nor a node GUID.
+	TestTrue(TEXT("the reviewed refusal names the selected entry its approved set could not include"),
+		ReviewError.ErrorMessage.Contains(TEXT("selected entry"))
+			&& ReviewError.ErrorMessage.Contains(AlphaGuidText));
 
 	// The independent entry is then retired for real: a separately reviewed Beta-only request agrees on
 	// exactly its own removable pair, applies it, and the retained producer, its execution consumer and
