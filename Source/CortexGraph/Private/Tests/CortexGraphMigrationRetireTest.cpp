@@ -1295,6 +1295,23 @@ bool ConnectTypedPins(const UEdGraphSchema* Schema, UEdGraphPin* From, UEdGraphP
 }
 
 /**
+ * Ends one fixture case of a multi-case test.
+ *
+ * The engine transaction buffer keeps references to the transactional fixture nodes, so it is reset
+ * before the objects are marked garbage, exactly as the referencer fixture in this file does before it
+ * unloads. Without that reset a later blueprint compile in the same test can collect a fixture the
+ * transaction buffer still points at.
+ */
+void EndFixtureCase(FFixture& Fixture)
+{
+	if (GEditor && GEditor->Trans)
+	{
+		GEditor->Trans->Reset(FText::FromString(TEXT("CortexGraphMigrationRetireFixtureCase")));
+	}
+	Fixture.Cleanup();
+}
+
+/**
  * The observed page's admitted non-entry nodes, built through engine APIs and linked into the
  * selected entry's execution island:
  *
@@ -1390,7 +1407,15 @@ struct FAdmittedNodeChain
 			Failure = TEXT("delegate: the UButton-typed fixture variable could not be added");
 			return false;
 		}
-		FKismetEditorUtilities::CompileBlueprint(Fixture.Blueprint);
+		// The variable has to resolve before the getter below is created, but a full blueprint compile here
+		// would run the reinstancing/GC path inside a fixture setup while other cases of the same test have
+		// already garbage-marked their fixtures. Regenerating the skeleton class is the engine's own way to
+		// publish a newly added variable and is all the getter needs to resolve its type.
+		if (!FKismetEditorUtilities::GenerateBlueprintSkeleton(Fixture.Blueprint, /*bForceRegeneration=*/true))
+		{
+			Failure = TEXT("delegate: the fixture skeleton class could not be regenerated for the target variable");
+			return false;
+		}
 		UK2Node_VariableGet* const TargetGet =
 			NewObject<UK2Node_VariableGet>(Fixture.Graph, NAME_None, RF_Transactional);
 		TargetGet->VariableReference.SetSelfMember(FName(TEXT("RetireButtonTarget")));
@@ -5021,12 +5046,12 @@ bool FCortexGraphMigrationRetireAdditionalClassRollbackTest::RunTest(const FStri
 		const FString AssetName = FString::Printf(TEXT("BP_RetireAdmittedRollback_%d"), Index);
 		bAllPassed &= TestTrue(TEXT("class-admitted rollback fixture is created"),
 			Fixture.Build(*AssetName, /*bRetainProducer=*/true));
-		if (!Fixture.Blueprint) { Fixture.Cleanup(); continue; }
+		if (!Fixture.Blueprint) { EndFixtureCase(Fixture); continue; }
 		FAdmittedNodeChain Chain;
 		const bool bRollbackChainBuilt = Chain.Build(Fixture);
 		bAllPassed &= TestTrue(FString::Printf(TEXT("class-admitted rollback chain is built: %s"), *Chain.Failure),
 			bRollbackChainBuilt);
-		if (!Chain.IsComplete()) { Fixture.Cleanup(); continue; }
+		if (!Chain.IsComplete()) { EndFixtureCase(Fixture); continue; }
 		if (Faults[Index].bCompile)
 		{
 			FKismetEditorUtilities::CompileBlueprint(Fixture.Blueprint);
@@ -5057,7 +5082,7 @@ bool FCortexGraphMigrationRetireAdditionalClassRollbackTest::RunTest(const FStri
 		{
 			bAllPassed &= TestFalse(FString::Printf(TEXT("%s request preparation failed: %s"), Faults[Index].Name,
 				*Error.ErrorMessage), true);
-			Fixture.Cleanup();
+			EndFixtureCase(Fixture);
 			continue;
 		}
 		FOperations Operations;
@@ -5137,7 +5162,7 @@ bool FCortexGraphMigrationRetireAdditionalClassRollbackTest::RunTest(const FStri
 			bAllPassed &= TestEqual(FString::Printf(TEXT("%s performs no recovery compile"), Faults[Index].Name),
 				Operations.RecoveryCompiles, 0);
 		}
-		Fixture.Cleanup();
+		EndFixtureCase(Fixture);
 	}
 	FCortexGraphPatchOps::SetApplyFaultPointForTesting(NAME_None);
 	FCortexGraphMigrationOps::ClearRetirementReadbackFaultForTesting();
@@ -5206,7 +5231,7 @@ bool FCortexGraphMigrationRetireAdditionalClassSaveTest::RunTest(const FString& 
 					SameBytes(BaselineBytes, ReadBytes(Filename)));
 			}
 			const FString CleanupFilename = Fixture.Filename();
-			Fixture.Cleanup();
+			EndFixtureCase(Fixture);
 			IFileManager::Get().Delete(*CleanupFilename, false, true, true);
 		}
 	}
@@ -5263,7 +5288,7 @@ bool FCortexGraphMigrationRetireAdditionalClassSaveTest::RunTest(const FString& 
 					SameBytes(BaselineBytes, ReadBytes(Filename)));
 			}
 			const FString CleanupFilename = Fixture.Filename();
-			Fixture.Cleanup();
+			EndFixtureCase(Fixture);
 			IFileManager::Get().Delete(*CleanupFilename, false, true, true);
 		}
 	}
@@ -5324,7 +5349,7 @@ bool FCortexGraphMigrationRetireAdditionalClassSaveTest::RunTest(const FString& 
 					SameBytes(BaselineBytes, ReadBytes(Filename)));
 			}
 			const FString CleanupFilename = Fixture.Filename();
-			Fixture.Cleanup();
+			EndFixtureCase(Fixture);
 			IFileManager::Get().Delete(*CleanupFilename, false, true, true);
 		}
 	}
