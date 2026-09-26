@@ -2727,21 +2727,22 @@ bool RestoreRemovedNodes(UBlueprint* Blueprint, const FGraphPatchJournal& Journa
 			}
 		}
 		if (!RestoreNodePinState(Blueprint, Journal, Entry.Snapshot)) return false;
-		// The create node's selection is re-applied *after* its scope and delegate links are back, so the
-		// signature resolves and the engine's own node maintenance keeps the name instead of clearing it
-		// as it does for an unlinked create node. The restored name is compared, not assumed.
-		if (UK2Node_CreateDelegate* const CreateDelegate = Cast<UK2Node_CreateDelegate>(Node))
-		{
-			if (!Entry.DelegateFunctionName.IsNone())
-			{
-				CreateDelegate->SetFunction(Entry.DelegateFunctionName);
-			}
-			if (CreateDelegate->GetFunctionName() != Entry.DelegateFunctionName)
-			{
-				return false;
-			}
-		}
 		Graph->NotifyGraphChanged();
+	}
+	// Node state the journal has to bring back *itself* is re-applied only after every node, pin and link
+	// of the removal set is back: restoring the other nodes reconnects and breaks links, and the engine's
+	// own node maintenance clears a create node's selection while its delegate output is unlinked, so an
+	// earlier re-apply would be wiped again. The restored selection is compared, not assumed.
+	for (const FGraphPatchJournal::FRemovedNodeEntry& Entry : Journal.RemovedNodes)
+	{
+		if (Entry.DelegateFunctionName.IsNone()) continue;
+		UK2Node_CreateDelegate* const CreateDelegate = Cast<UK2Node_CreateDelegate>(Entry.Node);
+		if (!CreateDelegate) return false;
+		CreateDelegate->SetFunction(Entry.DelegateFunctionName);
+		if (CreateDelegate->GetFunctionName() != Entry.DelegateFunctionName)
+		{
+			return false;
+		}
 	}
 	return true;
 }
@@ -4420,9 +4421,14 @@ bool ApplyPrepared(
 			return Fail(TEXT("Test fault injected after destination wiring"));
 		}
 
+		// Journaled as a batch before the first removal: a removal breaks the links of the nodes it reaches,
+		// so every source node is captured while the source graph is still intact.
 		for (UEdGraphNode* SourceNode : SourceNodes)
 		{
 			JournalNodeRemoved(SourceNode, Journal);
+		}
+		for (UEdGraphNode* SourceNode : SourceNodes)
+		{
 			SourceGraph->Modify();
 			if (!SourceGraph->RemoveNode(SourceNode))
 			{
@@ -4467,6 +4473,23 @@ bool ApplyPrepared(
 		// The retained body carries one preservation contract, verified by the readback and again by
 		// recovery, so a restored graph is proven instead of assumed.
 		Journal.PreservationContracts = { PrunePlan.Preservation };
+
+		// Every approved island node is journaled before the first removal: a removal breaks the links of
+		// the nodes it reaches and some node classes clear their own state when a link goes away, so a
+		// capture taken mid-removal would record a degraded node. Idempotent per GUID, so the per-node
+		// call in the removal loop stays a no-op.
+		for (const FString& GuidText : PrunePlan.ApprovedGuids)
+		{
+			FGuid ApprovedGuid;
+			UEdGraphNode* const ApprovedNode = FGuid::Parse(GuidText, ApprovedGuid)
+				? FCortexGraphMigrationOps::FindNodeByGuidInGraph(PruneGraph, ApprovedGuid)
+				: nullptr;
+			if (!ApprovedNode)
+			{
+				return Fail(FString::Printf(TEXT("the approved island node '%s' no longer resolves in the pruned graph"), *GuidText));
+			}
+			JournalNodeRemoved(ApprovedNode, Journal);
+		}
 
 		for (const FString& GuidText : PrunePlan.ApprovedGuids)
 		{
@@ -4520,6 +4543,25 @@ bool ApplyPrepared(
 		Journal.Locators.GraphGuid = RetirementGraph->GraphGuid;
 		Journal.Locators.SubgraphPath.Reset();
 		Journal.PreservationContracts = { RetirePlan.Preservation };
+
+		// Every approved node is journaled before the first mutation. A removal breaks the links of the
+		// nodes it reaches, and node classes such as the create-delegate node clear their own state when a
+		// link goes away, so a capture taken mid-removal would record a node that is already degraded and
+		// could never be restored exactly. The capture is idempotent per GUID, so the per-node call below
+		// stays a no-op for the nodes already captured here.
+		for (const FString& GuidText : RetirePlan.ApprovedGuids)
+		{
+			FGuid ApprovedGuid;
+			UEdGraphNode* const ApprovedNode = FGuid::Parse(GuidText, ApprovedGuid)
+				? FCortexGraphMigrationOps::FindNodeByGuidInGraph(RetirementGraph, ApprovedGuid)
+				: nullptr;
+			if (!ApprovedNode)
+			{
+				return Fail(FString::Printf(TEXT("the approved retirement node '%s' no longer resolves in the named graph"),
+					*GuidText));
+			}
+			JournalNodeRemoved(ApprovedNode, Journal);
+		}
 
 		for (int32 Index = 0; Index < RetirePlan.ApprovedGuids.Num(); ++Index)
 		{
@@ -4741,7 +4783,10 @@ bool ApplyPrepared(
 		if (Plan.bRemoveMember)
 		{
 			// The engine's self-only variable removal destroys the referencing nodes, so they are
-			// detached and journaled first and come back with the member on recovery.
+			// detached and journaled first and come back with the member on recovery. The whole reference
+			// set is resolved and captured before the first removal, because a removal breaks the links of
+			// the nodes it reaches.
+			TArray<UEdGraphNode*> ReferenceNodes;
 			for (const FString& GuidText : Plan.MemberReferenceNodeGuids)
 			{
 				FGuid ReferenceGuid;
@@ -4751,7 +4796,14 @@ bool ApplyPrepared(
 				{
 					return Fail(TEXT("a planned shadowing-member reference no longer resolves"));
 				}
+				ReferenceNodes.Add(ReferenceNode);
+			}
+			for (UEdGraphNode* ReferenceNode : ReferenceNodes)
+			{
 				JournalNodeRemoved(ReferenceNode, Journal);
+			}
+			for (UEdGraphNode* ReferenceNode : ReferenceNodes)
+			{
 				ReferenceNode->GetGraph()->RemoveNode(ReferenceNode);
 			}
 			Journal.Member.Name = FName(*Plan.MemberName);
