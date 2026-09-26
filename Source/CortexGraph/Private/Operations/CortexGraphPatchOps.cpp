@@ -2363,15 +2363,8 @@ struct FGraphPatchJournal
 		PreRemovalState.Add(MoveTemp(State));
 	}
 
-	/** The pre-removal capture of one node, or null when nothing was captured for it. */
-	const FPreRemovalNodeState* FindPreRemovalState(const FGuid& NodeGuid) const
-	{
-		for (const FPreRemovalNodeState& Existing : PreRemovalState)
-		{
-			if (Existing.NodeGuid == NodeGuid) return &Existing;
-		}
-		return nullptr;
-	}
+	/** The pre-removal capture of one node is consumed by the rollback invariant in `RestoreJournal`. */
+
 	/**
 	 * Created nodes of a transfer, addressed by graph as well as identity. A move registers the
 	 * destination nodes before it deletes the source nodes, so for that window one identity is owned
@@ -2506,14 +2499,6 @@ struct FGraphPatchJournal
 		FName DelegatePropertyName = NAME_None;
 		UClass* DelegateOwnerClass = nullptr;
 		bool bCallInEditor = false;
-		/**
-		 * `UK2Node_CreateDelegate`'s selected function/event. It has to be captured before the removal:
-		 * `FBlueprintEditorUtils::RemoveNode` breaks the node's links first, and the create node clears
-		 * its own selection as soon as its delegate output is unlinked
-		 * (`UK2Node_CreateDelegate::HandleAnyChangeWithoutNotifying`), so the journal's node object no
-		 * longer carries it when recovery re-registers the node.
-		 */
-		FName DelegateFunctionName = NAME_None;
 		UEdGraphNode* Node = nullptr;
 		FNodePinSnapshot Snapshot;
 	};
@@ -2672,15 +2657,6 @@ void JournalNodeRemoved(UEdGraphNode* Node, FGraphPatchJournal& Journal)
 		Entry.DelegatePropertyName = BoundEvent->DelegatePropertyName;
 		Entry.DelegateOwnerClass = BoundEvent->DelegateOwnerClass;
 	}
-	if (const UK2Node_CreateDelegate* const CreateDelegate = Cast<UK2Node_CreateDelegate>(Node))
-	{
-		// An earlier removal in the same batch may already have cleared this node's selection (breaking the
-		// delegate link makes the engine clear it), so the pre-removal capture wins over the live node.
-		const FGraphPatchJournal::FPreRemovalNodeState* const Captured =
-			Journal.FindPreRemovalState(Node->NodeGuid);
-		Entry.DelegateFunctionName = Captured
-			? Captured->DelegateFunctionName : CreateDelegate->GetFunctionName();
-	}
 	Entry.Node = Node;
 	Entry.Snapshot = MakeNodePinSnapshot(Node);
 	Journal.RemovedNodes.Add(MoveTemp(Entry));
@@ -2776,21 +2752,6 @@ bool RestoreRemovedNodes(UBlueprint* Blueprint, const FGraphPatchJournal& Journa
 		}
 		if (!RestoreNodePinState(Blueprint, Journal, Entry.Snapshot)) return false;
 		Graph->NotifyGraphChanged();
-	}
-	// Node state the journal has to bring back *itself* is re-applied only after every node, pin and link
-	// of the removal set is back: restoring the other nodes reconnects and breaks links, and the engine's
-	// own node maintenance clears a create node's selection while its delegate output is unlinked, so an
-	// earlier re-apply would be wiped again. The restored selection is compared, not assumed.
-	for (const FGraphPatchJournal::FRemovedNodeEntry& Entry : Journal.RemovedNodes)
-	{
-		if (Entry.DelegateFunctionName.IsNone()) continue;
-		UK2Node_CreateDelegate* const CreateDelegate = Cast<UK2Node_CreateDelegate>(Entry.Node);
-		if (!CreateDelegate) return false;
-		CreateDelegate->SetFunction(Entry.DelegateFunctionName);
-		if (CreateDelegate->GetFunctionName() != Entry.DelegateFunctionName)
-		{
-			return false;
-		}
 	}
 	return true;
 }
@@ -3212,6 +3173,33 @@ bool RestoreJournal(UBlueprint* Blueprint, FGraphPatchJournal& Journal)
 		if (Journal.AddedGraphs[Index])
 		{
 			FBlueprintEditorUtils::RemoveGraph(Blueprint, Journal.AddedGraphs[Index]);
+		}
+	}
+
+	// The rollback invariant for the state that link churn clears: a removal breaks the delegate links of
+	// the nodes it reaches, and the engine's own node maintenance then clears a create node's selection -
+	// including on candidates that were never removed themselves, whose links were only restored here. Once
+	// every node, pin, link and added graph is back (or gone), the pre-removal capture is re-applied to
+	// every captured candidate, whether it was removed or stayed resident. Only captured candidates are
+	// touched, the restored selection is compared rather than assumed, and a candidate that is missing
+	// after the rollback refuses the recovery.
+	for (const FGraphPatchJournal::FPreRemovalNodeState& State : Journal.PreRemovalState)
+	{
+		if (State.DelegateFunctionName.IsNone()) continue;
+		UEdGraphNode* Node = nullptr;
+		FindNodeByGuid(Blueprint, State.NodeGuid, Node);
+		if (!Node) return false;
+		UK2Node_CreateDelegate* const CreateDelegate = Cast<UK2Node_CreateDelegate>(Node);
+		if (!CreateDelegate) return false;
+		CreateDelegate->SetFunction(State.DelegateFunctionName);
+		if (CreateDelegate->GetFunctionName() != State.DelegateFunctionName) return false;
+		// A create node that still carries its delegate link must resolve scope and signature again,
+		// otherwise the recovery compile would report the nameless create event this invariant prevents.
+		const UEdGraphPin* const DelegateOut = CreateDelegate->GetDelegateOutPin();
+		if (DelegateOut && DelegateOut->LinkedTo.Num() > 0
+			&& (!CreateDelegate->GetScopeClass() || !CreateDelegate->GetDelegateSignature()))
+		{
+			return false;
 		}
 	}
 	return true;
