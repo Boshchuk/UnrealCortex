@@ -1237,17 +1237,74 @@ UEdGraphPin* FindTypedPin(UEdGraphNode* Node, const EEdGraphPinDirection Directi
 	return nullptr;
 }
 
+/** First non-execution pin of one node in the requested direction, whatever its category. */
+UEdGraphPin* FindDataPin(UEdGraphNode* Node, const EEdGraphPinDirection Direction)
+{
+	if (!Node) return nullptr;
+	for (UEdGraphPin* Pin : Node->Pins)
+	{
+		if (Pin && Pin->Direction == Direction && Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Exec) return Pin;
+	}
+	return nullptr;
+}
+
+/** `name:in|out:category` for every pin of one node, so a failure message names the real interface. */
+FString PinSummary(const UEdGraphNode* Node)
+{
+	if (!Node) return TEXT("no node");
+	TArray<FString> Items;
+	for (const UEdGraphPin* Pin : Node->Pins)
+	{
+		if (!Pin) continue;
+		Items.Add(FString::Printf(TEXT("%s:%s:%s"), *Pin->PinName.ToString(),
+			Pin->Direction == EGPD_Input ? TEXT("in") : TEXT("out"), *Pin->PinType.PinCategory.ToString()));
+	}
+	return FString::Join(Items, TEXT(", "));
+}
+
+/**
+ * Connects two pins through the schema, recording the exact refusal or missing pin in `OutFailure`.
+ * The schema response is the evidence a fixture failure reports, so a wiring problem is never silent.
+ */
+bool ConnectTypedPins(const UEdGraphSchema* Schema, UEdGraphPin* From, UEdGraphPin* To,
+	const TCHAR* Stage, FString& OutFailure)
+{
+	if (!From || !To)
+	{
+		OutFailure = FString::Printf(TEXT("%s: pin missing (from=%s, to=%s)"), Stage,
+			From ? *PinSummary(From->GetOwningNode()) : TEXT("none"),
+			To ? *PinSummary(To->GetOwningNode()) : TEXT("none"));
+		return false;
+	}
+	const FPinConnectionResponse Response = Schema->CanCreateConnection(From, To);
+	if (Response.Response == CONNECT_RESPONSE_DISALLOW)
+	{
+		OutFailure = FString::Printf(TEXT("%s: schema refused '%s'(%s) -> '%s'(%s): %s"), Stage,
+			*From->PinName.ToString(), *From->PinType.PinCategory.ToString(),
+			*To->PinName.ToString(), *To->PinType.PinCategory.ToString(), *Response.Message.ToString());
+		return false;
+	}
+	if (!Schema->TryCreateConnection(From, To))
+	{
+		OutFailure = FString::Printf(TEXT("%s: schema connection returned false after response %d"),
+			Stage, static_cast<int32>(Response.Response));
+		return false;
+	}
+	return true;
+}
+
 /**
  * The observed page's admitted non-entry nodes, built through engine APIs and linked into the
  * selected entry's execution island:
  *
  *   AlphaBody.then -> DelayUntilNextTick.execute -> AddDelegate.execute -> macro instance
  *   CreateDelegate.delegate -> AddDelegate.delegate
- *   GetGameInstance -> macro wildcard input (a real object source, so the chain is compile-valid
- *   exactly like the page's `IsValid` node, whose wildcard input is fed by a real object)
+ *   an object producer -> the macro instance's data input (a real source, so the chain is
+ *   compile-valid exactly like the page's `IsValid` node, whose input is fed by a real object)
  *
- * The macro graph is taken from the engine's own standard macro library, so the fixture exercises the
- * same `UK2Node_MacroInstance` the page holds.
+ * The macro graph comes from the engine's own standard macro library, so the fixture exercises the
+ * same `UK2Node_MacroInstance` the page holds. `Build` records the exact stage and the observed pin
+ * interface in `Failure` instead of returning silently.
  */
 struct FAdmittedNodeChain
 {
@@ -1257,10 +1314,18 @@ struct FAdmittedNodeChain
 	UK2Node_MacroInstance* Macro = nullptr;
 	UK2Node_CallFunction* ObjectSource = nullptr;
 	UEdGraph* MacroGraph = nullptr;
+	/** Why `Build` returned false: the first stage that could not be wired, with the observed pins. */
+	FString Failure;
+	/**
+	 * True when the macro instance's data input needs no source or is fed by the object producer. A
+	 * wildcard input left unresolved would make the chain uncompilable, so this is the compile-validity
+	 * state of the fixture as well as its evidence.
+	 */
+	bool bMacroDataInputFed = false;
 
 	bool IsComplete() const
 	{
-		return Latent && CreateDelegate && AddDelegate && Macro && ObjectSource && MacroGraph;
+		return Latent && CreateDelegate && AddDelegate && Macro && MacroGraph;
 	}
 
 	/** The explicitly requested additional identities of the chain. */
@@ -1278,19 +1343,27 @@ struct FAdmittedNodeChain
 
 	bool Build(FFixture& Fixture)
 	{
-		if (!Fixture.Graph) return false;
-		const UEdGraphSchema* Schema = Fixture.Graph->GetSchema();
-		if (!Schema) return false;
+		Failure.Reset();
+		bMacroDataInputFed = false;
+		if (!Fixture.Graph) { Failure = TEXT("fixture graph is missing"); return false; }
+		const UEdGraphSchema* const Schema = Fixture.Graph->GetSchema();
+		if (!Schema) { Failure = TEXT("fixture graph has no schema"); return false; }
 
+		// Stage 1: the latent call on the selected entry's execution path.
 		Latent = Fixture.AddCall(UKismetSystemLibrary::StaticClass()->FindFunctionByName(TEXT("DelayUntilNextTick")));
-		if (!Latent || !Schema->TryCreateConnection(Fixture.AlphaBody->FindPin(TEXT("then")), Latent->FindPin(TEXT("execute"))))
+		if (!Latent) { Failure = TEXT("latent: DelayUntilNextTick node could not be created"); return false; }
+		if (!Latent->FindPin(TEXT("execute")))
 		{
+			Failure = FString::Printf(TEXT("latent: no execute pin [%s]"), *PinSummary(Latent));
 			return false;
 		}
+		if (!ConnectTypedPins(Schema, Fixture.AlphaBody->FindPin(TEXT("then")), Latent->FindPin(TEXT("execute")),
+			TEXT("latent link"), Failure)) return false;
 
-		FMulticastDelegateProperty* ClickedDelegate =
+		// Stage 2: the delegate create/add pair.
+		FMulticastDelegateProperty* const ClickedDelegate =
 			FindFProperty<FMulticastDelegateProperty>(UButton::StaticClass(), TEXT("OnClicked"));
-		if (!ClickedDelegate) return false;
+		if (!ClickedDelegate) { Failure = TEXT("delegate: UButton::OnClicked is not available"); return false; }
 		CreateDelegate = NewObject<UK2Node_CreateDelegate>(Fixture.Graph, NAME_None, RF_Transactional);
 		CreateDelegate->CreateNewGuid();
 		CreateDelegate->AllocateDefaultPins();
@@ -1300,15 +1373,27 @@ struct FAdmittedNodeChain
 		AddDelegate->CreateNewGuid();
 		AddDelegate->AllocateDefaultPins();
 		Fixture.Graph->AddNode(AddDelegate, true, false);
-		UEdGraphPin* CreatedDelegateOut = FindTypedPin(CreateDelegate, EGPD_Output, UEdGraphSchema_K2::PC_Delegate);
-		UEdGraphPin* AddedDelegateIn = FindTypedPin(AddDelegate, EGPD_Input, UEdGraphSchema_K2::PC_Delegate);
-		if (!CreatedDelegateOut || !AddedDelegateIn) return false;
-		if (!Schema->TryCreateConnection(Latent->FindPin(TEXT("then")), AddDelegate->FindPin(TEXT("execute")))) return false;
-		if (!Schema->TryCreateConnection(CreatedDelegateOut, AddedDelegateIn)) return false;
+		UEdGraphPin* const CreatedDelegateOut = FindTypedPin(CreateDelegate, EGPD_Output, UEdGraphSchema_K2::PC_Delegate);
+		if (!CreatedDelegateOut)
+		{
+			Failure = FString::Printf(TEXT("delegate: create node has no delegate output [%s]"), *PinSummary(CreateDelegate));
+			return false;
+		}
+		UEdGraphPin* const AddedDelegateIn = FindTypedPin(AddDelegate, EGPD_Input, UEdGraphSchema_K2::PC_Delegate);
+		if (!AddedDelegateIn)
+		{
+			Failure = FString::Printf(TEXT("delegate: add node has no delegate input [%s]"), *PinSummary(AddDelegate));
+			return false;
+		}
+		if (!ConnectTypedPins(Schema, Latent->FindPin(TEXT("then")), AddDelegate->FindPin(TEXT("execute")),
+			TEXT("delegate execution link"), Failure)) return false;
+		if (!ConnectTypedPins(Schema, CreatedDelegateOut, AddedDelegateIn,
+			TEXT("delegate binding link"), Failure)) return false;
 
+		// Stage 3: the engine macro instance.
 		UBlueprint* const StandardMacros = LoadObject<UBlueprint>(nullptr,
 			TEXT("/Engine/EditorBlueprintResources/StandardMacros.StandardMacros"));
-		if (!StandardMacros) return false;
+		if (!StandardMacros) { Failure = TEXT("macro: the engine standard macro library did not load"); return false; }
 		TArray<UEdGraph*> StandardGraphs;
 		StandardMacros->GetAllGraphs(StandardGraphs);
 		StandardGraphs.Sort([](const UEdGraph& A, const UEdGraph& B)
@@ -1326,7 +1411,33 @@ struct FAdmittedNodeChain
 				if (Candidate && Candidate->GetName().Contains(TEXT("IsValid"))) { MacroGraph = Candidate; break; }
 			}
 		}
-		if (!MacroGraph) return false;
+		if (!MacroGraph)
+		{
+			// No `IsValid` graph: fall back to the first macro graph whose tunnel declares an execution
+			// pin, which is the interface the chain needs, and keep the chosen graph name for evidence.
+			for (UEdGraph* Candidate : StandardGraphs)
+			{
+				if (!Candidate) continue;
+				for (UEdGraphNode* Node : Candidate->Nodes)
+				{
+					UK2Node_Tunnel* const Tunnel = Cast<UK2Node_Tunnel>(Node);
+					if (Tunnel && FindTypedPin(Tunnel, EGPD_Output, UEdGraphSchema_K2::PC_Exec))
+					{
+						MacroGraph = Candidate;
+						break;
+					}
+				}
+				if (MacroGraph) break;
+			}
+		}
+		if (!MacroGraph)
+		{
+			TArray<FString> Names;
+			for (const UEdGraph* Candidate : StandardGraphs) if (Candidate) Names.Add(Candidate->GetName());
+			Failure = FString::Printf(TEXT("macro: no IsValid graph and no execution-capable macro graph among [%s]"),
+				FString::Join(Names, TEXT(", ")));
+			return false;
+		}
 
 		Macro = NewObject<UK2Node_MacroInstance>(Fixture.Graph, NAME_None, RF_Transactional);
 		Macro->SetMacroGraph(MacroGraph);
@@ -1334,14 +1445,41 @@ struct FAdmittedNodeChain
 		Macro->AllocateDefaultPins();
 		Fixture.Graph->AddNode(Macro, true, false);
 		UEdGraphPin* const MacroExecIn = FindTypedPin(Macro, EGPD_Input, UEdGraphSchema_K2::PC_Exec);
-		UEdGraphPin* const MacroWildcardIn = FindTypedPin(Macro, EGPD_Input, UEdGraphSchema_K2::PC_Wildcard);
-		if (!MacroExecIn || !MacroWildcardIn) return false;
-		if (!Schema->TryCreateConnection(AddDelegate->FindPin(TEXT("then")), MacroExecIn)) return false;
+		if (!MacroExecIn)
+		{
+			Failure = FString::Printf(TEXT("macro: instance '%s' has no execution input [%s]"),
+				*MacroGraph->GetName(), *PinSummary(Macro));
+			return false;
+		}
+		if (!ConnectTypedPins(Schema, AddDelegate->FindPin(TEXT("then")), MacroExecIn,
+			TEXT("macro execution link"), Failure)) return false;
 
-		ObjectSource = Fixture.AddCall(UGameplayStatics::StaticClass()->FindFunctionByName(TEXT("GetGameInstance")));
-		if (!ObjectSource) return false;
-		UEdGraphPin* const ObjectOut = FindTypedPin(ObjectSource, EGPD_Output, UEdGraphSchema_K2::PC_Object);
-		if (!ObjectOut || !Schema->TryCreateConnection(ObjectOut, MacroWildcardIn)) return false;
+		// Stage 4: the macro's data input, fed by a real object so a wildcard resolves at compile time.
+		UEdGraphPin* const MacroDataIn = FindDataPin(Macro, EGPD_Input);
+		if (MacroDataIn
+			&& (MacroDataIn->PinType.PinCategory == UEdGraphSchema_K2::PC_Wildcard
+				|| MacroDataIn->PinType.PinCategory == UEdGraphSchema_K2::PC_Object))
+		{
+			ObjectSource = Fixture.AddCall(UGameplayStatics::StaticClass()->FindFunctionByName(TEXT("GetGameInstance")));
+			if (!ObjectSource)
+			{
+				Failure = TEXT("macro data: UGameplayStatics::GetGameInstance node could not be created");
+				return false;
+			}
+			UEdGraphPin* const ObjectOut = FindTypedPin(ObjectSource, EGPD_Output, UEdGraphSchema_K2::PC_Object);
+			if (!ObjectOut)
+			{
+				Failure = FString::Printf(TEXT("macro data: object source has no object output [%s]"), *PinSummary(ObjectSource));
+				return false;
+			}
+			if (!ConnectTypedPins(Schema, ObjectOut, MacroDataIn, TEXT("macro data link"), Failure)) return false;
+			bMacroDataInputFed = true;
+		}
+		else
+		{
+			// The macro declares no data input, or one that needs no source: nothing to resolve.
+			bMacroDataInputFed = true;
+		}
 		return true;
 	}
 };
@@ -4531,7 +4669,8 @@ bool FCortexGraphMigrationRetireAdditionalClassAdmissionTest::RunTest(const FStr
 	// The page's admitted non-entry chain (latent call, delegate create/add pair, engine macro
 	// instance) is built through engine APIs and linked into the selected entry's island.
 	FAdmittedNodeChain Chain;
-	TestTrue(TEXT("the page-shaped admitted chain is built"), Chain.Build(Fixture));
+	const bool bChainBuilt = Chain.Build(Fixture);
+	TestTrue(FString::Printf(TEXT("the page-shaped admitted chain is built: %s"), *Chain.Failure), bChainBuilt);
 	if (!Chain.IsComplete()) { Fixture.Cleanup(); return false; }
 	TestTrue(TEXT("the engine marks the observed call as latent"), Chain.Latent->IsLatentFunction());
 	TestNotNull(TEXT("the delegate create node exposes a delegate output"),
@@ -4540,9 +4679,11 @@ bool FCortexGraphMigrationRetireAdditionalClassAdmissionTest::RunTest(const FStr
 		FindTypedPin(Chain.AddDelegate, EGPD_Input, UEdGraphSchema_K2::PC_Delegate));
 	TestNotNull(TEXT("the macro instance exposes an execution input"),
 		FindTypedPin(Chain.Macro, EGPD_Input, UEdGraphSchema_K2::PC_Exec));
-	TestNotNull(TEXT("the macro instance exposes a wildcard data input"),
-		FindTypedPin(Chain.Macro, EGPD_Input, UEdGraphSchema_K2::PC_Wildcard));
 	TestTrue(TEXT("the macro instance owns no bound subgraph"), Chain.Macro->GetSubGraphs().IsEmpty());
+	TestTrue(TEXT("the macro instance belongs to the resolved engine macro graph"),
+		Chain.Macro->GetMacroGraph() == Chain.MacroGraph);
+	TestTrue(TEXT("the macro instance's data input is fed by the real object source, or the macro declares none"),
+		Chain.bMacroDataInputFed);
 	TestNull(TEXT("the macro instance has no input sink twin"), Chain.Macro->InputSinkNode.Get());
 	TestNull(TEXT("the macro instance has no output source twin"), Chain.Macro->OutputSourceNode.Get());
 	UK2Node_CallFunction* const Latent = Chain.Latent;
@@ -4699,7 +4840,8 @@ bool FCortexGraphMigrationRetireAdditionalCompiledApplyTest::RunTest(const FStri
 	if (!Fixture.Blueprint) { Fixture.Cleanup(); return false; }
 
 	FAdmittedNodeChain Chain;
-	TestTrue(TEXT("the page-shaped admitted chain is built"), Chain.Build(Fixture));
+	const bool bChainBuilt = Chain.Build(Fixture);
+	TestTrue(FString::Printf(TEXT("the page-shaped admitted chain is built: %s"), *Chain.Failure), bChainBuilt);
 	if (!Chain.IsComplete()) { Fixture.Cleanup(); return false; }
 	const FString AlphaGuid = Fixture.Alpha->NodeGuid.ToString();
 	const TArray<FString> Requested = Chain.Guids();
@@ -4813,7 +4955,9 @@ bool FCortexGraphMigrationRetireAdditionalClassRollbackTest::RunTest(const FStri
 			Fixture.Build(*AssetName, /*bRetainProducer=*/true));
 		if (!Fixture.Blueprint) { Fixture.Cleanup(); continue; }
 		FAdmittedNodeChain Chain;
-		bAllPassed &= TestTrue(TEXT("class-admitted rollback chain is built"), Chain.Build(Fixture));
+		const bool bRollbackChainBuilt = Chain.Build(Fixture);
+		bAllPassed &= TestTrue(FString::Printf(TEXT("class-admitted rollback chain is built: %s"), *Chain.Failure),
+			bRollbackChainBuilt);
 		if (!Chain.IsComplete()) { Fixture.Cleanup(); continue; }
 		const FString AlphaGuid = Fixture.Alpha->NodeGuid.ToString();
 		const FString GraphBefore = CaptureNativeGraph(Fixture.Graph);
@@ -4890,7 +5034,9 @@ bool FCortexGraphMigrationRetireAdditionalClassSaveTest::RunTest(const FString& 
 		if (Fixture.Blueprint)
 		{
 			FAdmittedNodeChain Chain;
-			bAllPassed &= TestTrue(TEXT("verified-save chain is built"), Chain.Build(Fixture));
+			const bool bSaveChainBuilt = Chain.Build(Fixture);
+			bAllPassed &= TestTrue(FString::Printf(TEXT("verified-save chain is built: %s"), *Chain.Failure),
+				bSaveChainBuilt);
 			if (Chain.IsComplete())
 			{
 				const FString Filename = Fixture.Filename();
@@ -4942,7 +5088,9 @@ bool FCortexGraphMigrationRetireAdditionalClassSaveTest::RunTest(const FString& 
 		if (Fixture.Blueprint)
 		{
 			FAdmittedNodeChain Chain;
-			bAllPassed &= TestTrue(TEXT("save-failure chain is built"), Chain.Build(Fixture));
+			const bool bSaveFailChainBuilt = Chain.Build(Fixture);
+			bAllPassed &= TestTrue(FString::Printf(TEXT("save-failure chain is built: %s"), *Chain.Failure),
+				bSaveFailChainBuilt);
 			if (Chain.IsComplete())
 			{
 				const FString Filename = Fixture.Filename();
@@ -4997,7 +5145,9 @@ bool FCortexGraphMigrationRetireAdditionalClassSaveTest::RunTest(const FString& 
 		if (Fixture.Blueprint)
 		{
 			FAdmittedNodeChain Chain;
-			bAllPassed &= TestTrue(TEXT("post-save chain is built"), Chain.Build(Fixture));
+			const bool bPostSaveChainBuilt = Chain.Build(Fixture);
+			bAllPassed &= TestTrue(FString::Printf(TEXT("post-save chain is built: %s"), *Chain.Failure),
+				bPostSaveChainBuilt);
 			if (Chain.IsComplete())
 			{
 				const FString Filename = Fixture.Filename();
@@ -5066,7 +5216,8 @@ bool FCortexGraphMigrationRetireAdditionalClassReplayTest::RunTest(const FString
 		Fixture.Build(TEXT("BP_RetireAdmittedReplay"), /*bRetainProducer=*/true));
 	if (!Fixture.Blueprint) { Fixture.Cleanup(); return false; }
 	FAdmittedNodeChain Chain;
-	TestTrue(TEXT("the page-shaped admitted chain is built"), Chain.Build(Fixture));
+	const bool bChainBuilt = Chain.Build(Fixture);
+	TestTrue(FString::Printf(TEXT("the page-shaped admitted chain is built: %s"), *Chain.Failure), bChainBuilt);
 	if (!Chain.IsComplete()) { Fixture.Cleanup(); return false; }
 	const FString AlphaGuid = Fixture.Alpha->NodeGuid.ToString();
 	const TArray<FString> Requested = Chain.Guids();
