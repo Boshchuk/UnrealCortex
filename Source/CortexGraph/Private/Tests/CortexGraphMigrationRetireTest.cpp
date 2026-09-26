@@ -4256,41 +4256,50 @@ bool FCortexGraphMigrationRetireAdditionalRequestContractTest::RunTest(const FSt
 		FString(CortexErrorCodes::InvalidOperation),
 		{ ForeignGuid, OtherGraph->GraphGuid.ToString(), TEXT("another graph") });
 
-	// An active play or simulate session refuses the patch before any additional-node work happens, and
-	// the very same request previews once the session ends.
+	// An active play or simulate session refuses the patch through the real apply shell before any
+	// mutation. `FCortexGraphPatchOps::Preflight` is a pure planning call (a preview legitimately
+	// succeeds during PIE), so the eligibility shell that owns the play-session guard is exercised by
+	// `Execute` with a fully prepared reviewed request.
 	UWorld* const EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
 	TestNotNull(TEXT("the editor world is available for the play-session precondition"), EditorWorld);
 	if (EditorWorld)
 	{
+		TSharedPtr<FJsonObject> PlayRequest;
+		TArray<FString> PlayApproved;
+		FCortexCommandResult PlayError;
+		TestTrue(FString::Printf(TEXT("the reviewed play-session request is prepared: %s"), *PlayError.ErrorMessage),
+			PrepareAdditionalRetirementRequest(Fixture, Entries, { KnotGuid },
+				TEXT("00000000-0000-0000-0000-000000114101"), PlayRequest, PlayApproved, PlayError));
 		const FString PlayHashBefore = FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)
 			->GetStringField(TEXT("graph_authoring_hash"));
 		const int32 PlayNodesBefore = Fixture.Graph->Nodes.Num();
 		const bool bPlayDirtyBefore = Fixture.Package->IsDirty();
 		UWorld* const PlayWorldBefore = GEditor->PlayWorld;
 		GEditor->PlayWorld = EditorWorld;
-		FCortexGraphPreparedPatch PlayPreview;
-		FCortexCommandResult PlayError;
-		const bool bPlayPlanned = PreviewAdditionalRetirement(Fixture, Entries, { KnotGuid },
-			TEXT("00000000-0000-0000-0000-000000114101"), PlayPreview, PlayError);
+		FCortexGraphPatchOutcome PlayOutcome;
+		PlayError = FCortexCommandResult();
+		const bool bPlayApplied = FCortexGraphPatchOps::Execute(Fixture.Blueprint, PlayRequest, PlayOutcome, PlayError);
 		GEditor->PlayWorld = PlayWorldBefore;
-		TestFalse(TEXT("an active play session refuses a request that names additional nodes"), bPlayPlanned);
+		TestFalse(TEXT("an active play session refuses a request that names additional nodes"), bPlayApplied);
 		TestEqual(TEXT("the play-session refusal is INVALID_OPERATION"),
 			PlayError.ErrorCode, FString(CortexErrorCodes::InvalidOperation));
 		TestTrue(TEXT("the play-session refusal names the play or simulate session"),
 			PlayError.ErrorMessage.Contains(TEXT("play or simulate session")));
-		TestEqual(TEXT("the refused play-session preview leaves the graph hash unchanged"),
+		TestEqual(TEXT("the refused play-session apply reports that nothing was requested"),
+			PlayOutcome.ApplyStatus, FString(TEXT("not_requested")));
+		TestEqual(TEXT("the refused play-session apply leaves the graph hash unchanged"),
 			FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)
 				->GetStringField(TEXT("graph_authoring_hash")), PlayHashBefore);
-		TestEqual(TEXT("the refused play-session preview leaves the node count unchanged"),
+		TestEqual(TEXT("the refused play-session apply leaves the node count unchanged"),
 			Fixture.Graph->Nodes.Num(), PlayNodesBefore);
-		TestEqual(TEXT("the refused play-session preview leaves the dirty state unchanged"),
+		TestEqual(TEXT("the refused play-session apply leaves the dirty state unchanged"),
 			Fixture.Package->IsDirty(), bPlayDirtyBefore);
 
+		// With the session over, the very same prepared request finally reaches the review shell.
 		FCortexGraphPreparedPatch EndedPreview;
 		FCortexCommandResult EndedError;
 		TestTrue(FString::Printf(TEXT("the same request previews once the play session ends: %s"), *EndedError.ErrorMessage),
-			PreviewAdditionalRetirement(Fixture, Entries, { KnotGuid },
-				TEXT("00000000-0000-0000-0000-000000114102"), EndedPreview, EndedError));
+			FCortexGraphPatchOps::Preflight(Fixture.Blueprint, PlayRequest, EndedPreview, EndedError));
 	}
 
 	Fixture.Cleanup();
@@ -4732,8 +4741,10 @@ bool FCortexGraphMigrationRetireAdditionalUnadmittedClassTest::RunTest(const FSt
 	// as a data producer of the selected body, while its execution input comes from the retained
 	// cosmetic body, so approving it would sever a retained execution link.
 	UK2Node_CallFunction* OldPathProducer = Fixture.AddCall(
-		UKismetStringLibrary::StaticClass()->FindFunctionByName(TEXT("Conv_IntToString")));
+		UKismetSystemLibrary::StaticClass()->FindFunctionByName(TEXT("GetConsoleVariableStringValue")));
 	TestNotNull(TEXT("the old-path producer exists"), OldPathProducer);
+	TestTrue(TEXT("the old-path producer carries an execution input"),
+		OldPathProducer && OldPathProducer->FindPin(TEXT("execute")));
 	TestTrue(TEXT("the old-path producer feeds the selected entry's body"),
 		OldPathProducer && Fixture.LinkPins(OldPathProducer, TEXT("ReturnValue"), Fixture.AlphaBody, TEXT("InString")));
 	TestTrue(TEXT("the old-path producer is driven by the retained cosmetic body"),
