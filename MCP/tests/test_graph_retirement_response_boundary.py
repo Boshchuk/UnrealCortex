@@ -32,7 +32,9 @@ def _guids(count: int) -> list[str]:
     return [f"00000000-0000-0000-0000-{i:012d}" for i in range(count)]
 
 
-def retire_request(*, dry_run: bool, approved: list[str] | None = None) -> dict:
+def retire_request(
+    *, dry_run: bool, approved: list[str] | None = None, additional: list[str] | None = None,
+) -> dict:
     migration = {
         "op": "retire_entries",
         "source": {
@@ -40,6 +42,8 @@ def retire_request(*, dry_run: bool, approved: list[str] | None = None) -> dict:
             "entry_node_guids": ["22222222-2222-2222-2222-222222222222"],
         },
     }
+    if additional is not None:
+        migration["source"]["additional_node_guids"] = additional
     if approved is not None:
         migration["approved_node_guids"] = approved
     return {
@@ -279,3 +283,105 @@ def test_complete_approval_predicate_recognizes_only_supported_migrations():
 def test_complete_approval_predicate_rejects_non_string_migration_op(op):
     predicate = complete_approval_migration_op
     assert predicate({"migration": {"op": op}}) is None
+
+
+def test_retirement_incomplete_native_preview_refuses_independently_of_response_size():
+    """A small response is still refused when the native scan is incomplete.
+
+    The response budget and native completeness are separate refusals: a preview the budget could
+    carry is never accepted while the native inventory says it is not the complete scan.
+    """
+    connection = MagicMock()
+    preview = _preview(1, complete=False)
+    connection.send_command.return_value = {"success": True, "data": preview}
+    assert len(json.dumps(preview, indent=2)) <= MAX_RESPONSE_CHARS
+
+    payload = _payload(dispatch_graph_apply_patch(
+        connection, retire_request(dry_run=True), tool_name="graph_cmd",
+    ))
+
+    assert payload["success"] is False
+    assert payload["_error"] == "LIMIT_EXCEEDED"
+    assert payload["approval_complete"] is False
+    assert payload["complete"] is False
+    assert "incomplete" in payload["_message"]
+    assert "exceeds the MCP response budget" not in payload["_message"]
+    connection.send_command_once.assert_not_called()
+
+
+def test_retirement_oversized_preview_never_publishes_a_partial_inventory():
+    """The 40k refusal is independent of native completeness and drops no approval-critical array.
+
+    The native preview claims `complete: true` and carries the exact identity arrays, but the
+    response does not fit the bridge budget: the caller must receive the refusal alone, never a
+    truncated prefix, so a `complete: true` prefix can never be mistaken for the approved set.
+    """
+    connection = MagicMock()
+    count = 3000
+    preview = _preview(count)
+    preview["selected_entries"] = _guids(count)
+    preview["shared"] = _guids(count)
+    preview["blocked_nodes"] = _guids(count)
+    preview["external_edges"] = _guids(count)
+    connection.send_command.return_value = {"success": True, "data": preview}
+
+    payload = _payload(dispatch_graph_apply_patch(
+        connection, retire_request(dry_run=True), tool_name="graph_cmd",
+    ))
+
+    assert payload["success"] is False
+    assert payload["_error"] == "LIMIT_EXCEEDED"
+    assert payload["approval_complete"] is False
+    assert payload["complete"] is True          # the native claim is reported, never trusted
+    assert payload["response_size_chars"] > MAX_RESPONSE_CHARS
+    for key in ("removable", "selected_entries", "shared", "blocked_nodes", "external_edges"):
+        assert key not in payload, f"the refusal published a partial {key}"
+    assert "_omitted_fields" not in payload
+    assert len(json.dumps(payload, indent=2)) <= MAX_RESPONSE_CHARS
+    connection.send_command_once.assert_not_called()
+
+
+def test_retirement_discovery_hash_cannot_authorize_apply():
+    """The discovery preview hash is not the reviewed hash and can never authorize a removal."""
+    connection = MagicMock()
+    approved = _guids(2)
+    request = retire_request(dry_run=False, approved=approved)
+    request["expected_validation_hash"] = "discovery-token"
+    connection.send_command.return_value = {
+        "success": True,
+        "data": _preview(2, token="reviewed-token", approved_guids=approved),
+    }
+
+    payload = _payload(dispatch_graph_apply_patch(connection, request, tool_name="graph_cmd"))
+
+    assert payload["_error"] == "STALE_PRECONDITION"
+    assert "validation hash changed" in payload["_message"]
+    connection.send_command.assert_called_once()
+    connection.send_command_once.assert_not_called()
+
+
+def test_retirement_changed_additional_node_list_refuses_with_the_reviewed_token():
+    """A changed additional GUID list is reviewed intent: the earlier token cannot authorize it.
+
+    The bridge recomputes the preview over the caller's own source fields, so the requested GUIDs the
+    native validation hash binds are forwarded verbatim and a list changed after the review produces
+    a different hash instead of a removal.
+    """
+    connection = MagicMock()
+    reviewed = ["00000000-0000-0000-0000-000000000101", "00000000-0000-0000-0000-000000000102"]
+    changed = ["00000000-0000-0000-0000-000000000101", "00000000-0000-0000-0000-000000000103"]
+    approved = _guids(2)
+    request = retire_request(dry_run=False, approved=approved, additional=changed)
+    request["expected_validation_hash"] = "reviewed-token"
+    connection.send_command.return_value = {
+        "success": True,
+        "data": _preview(2, token="changed-source-token", approved_guids=approved),
+    }
+
+    payload = _payload(dispatch_graph_apply_patch(connection, request, tool_name="graph_cmd"))
+
+    assert payload["_error"] == "STALE_PRECONDITION"
+    preview_request = connection.send_command.call_args.args[1]
+    assert preview_request["migration"]["source"]["additional_node_guids"] == changed
+    assert preview_request["migration"]["source"]["additional_node_guids"] != reviewed
+    connection.send_command_once.assert_not_called()

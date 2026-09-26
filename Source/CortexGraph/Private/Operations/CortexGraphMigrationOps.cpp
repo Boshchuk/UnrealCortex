@@ -7415,6 +7415,7 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 				if (Node && Node->bHasCompilerMessage && !Node->ErrorMsg.IsEmpty()) OutPlan.PreexistingDiagnostics.Add(Node->ErrorMsg);
 			}
 			OutPlan.bPreexistingDiagnosticsTruncated = FCortexGraphPatchOps::TrimDiagnostics(OutPlan.PreexistingDiagnostics);
+			if (!RequirePublishableRetirementInventory(OutPlan, OutError)) return false;
 			bOutReused = true;
 			return true;
 		}
@@ -7627,7 +7628,7 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 		if (Node && Node->bHasCompilerMessage && !Node->ErrorMsg.IsEmpty()) OutPlan.PreexistingDiagnostics.Add(Node->ErrorMsg);
 	}
 	OutPlan.bPreexistingDiagnosticsTruncated = FCortexGraphPatchOps::TrimDiagnostics(OutPlan.PreexistingDiagnostics);
-	return true;
+	return RequirePublishableRetirementInventory(OutPlan, OutError);
 }
 
 TSharedPtr<FJsonObject> FCortexGraphMigrationOps::MakeRetirementInventory(const TSharedPtr<FJsonObject>& RetirePlanJson)
@@ -7654,6 +7655,13 @@ TSharedPtr<FJsonObject> FCortexGraphMigrationOps::MakeRetirementInventory(const 
 	Inventory->SetArrayField(TEXT("removable"), ToValues(Plan.RemovableGuids));
 	Inventory->SetArrayField(TEXT("approved_guids"), ToValues(Plan.ApprovedGuids));
 	Inventory->SetBoolField(TEXT("requires_compile"), Plan.bRequiresCompile);
+	// Every review-critical identity list below is published whole. `complete` means both that the
+	// ownership scan finished and that this inventory carries the full set the caller is asked to
+	// approve and replay, so a trimmed list under `complete: true` would be an approval set the
+	// caller can neither review nor echo back. An inventory too large for the connected bridge is
+	// refused by `RequirePublishableRetirementInventory` before it is ever published; the shared
+	// diagnostics bound is therefore not applied here. It stays applied to `preexisting_diagnostics`
+	// alone, which is explicitly non-critical and carries its own truncation flag.
 	TArray<FString> EntryLines;
 	for (const FCortexGraphMigrationRetireEntry& Entry : Plan.Entries)
 	{
@@ -7674,7 +7682,6 @@ TSharedPtr<FJsonObject> FCortexGraphMigrationOps::MakeRetirementInventory(const 
 		}
 		EntryLines.Add(MoveTemp(Line));
 	}
-	FCortexGraphPatchOps::TrimDiagnostics(EntryLines);
 	Inventory->SetArrayField(TEXT("selected_entries"), ToValues(EntryLines));
 	// The caller reviews the requested additional nodes here, so each line names the identity, the
 	// exact engine class and the class-specific proof the preview admitted it under.
@@ -7684,7 +7691,6 @@ TSharedPtr<FJsonObject> FCortexGraphMigrationOps::MakeRetirementInventory(const 
 		AdditionalLines.Add(FString::Printf(TEXT("%s %s (%s)"), *Additional.NodeGuid, *Additional.ClassPath,
 			Additional.Reason.IsEmpty() ? TEXT("already removed: class proof was reviewed by the approved plan") : *Additional.Reason));
 	}
-	FCortexGraphPatchOps::TrimDiagnostics(AdditionalLines);
 	Inventory->SetArrayField(TEXT("additional_nodes"), ToValues(AdditionalLines));
 	Inventory->SetStringField(TEXT("blueprint_status_before"), Plan.BlueprintStatusBefore);
 	Inventory->SetArrayField(TEXT("preexisting_diagnostics"), ToValues(Plan.PreexistingDiagnostics));
@@ -7695,7 +7701,6 @@ TSharedPtr<FJsonObject> FCortexGraphMigrationOps::MakeRetirementInventory(const 
 		TArray<FString> Lines;
 		for (const FCortexGraphPruneNode& Node : Nodes)
 			Lines.Add(FString::Printf(TEXT("%s %s (%s)"), *Node.NodeGuid, *Node.ClassPath, *Node.Reason));
-		FCortexGraphPatchOps::TrimDiagnostics(Lines);
 		return Lines;
 	};
 	Inventory->SetArrayField(TEXT("shared"), ToValues(PartitionLines(Plan.Shared)));
@@ -7703,9 +7708,44 @@ TSharedPtr<FJsonObject> FCortexGraphMigrationOps::MakeRetirementInventory(const 
 	TArray<FString> Edges;
 	for (const FCortexGraphPruneEdge& Edge : Plan.ExternalEdges)
 		Edges.Add(FString::Printf(TEXT("%s.%s -> %s.%s"), *Edge.FromGuid, *Edge.FromPin, *Edge.ToGuid, *Edge.ToPin));
-	FCortexGraphPatchOps::TrimDiagnostics(Edges);
 	Inventory->SetArrayField(TEXT("external_edges"), ToValues(Edges));
 	return Inventory;
+}
+
+bool FCortexGraphMigrationOps::RequirePublishableRetirementInventory(
+	const FCortexGraphMigrationRetirePlan& Plan,
+	FCortexCommandResult& OutError)
+{
+	const TSharedPtr<FJsonObject> Inventory = MakeRetirementInventory(Plan.ToJson());
+	int32 InventoryChars = 0;
+	const bool bMeasured = Inventory.IsValid() && EncodedResponseChars(Inventory, InventoryChars);
+	if (bMeasured && InventoryChars <= MaxPublishableRetirementInventoryChars)
+	{
+		return true;
+	}
+	// The caller approves exactly the identity sets this inventory publishes, so a set the connected
+	// bridge could not carry whole is refused here - before approval and before any mutation - instead
+	// of being clipped on the way out while `complete: true` rides through unchanged.
+	const int32 ReviewedNodes = Plan.Shared.Num() + Plan.Blocked.Num() + Plan.AdditionalNodes.Num();
+	const FString Measurement = bMeasured
+		? FString::Printf(TEXT("encodes to %d character(s)"), InventoryChars)
+		: FString(TEXT("could not be encoded"));
+	OutError = FCortexCommandRouter::Error(CortexErrorCodes::LimitExceeded,
+		FString::Printf(TEXT("the complete retirement inventory of %d selected entr%s with %d reviewed shared/blocked/requested node(s) and %d boundary edge(s) %s, which is at or above the publishable %d (bridge response limit %d with %d reserved for the response envelope); the retirement is refused without changing the asset instead of approving an inventory the caller cannot review in full"),
+			Plan.SelectedEntryGuids.Num(), Plan.SelectedEntryGuids.Num() == 1 ? TEXT("y") : TEXT("ies"),
+			ReviewedNodes, Plan.ExternalEdges.Num(), *Measurement,
+			MaxPublishableRetirementInventoryChars, BridgeResponseCharLimit, ApprovalResponseEnvelopeReserveChars));
+	OutError.ErrorDetails = MakeShared<FJsonObject>();
+	OutError.ErrorDetails->SetNumberField(TEXT("response_char_limit"), BridgeResponseCharLimit);
+	OutError.ErrorDetails->SetNumberField(TEXT("publishable_inventory_chars"), MaxPublishableRetirementInventoryChars);
+	OutError.ErrorDetails->SetNumberField(TEXT("inventory_chars"), InventoryChars);
+	OutError.ErrorDetails->SetNumberField(TEXT("selected_entries"), Plan.SelectedEntryGuids.Num());
+	OutError.ErrorDetails->SetNumberField(TEXT("reviewed_nodes"), ReviewedNodes);
+	OutError.ErrorDetails->SetNumberField(TEXT("shared_nodes"), Plan.Shared.Num());
+	OutError.ErrorDetails->SetNumberField(TEXT("blocked_nodes"), Plan.Blocked.Num());
+	OutError.ErrorDetails->SetNumberField(TEXT("boundary_edges"), Plan.ExternalEdges.Num());
+	OutError.ErrorDetails->SetBoolField(TEXT("complete"), false);
+	return false;
 }
 
 namespace

@@ -639,6 +639,22 @@ public:
 	static TSharedPtr<FJsonObject> MakeRetirementInventory(const TSharedPtr<FJsonObject>& RetirePlanJson);
 
 	/**
+	 * Refuses a prepared retirement whose complete approval inventory the connected bridge could not
+	 * publish whole.
+	 *
+	 * The retirement inventory is the approval contract: `selected_entries`, the requested additional
+	 * nodes, `removable`, `shared`, `blocked_nodes` and `external_edges` are published whole so the
+	 * caller can review and echo the exact sets, which makes `complete: true` mean both that the
+	 * ownership scan finished and that nothing was dropped from the published review. An inventory
+	 * whose whole encoded form does not fit the bridge budget therefore cannot be published at all:
+	 * the plan is refused with `LIMIT_EXCEEDED` and `complete: false` instead of handing the caller a
+	 * clipped prefix it would have to approve as the complete set.
+	 */
+	static bool RequirePublishableRetirementInventory(
+		const FCortexGraphMigrationRetirePlan& Plan,
+		FCortexCommandResult& OutError);
+
+	/**
 	 * Native readback for the approved retirement set and its retained graph contract. When
 	 * BCompiled is true it additionally proves the class-specific compiled artefacts are gone: no
 	 * dynamic component delegate binding and no generated function survives for an approved entry.
@@ -707,6 +723,10 @@ public:
 
 	/** Largest complete call-output approval inventory this operation publishes instead of refusing. */
 	static constexpr int32 MaxPublishableCallOutputInventoryChars =
+		BridgeResponseCharLimit - ApprovalResponseEnvelopeReserveChars;
+
+	/** Largest complete retirement approval inventory this operation publishes instead of refusing. */
+	static constexpr int32 MaxPublishableRetirementInventoryChars =
 		BridgeResponseCharLimit - ApprovalResponseEnvelopeReserveChars;
 
 	/**

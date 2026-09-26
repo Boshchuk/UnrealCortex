@@ -2,6 +2,8 @@
 #include "Operations/CortexGraphPatchState.h"
 #include "Misc/AutomationTest.h"
 
+#include "CortexCommandRouter.h"
+#include "CortexGraphCommandHandler.h"
 #include "AssetRegistry/IAssetRegistry.h"
 #include "WidgetBlueprint.h"
 #include "Blueprint/WidgetTree.h"
@@ -5729,6 +5731,442 @@ bool FCortexGraphMigrationRetireAdditionalRetainedConsumerTest::RunTest(const FS
 		FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Fixture.RetainedBodyGuid));
 	TestNotNull(TEXT("the requested reroute knot is still in the graph"),
 		FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, SharedKnot->NodeGuid));
+
+	Fixture.Cleanup();
+	return true;
+}
+
+namespace CortexGraphMigrationRetireTest
+{
+/**
+ * The node GUIDs one published partition list names, read from the canonical `<guid> <class> (...)`
+ * prefix of every line, so a comparison is only ever about identities.
+ */
+TArray<FString> LineGuidPrefixes(const TArray<FString>& Lines)
+{
+	TArray<FString> Guids;
+	for (const FString& Line : Lines)
+	{
+		int32 Space = INDEX_NONE;
+		if (Line.FindChar(TEXT(' '), Space) && Space > 0) Guids.Add(Line.Left(Space));
+	}
+	Guids.Sort();
+	return Guids;
+}
+
+/**
+ * One fixture that carries all three review-critical record families of a retirement inventory past
+ * the shared diagnostics bound.
+ *
+ * Every unit is built through real engine APIs on the selected entry's execution island: a removable
+ * body on the exec chain consumes the output of an unrequested reroute knot (a blocked class), and
+ * the data producer feeding that knot is itself used by a consumer outside the island. The partition
+ * therefore has to publish, per unit, one *shared* producer, one *blocked* knot and one *boundary*
+ * edge from the blocked knot into the removable body - exactly the families a native trim would have
+ * silently reduced to fifteen lines while still reporting `complete: true`.
+ *
+ * The record lists are read back from the nodes the fixture really created, so a wiring failure is
+ * reported instead of leaving the test to compare against an assumed set.
+ */
+struct FPartitionBoundaryRecords
+{
+	/** Canonical ascending GUIDs of the shared data producers, one per unit. */
+	TArray<FString> SharedGuids;
+	/** Canonical ascending GUIDs of the blocked reroute knots, one per unit. */
+	TArray<FString> BlockedGuids;
+	/** Canonical ascending `from.pin -> to.pin` boundary edges, one per unit. */
+	TArray<FString> BoundaryEdges;
+	/** Canonical ascending GUIDs of the removable bodies that consume the blocked knots. */
+	TArray<FString> BodyGuids;
+	/** Why `Build` returned false: the first stage that could not be wired, with the observed pins. */
+	FString Failure;
+
+	bool Build(FFixture& Fixture, const int32 Units)
+	{
+		Failure.Reset();
+		SharedGuids.Reset();
+		BlockedGuids.Reset();
+		BoundaryEdges.Reset();
+		BodyGuids.Reset();
+		if (Units <= 0) { Failure = TEXT("the record count must be positive"); return false; }
+		const UEdGraphSchema* const Schema = Fixture.Graph ? Fixture.Graph->GetSchema() : nullptr;
+		if (!Schema) { Failure = TEXT("the fixture graph has no schema"); return false; }
+		UFunction* const ConvTarget = UKismetStringLibrary::StaticClass()->FindFunctionByName(TEXT("Conv_IntToString"));
+		UFunction* const PrintTarget = UKismetSystemLibrary::StaticClass()->FindFunctionByName(TEXT("PrintString"));
+		if (!ConvTarget || !PrintTarget) { Failure = TEXT("the engine call targets are not available"); return false; }
+		if (!Fixture.AlphaBody) { Failure = TEXT("the selected entry body is missing"); return false; }
+
+		UK2Node_CallFunction* Previous = Fixture.AlphaBody;
+		for (int32 Index = 0; Index < Units; ++Index)
+		{
+			UK2Node_CallFunction* const Body = Fixture.AddCall(PrintTarget);
+			UK2Node_CallFunction* const Producer = Fixture.AddCall(ConvTarget);
+			UK2Node_CallFunction* const RetainedConsumer = Fixture.AddCall(PrintTarget);
+			UK2Node_Knot* const BlockedKnot = AddRerouteKnot(Fixture);
+			if (!Body || !Producer || !RetainedConsumer || !BlockedKnot)
+			{
+				Failure = FString::Printf(TEXT("unit %d: the fixture nodes could not be created"), Index);
+				return false;
+			}
+			UEdGraphPin* const KnotIn = BlockedKnot->GetInputPin();
+			UEdGraphPin* const KnotOut = BlockedKnot->GetOutputPin();
+			UEdGraphPin* const BodyIn = Body->FindPin(TEXT("InString"));
+			if (!KnotIn || !KnotOut || !BodyIn)
+			{
+				Failure = FString::Printf(TEXT("unit %d: a knot or body pin is missing [knot: %s] [body: %s]"), Index,
+					*PinSummary(BlockedKnot), *PinSummary(Body));
+				return false;
+			}
+			if (!ConnectTypedPins(Schema, Previous->FindPin(TEXT("then")), Body->FindPin(TEXT("execute")),
+				TEXT("partition exec chain"), Failure)) return false;
+			// The unrequested reroute stays blocked, so the producer feeding it is retained by a consumer
+			// the partition never offers for removal, and the knot's own edge into the removable body is
+			// the boundary edge the caller has to accept.
+			if (!ConnectTypedPins(Schema, Producer->FindPin(TEXT("ReturnValue")), KnotIn,
+				TEXT("partition blocked reroute input"), Failure)) return false;
+			if (!ConnectTypedPins(Schema, KnotOut, BodyIn, TEXT("partition boundary data edge"), Failure)) return false;
+			if (!ConnectTypedPins(Schema, Producer->FindPin(TEXT("ReturnValue")),
+				RetainedConsumer->FindPin(TEXT("InString")), TEXT("partition retained consumer"), Failure)) return false;
+			SharedGuids.Add(Producer->NodeGuid.ToString());
+			BlockedGuids.Add(BlockedKnot->NodeGuid.ToString());
+			BoundaryEdges.Add(FString::Printf(TEXT("%s.%s -> %s.%s"), *BlockedKnot->NodeGuid.ToString(),
+				*KnotOut->PinName.ToString(), *Body->NodeGuid.ToString(), *BodyIn->PinName.ToString()));
+			BodyGuids.Add(Body->NodeGuid.ToString());
+			Previous = Body;
+		}
+		SharedGuids.Sort();
+		BlockedGuids.Sort();
+		BoundaryEdges.Sort();
+		BodyGuids.Sort();
+		return true;
+	}
+};
+
+/** The graph-authoring hash of the live fixture, so purity assertions compare the real asset state. */
+FString LiveRetireHash(const UBlueprint* Blueprint)
+{
+	const TSharedPtr<FJsonObject> Fingerprint = FCortexGraphPatchState::ComputeFingerprint(Blueprint);
+	return Fingerprint.IsValid() ? Fingerprint->GetStringField(TEXT("graph_authoring_hash")) : FString();
+}
+
+/** The shared refusal of one unpublishable inventory, asserted on both the message and its cause. */
+void AssertUnpublishableInventoryRefusal(
+	FAutomationTestBase& Test,
+	const FCortexCommandResult& Result,
+	const FPartitionBoundaryRecords& Records,
+	const int32 Units)
+{
+	const FString Context = FString::Printf(TEXT("%s: %s"), *Result.ErrorCode, *Result.ErrorMessage);
+	Test.TestFalse(FString::Printf(TEXT("the unpublishable inventory is refused [%s]"), *Context), Result.bSuccess);
+	Test.TestEqual(TEXT("the unpublishable inventory refusal is LIMIT_EXCEEDED"),
+		Result.ErrorCode, FString(CortexErrorCodes::LimitExceeded));
+	Test.TestTrue(FString::Printf(TEXT("the refusal names the bridge response limit [%s]"), *Result.ErrorMessage),
+		Result.ErrorMessage.Contains(FString::Printf(TEXT("%d"), FCortexGraphMigrationOps::BridgeResponseCharLimit)));
+	Test.TestTrue(TEXT("the refusal carries the published outcome envelope"), Result.ErrorDetails.IsValid());
+	Test.TestFalse(TEXT("the refusal publishes no shared identity list"),
+		Result.ErrorDetails.IsValid() && Result.ErrorDetails->HasField(TEXT("shared")));
+	Test.TestFalse(TEXT("the refusal publishes no blocked identity list"),
+		Result.ErrorDetails.IsValid() && Result.ErrorDetails->HasField(TEXT("blocked_nodes")));
+	Test.TestFalse(TEXT("the refusal publishes no boundary edge list"),
+		Result.ErrorDetails.IsValid() && Result.ErrorDetails->HasField(TEXT("external_edges")));
+	Test.TestFalse(TEXT("the refusal publishes no removable set"),
+		Result.ErrorDetails.IsValid() && Result.ErrorDetails->HasField(TEXT("removable")));
+	Test.TestFalse(TEXT("the refusal publishes no completeness claim"),
+		Result.ErrorDetails.IsValid() && Result.ErrorDetails->HasField(TEXT("complete")));
+	Test.TestFalse(TEXT("the refusal publishes no approval state"),
+		Result.ErrorDetails.IsValid() && Result.ErrorDetails->HasField(TEXT("awaiting_approval")));
+
+	const TSharedPtr<FJsonObject>* Cause = nullptr;
+	const bool bHasCause = Result.ErrorDetails.IsValid()
+		&& Result.ErrorDetails->TryGetObjectField(TEXT("error_details"), Cause) && Cause && Cause->IsValid();
+	Test.TestTrue(TEXT("the refusal carries the native cause"), bHasCause);
+	if (!bHasCause) return;
+	Test.TestEqual(TEXT("the cause publishes the bridge response limit"),
+		(*Cause)->GetIntegerField(TEXT("response_char_limit")), FCortexGraphMigrationOps::BridgeResponseCharLimit);
+	Test.TestEqual(TEXT("the cause publishes the publishable inventory bound"),
+		(*Cause)->GetIntegerField(TEXT("publishable_inventory_chars")),
+		FCortexGraphMigrationOps::MaxPublishableRetirementInventoryChars);
+	Test.TestTrue(TEXT("the cause reports a measured inventory above the bound"),
+		(*Cause)->GetIntegerField(TEXT("inventory_chars"))
+			> FCortexGraphMigrationOps::MaxPublishableRetirementInventoryChars);
+	Test.TestEqual(TEXT("the cause reports the published shared node count"),
+		(*Cause)->GetIntegerField(TEXT("shared_nodes")), Records.SharedGuids.Num());
+	Test.TestEqual(TEXT("the cause reports the published blocked node count"),
+		(*Cause)->GetIntegerField(TEXT("blocked_nodes")), Records.BlockedGuids.Num());
+	Test.TestEqual(TEXT("the cause reports the published boundary edge count"),
+		(*Cause)->GetIntegerField(TEXT("boundary_edges")), Records.BoundaryEdges.Num());
+	Test.TestEqual(TEXT("the cause reports the reviewed node count"),
+		(*Cause)->GetIntegerField(TEXT("reviewed_nodes")), Units * 2);
+	Test.TestFalse(TEXT("the cause never claims completeness"), (*Cause)->GetBoolField(TEXT("complete")));
+}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireCompleteInventoryBoundTest,
+	"Cortex.Graph.Authoring.Migration.Retire.PublishesCompleteInventoryBeyondDiagnosticsBound",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexGraphMigrationRetireCompleteInventoryBoundTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexGraphMigrationRetireTest;
+	FFixture Fixture;
+	TestTrue(TEXT("the complete-inventory fixture is created"), Fixture.Build(TEXT("BP_RetireCompleteInventory")));
+	if (!Fixture.Blueprint) { Fixture.Cleanup(); return false; }
+
+	const int32 Units = 20;
+	FPartitionBoundaryRecords Records;
+	TestTrue(FString::Printf(TEXT("the boundary records are built: %s"), *Records.Failure), Records.Build(Fixture, Units));
+	if (Records.SharedGuids.Num() != Units || Records.BlockedGuids.Num() != Units
+		|| Records.BoundaryEdges.Num() != Units)
+	{
+		Fixture.Cleanup();
+		return false;
+	}
+	// The families are deliberately larger than the shared diagnostics bound, so the assertions below are
+	// about the bound and not about a set that simply fits under it.
+
+	// Twenty cached compiler messages: the explicitly non-critical diagnostics list stays bounded and
+	// says so, while the review-critical identity lists are never conflated with it.
+	for (int32 Index = 0; Index < 20; ++Index)
+	{
+		UK2Node_CallFunction* const Diagnostic =
+			Fixture.AddCall(UKismetSystemLibrary::StaticClass()->FindFunctionByName(TEXT("PrintString")));
+		if (!Diagnostic) { Fixture.Cleanup(); return false; }
+		Diagnostic->bHasCompilerMessage = true;
+		Diagnostic->ErrorMsg = FString::Printf(TEXT("retirement boundary diagnostic %d"), Index);
+	}
+
+	const TArray<FString> Entries = { Fixture.AlphaGuid.ToString(), Fixture.BetaGuid.ToString() };
+	const FString HashBefore = LiveRetireHash(Fixture.Blueprint);
+	const FString GraphBefore = CaptureNativeGraph(Fixture.Graph);
+	const int32 NodesBefore = Fixture.Graph ? Fixture.Graph->Nodes.Num() : 0;
+	const bool bDirtyBefore = Fixture.Package->IsDirty();
+
+	FCortexGraphMigrationRetirePlan PlanValue;
+	bool bReused = false;
+	FCortexCommandResult Error;
+	TestTrue(FString::Printf(TEXT("the complete inventory previews: %s"), *Error.ErrorMessage),
+		Plan(Fixture, Entries, PlanValue, bReused, Error));
+	TestTrue(TEXT("the completed partition claims completeness"), PlanValue.bComplete);
+	const TSharedPtr<FJsonObject> Inventory = FCortexGraphMigrationOps::MakeRetirementInventory(PlanValue.ToJson());
+	TestNotNull(TEXT("the retirement inventory is created"), Inventory.Get());
+	if (!Inventory.IsValid()) { Fixture.Cleanup(); return false; }
+
+	TestTrue(TEXT("the inventory claims completeness"), Inventory->GetBoolField(TEXT("complete")));
+	TestTrue(TEXT("the non-critical diagnostics list is still bounded and flagged"),
+		Inventory->GetBoolField(TEXT("preexisting_diagnostics_truncated")));
+	TestTrue(TEXT("the bounded diagnostics list carries its omission marker"),
+		JsonStringArray(Inventory, TEXT("preexisting_diagnostics")).Contains(TEXT("additional compiler diagnostics omitted")));
+
+	const TArray<FString> SharedLines = JsonStringArray(Inventory, TEXT("shared"));
+	const TArray<FString> BlockedLines = JsonStringArray(Inventory, TEXT("blocked_nodes"));
+	const TArray<FString> EdgeLines = JsonStringArray(Inventory, TEXT("external_edges"));
+	const TArray<FString> EntryLines = JsonStringArray(Inventory, TEXT("selected_entries"));
+	const TArray<FString> DiagnosticLines = JsonStringArray(Inventory, TEXT("preexisting_diagnostics"));
+	TestTrue(TEXT("the non-critical diagnostics list stays bounded"), DiagnosticLines.Num() <= 16);
+	TestTrue(TEXT("every review-critical identity list is longer than the bounded diagnostics list"),
+		DiagnosticLines.Num() < SharedLines.Num() && DiagnosticLines.Num() < BlockedLines.Num()
+			&& DiagnosticLines.Num() < EdgeLines.Num());
+	TestEqual(TEXT("every shared record is published"), SharedLines.Num(), Units);
+	TestEqual(TEXT("every blocked record is published"), BlockedLines.Num(), Units);
+	TestEqual(TEXT("every boundary edge is published"), EdgeLines.Num(), Units);
+	TestEqual(TEXT("every selected entry is published"), EntryLines.Num(), Entries.Num());
+	TestEqual(TEXT("the published shared identities are exactly the shared producers"),
+		FString::Join(LineGuidPrefixes(SharedLines), TEXT(",")), FString::Join(Records.SharedGuids, TEXT(",")));
+	TestEqual(TEXT("the published blocked identities are exactly the blocked reroutes"),
+		FString::Join(LineGuidPrefixes(BlockedLines), TEXT(",")), FString::Join(Records.BlockedGuids, TEXT(",")));
+	TArray<FString> PublishedEdges = EdgeLines;
+	PublishedEdges.Sort();
+	TestEqual(TEXT("the published boundary edges are exactly the covered edges"),
+		FString::Join(PublishedEdges, TEXT("\n")), FString::Join(Records.BoundaryEdges, TEXT("\n")));
+	// `complete: true` must mean the review-critical display is whole: no identity list may carry an
+	// omission marker, or the caller would approve a set it never saw.
+	const FString OmissionMarker = TEXT("additional compiler diagnostics omitted");
+	TestFalse(TEXT("the shared identity list carries no omission marker"), SharedLines.Contains(OmissionMarker));
+	TestFalse(TEXT("the blocked identity list carries no omission marker"), BlockedLines.Contains(OmissionMarker));
+	TestFalse(TEXT("the boundary edge list carries no omission marker"), EdgeLines.Contains(OmissionMarker));
+	TestFalse(TEXT("the selected entry list carries no omission marker"), EntryLines.Contains(OmissionMarker));
+
+	// The accepted side of the transport boundary: the inventory this preview publishes really fits the
+	// publishable budget, so the refusal below is only for what could not be carried whole.
+	int32 EncodedChars = 0;
+	TestTrue(TEXT("the published inventory is measurable"),
+		FCortexGraphMigrationOps::EncodedResponseChars(Inventory, EncodedChars));
+	TestTrue(FString::Printf(TEXT("the accepted inventory fits the publishable bound (%d of %d)"),
+		EncodedChars, FCortexGraphMigrationOps::MaxPublishableRetirementInventoryChars),
+		EncodedChars > 0 && EncodedChars <= FCortexGraphMigrationOps::MaxPublishableRetirementInventoryChars);
+
+	TestEqual(TEXT("the discovery preview changes no fingerprint"), LiveRetireHash(Fixture.Blueprint), HashBefore);
+	TestEqual(TEXT("the discovery preview leaves every node, pin, flag and link"),
+		CaptureNativeGraph(Fixture.Graph), GraphBefore);
+	TestEqual(TEXT("the discovery preview leaves the node count"),
+		Fixture.Graph ? Fixture.Graph->Nodes.Num() : -1, NodesBefore);
+	TestEqual(TEXT("the discovery preview leaves the dirty baseline"), Fixture.Package->IsDirty(), bDirtyBefore);
+
+	Fixture.Cleanup();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireRefusesUnpublishableInventoryTest,
+	"Cortex.Graph.Authoring.Migration.Retire.RefusesInventoryTheBridgeCouldNotPublish",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexGraphMigrationRetireRefusesUnpublishableInventoryTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexGraphMigrationRetireTest;
+	FFixture Fixture;
+	TestTrue(TEXT("the oversized-inventory fixture is created"), Fixture.Build(TEXT("BP_RetireOversizedInventory")));
+	if (!Fixture.Blueprint) { Fixture.Cleanup(); return false; }
+
+	// Far past the bridge budget: 120 units of the three record families encode to well over the
+	// publishable bound, so the whole inventory cannot be handed to the caller unclipped.
+	const int32 Units = 120;
+	FPartitionBoundaryRecords Records;
+	TestTrue(FString::Printf(TEXT("the oversized boundary records are built: %s"), *Records.Failure), Records.Build(Fixture, Units));
+	if (Records.SharedGuids.Num() != Units || Records.BlockedGuids.Num() != Units
+		|| Records.BoundaryEdges.Num() != Units)
+	{
+		Fixture.Cleanup();
+		return false;
+	}
+
+	const FString HashBefore = LiveRetireHash(Fixture.Blueprint);
+	const FString GraphBefore = CaptureNativeGraph(Fixture.Graph);
+	const int32 NodesBefore = Fixture.Graph ? Fixture.Graph->Nodes.Num() : 0;
+	const bool bDirtyBefore = Fixture.Package->IsDirty();
+
+	// The published route exactly as a caller reaches it: the preview must refuse instead of publishing a
+	// complete inventory the bridge would clip while keeping `complete: true`.
+	TSharedPtr<FJsonObject> Request = MakeShared<FJsonObject>();
+	Request->SetStringField(TEXT("asset_path"), Fixture.Blueprint->GetPathName());
+	Request->SetStringField(TEXT("patch_id"), TEXT("00000000-0000-0000-0000-000000115501"));
+	Request->SetObjectField(TEXT("expected_fingerprint"), FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint));
+	Request->SetArrayField(TEXT("nodes"), {});
+	Request->SetArrayField(TEXT("connections"), {});
+	Request->SetArrayField(TEXT("pin_updates"), {});
+	Request->SetBoolField(TEXT("dry_run"), true);
+	Request->SetBoolField(TEXT("compile"), false);
+	Request->SetBoolField(TEXT("save"), false);
+	Request->SetBoolField(TEXT("allow_noop"), false);
+	Request->SetObjectField(TEXT("migration"),
+		Fixture.Migration({ Fixture.AlphaGuid.ToString(), Fixture.BetaGuid.ToString() }));
+
+	FCortexCommandRouter Router;
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"), MakeShared<FCortexGraphCommandHandler>());
+	const FCortexCommandResult Result = Router.Execute(TEXT("graph.apply_patch"), Request);
+	AssertUnpublishableInventoryRefusal(*this, Result, Records, Units);
+
+	// Fail closed before approval and before mutation: the asset is exactly the fixture again, and the
+	// planner route refuses the same inventory identically.
+	FCortexGraphMigrationRetirePlan PlanValue;
+	bool bReused = false;
+	FCortexCommandResult PlanError;
+	TestFalse(TEXT("the planner route refuses the same unpublishable inventory"),
+		Plan(Fixture, { Fixture.AlphaGuid.ToString(), Fixture.BetaGuid.ToString() }, PlanValue, bReused, PlanError));
+	TestEqual(TEXT("the planner refusal is LIMIT_EXCEEDED"),
+		PlanError.ErrorCode, FString(CortexErrorCodes::LimitExceeded));
+
+	TestEqual(TEXT("the refused preview changes no fingerprint"), LiveRetireHash(Fixture.Blueprint), HashBefore);
+	TestEqual(TEXT("the refused preview leaves every node, pin, flag and link"),
+		CaptureNativeGraph(Fixture.Graph), GraphBefore);
+	TestEqual(TEXT("the refused preview leaves the node count"),
+		Fixture.Graph ? Fixture.Graph->Nodes.Num() : -1, NodesBefore);
+	TestEqual(TEXT("the refused preview leaves the dirty baseline"), Fixture.Package->IsDirty(), bDirtyBefore);
+
+	Fixture.Cleanup();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireDiscoveryHashCannotAuthorizeApplyTest,
+	"Cortex.Graph.Authoring.Migration.Retire.DiscoveryHashCannotAuthorizeApply",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexGraphMigrationRetireDiscoveryHashCannotAuthorizeApplyTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexGraphMigrationRetireTest;
+	FFixture Fixture;
+	TestTrue(TEXT("the hash-sequencing fixture is created"), Fixture.Build(TEXT("BP_RetireDiscoveryHash")));
+	if (!Fixture.Blueprint) { Fixture.Cleanup(); return false; }
+
+	const TArray<FString> Entries = { Fixture.AlphaGuid.ToString(), Fixture.BetaGuid.ToString() };
+	TSharedPtr<FJsonObject> Request = MakeShared<FJsonObject>();
+	Request->SetStringField(TEXT("asset_path"), Fixture.Blueprint->GetPathName());
+	Request->SetStringField(TEXT("patch_id"), TEXT("00000000-0000-0000-0000-000000115601"));
+	Request->SetObjectField(TEXT("expected_fingerprint"), FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint));
+	Request->SetArrayField(TEXT("nodes"), {});
+	Request->SetArrayField(TEXT("connections"), {});
+	Request->SetArrayField(TEXT("pin_updates"), {});
+	Request->SetBoolField(TEXT("dry_run"), true);
+	Request->SetBoolField(TEXT("compile"), false);
+	Request->SetBoolField(TEXT("save"), false);
+	Request->SetBoolField(TEXT("allow_noop"), false);
+	Request->SetObjectField(TEXT("migration"), Fixture.Migration(Entries));
+
+	// Step 1: the discovery preview, which names no approved set and can only be reviewed.
+	FCortexGraphPreparedPatch Discovery;
+	FCortexCommandResult Error;
+	TestTrue(FString::Printf(TEXT("the discovery preview succeeds: %s"), *Error.ErrorMessage),
+		FCortexGraphPatchOps::Preflight(Fixture.Blueprint, Request, Discovery, Error));
+	bool bDiscoveryAwaiting = false;
+	TestTrue(TEXT("the discovery preview publishes its awaiting-approval state"),
+		Discovery.RetirementPlan.IsValid()
+			&& Discovery.RetirementPlan->TryGetBoolField(TEXT("awaiting_approval"), bDiscoveryAwaiting)
+			&& bDiscoveryAwaiting);
+	const FString DiscoveryHash = Discovery.ValidationHash;
+	const TArray<FString> Approved = CanonicalGuids(JsonStringArray(Discovery.RetirementPlan, TEXT("removable_guids")));
+	TestTrue(TEXT("the discovery preview publishes the removable set to review"), Approved.Num() > 0);
+
+	// Step 2: the reviewed preview, which echoes exactly the published removable set.
+	TSharedPtr<FJsonObject> ReviewedMigration = Fixture.Migration(Entries);
+	TArray<TSharedPtr<FJsonValue>> ApprovalValues;
+	for (const FString& Guid : Approved) ApprovalValues.Add(MakeShared<FJsonValueString>(Guid));
+	ReviewedMigration->SetArrayField(TEXT("approved_node_guids"), ApprovalValues);
+	Request->SetObjectField(TEXT("migration"), ReviewedMigration);
+	FCortexGraphPreparedPatch Reviewed;
+	Error = FCortexCommandResult();
+	TestTrue(FString::Printf(TEXT("the reviewed preview succeeds: %s"), *Error.ErrorMessage),
+		FCortexGraphPatchOps::Preflight(Fixture.Blueprint, Request, Reviewed, Error));
+	bool bReviewedAwaiting = true;
+	TestTrue(TEXT("the reviewed preview publishes its approved state"),
+		Reviewed.RetirementPlan.IsValid()
+			&& Reviewed.RetirementPlan->TryGetBoolField(TEXT("awaiting_approval"), bReviewedAwaiting)
+			&& !bReviewedAwaiting);
+	TestTrue(TEXT("the reviewed preview hash is the discovery hash of a different intent"),
+		!DiscoveryHash.IsEmpty() && Reviewed.ValidationHash != DiscoveryHash);
+
+	// Step 3a: the discovery hash cannot authorize the approved apply.
+	Request->SetBoolField(TEXT("dry_run"), false);
+	Request->SetStringField(TEXT("expected_validation_hash"), DiscoveryHash);
+	FCortexCommandRouter Router;
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"), MakeShared<FCortexGraphCommandHandler>());
+	const FString HashBefore = LiveRetireHash(Fixture.Blueprint);
+	const int32 NodesBefore = Fixture.Graph ? Fixture.Graph->Nodes.Num() : 0;
+	const FCortexCommandResult Refused = Router.Execute(TEXT("graph.apply_patch"), Request);
+	TestFalse(FString::Printf(TEXT("the discovery hash cannot authorize the apply [%s: %s]"),
+		*Refused.ErrorCode, *Refused.ErrorMessage), Refused.bSuccess);
+	TestEqual(TEXT("the stale-token refusal is STALE_PRECONDITION"),
+		Refused.ErrorCode, FString(CortexErrorCodes::StalePrecondition));
+	TestTrue(FString::Printf(TEXT("the stale-token refusal names the reviewed intent [%s]"), *Refused.ErrorMessage),
+		Refused.ErrorMessage.Contains(TEXT("expected_validation_hash")));
+	TestEqual(TEXT("the stale-token refusal changes no fingerprint"), LiveRetireHash(Fixture.Blueprint), HashBefore);
+	TestEqual(TEXT("the stale-token refusal removes no node"),
+		Fixture.Graph ? Fixture.Graph->Nodes.Num() : -1, NodesBefore);
+
+	// Step 3b: the reviewed hash is accepted and the approved entries are really retired.
+	Request->SetStringField(TEXT("expected_validation_hash"), Reviewed.ValidationHash);
+	FCortexGraphPatchOutcome Outcome;
+	Error = FCortexCommandResult();
+	TestTrue(FString::Printf(TEXT("the reviewed hash authorizes the apply: %s"), *Error.ErrorMessage),
+		FCortexGraphPatchOps::Execute(Fixture.Blueprint, Request, Outcome, Error));
+	TestEqual(TEXT("the authorized apply reports applied"), Outcome.ApplyStatus, FString(TEXT("applied")));
+	TestEqual(TEXT("the authorized apply reads back the native state"), Outcome.ReadbackStatus, FString(TEXT("matched")));
+	TestNull(TEXT("the approved entry node is really gone"),
+		FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Fixture.AlphaGuid));
+	TestNull(TEXT("the other approved entry node is really gone"),
+		FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Fixture.BetaGuid));
+	TestFalse(TEXT("the authorized apply never claims persistence"), Outcome.bSaved);
 
 	Fixture.Cleanup();
 	return true;
