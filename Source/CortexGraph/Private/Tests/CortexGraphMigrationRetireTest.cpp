@@ -33,6 +33,7 @@
 #include "K2Node_Knot.h"
 #include "K2Node_MacroInstance.h"
 #include "K2Node_Tunnel.h"
+#include "K2Node_VariableGet.h"
 #include "K2Node_FunctionResult.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "UObject/Package.h"
@@ -1371,9 +1372,37 @@ struct FAdmittedNodeChain
 			TEXT("latent link"), Failure)) return false;
 
 		// Stage 2: the delegate create/add pair.
+		//
+		// A delegate binding only compiles when the two nodes are real: the add node needs a Target object
+		// of the delegate's owner class (`self is not a Button, Target must have connection`), and the
+		// create node needs a selected function/event name that its scope can see. The fixture follows the
+		// project's own pattern (`CortexGraphMigrationTest.cpp`): a typed member variable provides the
+		// target object, the Blueprint is compiled so the variable resolves, and `SetFunction` names a real
+		// parameterless callable function visible on the Button the delegate is declared on.
 		FMulticastDelegateProperty* const ClickedDelegate =
 			FindFProperty<FMulticastDelegateProperty>(UButton::StaticClass(), TEXT("OnClicked"));
 		if (!ClickedDelegate) { Failure = TEXT("delegate: UButton::OnClicked is not available"); return false; }
+		FEdGraphPinType ButtonObjectType;
+		ButtonObjectType.PinCategory = UEdGraphSchema_K2::PC_Object;
+		ButtonObjectType.PinSubCategoryObject = UButton::StaticClass();
+		if (!FBlueprintEditorUtils::AddMemberVariable(Fixture.Blueprint, FName(TEXT("RetireButtonTarget")), ButtonObjectType))
+		{
+			Failure = TEXT("delegate: the UButton-typed fixture variable could not be added");
+			return false;
+		}
+		FKismetEditorUtilities::CompileBlueprint(Fixture.Blueprint);
+		UK2Node_VariableGet* const TargetGet =
+			NewObject<UK2Node_VariableGet>(Fixture.Graph, NAME_None, RF_Transactional);
+		TargetGet->VariableReference.SetSelfMember(FName(TEXT("RetireButtonTarget")));
+		TargetGet->CreateNewGuid();
+		TargetGet->AllocateDefaultPins();
+		Fixture.Graph->AddNode(TargetGet, true, false);
+		UEdGraphPin* const TargetOut = FindTypedPin(TargetGet, EGPD_Output, UEdGraphSchema_K2::PC_Object);
+		if (!TargetOut)
+		{
+			Failure = FString::Printf(TEXT("delegate: target variable get has no object output [%s]"), *PinSummary(TargetGet));
+			return false;
+		}
 		CreateDelegate = NewObject<UK2Node_CreateDelegate>(Fixture.Graph, NAME_None, RF_Transactional);
 		CreateDelegate->CreateNewGuid();
 		CreateDelegate->AllocateDefaultPins();
@@ -1399,6 +1428,11 @@ struct FAdmittedNodeChain
 			TEXT("delegate execution link"), Failure)) return false;
 		if (!ConnectTypedPins(Schema, CreatedDelegateOut, AddedDelegateIn,
 			TEXT("delegate binding link"), Failure)) return false;
+		if (!ConnectTypedPins(Schema, TargetOut, AddDelegate->FindPin(UEdGraphSchema_K2::PN_Self),
+			TEXT("delegate target link"), Failure)) return false;
+		if (!ConnectTypedPins(Schema, TargetOut, CreateDelegate->FindPin(UEdGraphSchema_K2::PN_Self),
+			TEXT("create delegate scope link"), Failure)) return false;
+		CreateDelegate->SetFunction(FName(TEXT("SetFocus")));
 
 		// Stage 3: the engine macro instance.
 		UBlueprint* const StandardMacros = LoadObject<UBlueprint>(nullptr,
@@ -4689,6 +4723,19 @@ bool FCortexGraphMigrationRetireAdditionalClassAdmissionTest::RunTest(const FStr
 		FindTypedPin(Chain.CreateDelegate, EGPD_Output, UEdGraphSchema_K2::PC_Delegate));
 	TestNotNull(TEXT("the delegate add node exposes a delegate input"),
 		FindTypedPin(Chain.AddDelegate, EGPD_Input, UEdGraphSchema_K2::PC_Delegate));
+	// The binding is compile-valid, not merely wired: the add node's Target resolves to the Button the
+	// delegate is declared on, the create node's delegate pin resolves the expected signature, and its
+	// selected function is a real parameterless callable function visible in that scope.
+	UEdGraphPin* const AddedDelegateTarget = Chain.AddDelegate->FindPin(UEdGraphSchema_K2::PN_Self);
+	TestTrue(TEXT("the add node's Target pin is connected to the Button object"),
+		AddedDelegateTarget && AddedDelegateTarget->LinkedTo.Num() > 0);
+	TestNotNull(TEXT("the create node's delegate pin resolves the expected signature"),
+		Chain.CreateDelegate->GetDelegateSignature());
+	TestTrue(TEXT("the create node names a real callable function"),
+		Chain.CreateDelegate->GetFunctionName() == FName(TEXT("SetFocus")));
+	TestTrue(TEXT("the create node's scope sees the selected function"),
+		Chain.CreateDelegate->GetScopeClass()
+			&& Chain.CreateDelegate->GetScopeClass()->FindFunctionByName(TEXT("SetFocus")) != nullptr);
 	TestNotNull(TEXT("the macro instance exposes an execution input"),
 		FindTypedPin(Chain.Macro, EGPD_Input, UEdGraphSchema_K2::PC_Exec));
 	TestTrue(TEXT("the macro instance owns no bound subgraph"), Chain.Macro->GetSubGraphs().IsEmpty());
