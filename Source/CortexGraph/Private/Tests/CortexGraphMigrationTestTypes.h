@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 
+#include "Components/Button.h"
 #include "GameFramework/Actor.h"
 #include "Blueprint/UserWidget.h"
 
@@ -87,6 +88,15 @@ public:
 	UFUNCTION(BlueprintNativeEvent, Category = "CortexGraphMigrationTest")
 	void OnRetainedEvent();
 	virtual void OnRetainedEvent_Implementation() {}
+
+	/**
+	 * Delegate-binding fixture target. It is a native read/write property so a `UK2Node_VariableGet`
+	 * resolves it through the Blueprint's parent class, which lets a fixture wire a real create/add
+	 * delegate binding without adding a Blueprint variable - a variable would need a skeleton
+	 * regeneration or a full compile during fixture setup.
+	 */
+	UPROPERTY(BlueprintReadWrite, Category = "CortexGraphMigrationTest")
+	TObjectPtr<UButton> RetireButtonTarget;
 };
 
 UCLASS(Blueprintable)

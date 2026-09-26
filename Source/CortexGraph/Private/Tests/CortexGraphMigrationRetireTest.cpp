@@ -1399,21 +1399,18 @@ struct FAdmittedNodeChain
 		FMulticastDelegateProperty* const ClickedDelegate =
 			FindFProperty<FMulticastDelegateProperty>(UButton::StaticClass(), TEXT("OnClicked"));
 		if (!ClickedDelegate) { Failure = TEXT("delegate: UButton::OnClicked is not available"); return false; }
-		FEdGraphPinType ButtonObjectType;
-		ButtonObjectType.PinCategory = UEdGraphSchema_K2::PC_Object;
-		ButtonObjectType.PinSubCategoryObject = UButton::StaticClass();
-		if (!FBlueprintEditorUtils::AddMemberVariable(Fixture.Blueprint, FName(TEXT("RetireButtonTarget")), ButtonObjectType))
+		// The delegate target is a native property of the fixture's parent class, so the getter resolves it
+		// through that class without adding a Blueprint variable and without any skeleton regeneration or
+		// compile during fixture setup.
+		UClass* const FixtureParent = Fixture.Blueprint->ParentClass;
+		FObjectProperty* const TargetProperty = FixtureParent
+			? FindFProperty<FObjectProperty>(FixtureParent, FName(TEXT("RetireButtonTarget"))) : nullptr;
+		if (!TargetProperty || !TargetProperty->PropertyClass
+			|| !TargetProperty->PropertyClass->IsChildOf(UButton::StaticClass()))
 		{
-			Failure = TEXT("delegate: the UButton-typed fixture variable could not be added");
-			return false;
-		}
-		// The variable has to resolve before the getter below is created, but a full blueprint compile here
-		// would run the reinstancing/GC path inside a fixture setup while other cases of the same test have
-		// already garbage-marked their fixtures. Regenerating the skeleton class is the engine's own way to
-		// publish a newly added variable and is all the getter needs to resolve its type.
-		if (!FKismetEditorUtilities::GenerateBlueprintSkeleton(Fixture.Blueprint, /*bForceRegeneration=*/true))
-		{
-			Failure = TEXT("delegate: the fixture skeleton class could not be regenerated for the target variable");
+			Failure = FString::Printf(
+				TEXT("delegate: parent class '%s' does not expose a UButton RetireButtonTarget property"),
+				FixtureParent ? *FixtureParent->GetName() : TEXT("none"));
 			return false;
 		}
 		UK2Node_VariableGet* const TargetGet =
