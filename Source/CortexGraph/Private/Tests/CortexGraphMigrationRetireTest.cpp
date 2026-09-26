@@ -27,6 +27,7 @@
 #include "K2Node_AddDelegate.h"
 #include "K2Node_AssignDelegate.h"
 #include "K2Node_Composite.h"
+#include "K2Node_CreateDelegate.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_Knot.h"
 #include "K2Node_MacroInstance.h"
@@ -4464,7 +4465,7 @@ bool FCortexGraphMigrationRetireAdditionalClassAdmissionTest::RunTest(const FStr
 		StandardMacros->GetAllGraphs(StandardGraphs);
 		StandardGraphs.Sort([](const UEdGraph& A, const UEdGraph& B)
 		{
-			return A.GetName().ToString() < B.GetName().ToString();
+			return A.GetName().Compare(B.GetName()) < 0;
 		});
 		for (UEdGraph* Candidate : StandardGraphs)
 		{
@@ -4662,7 +4663,7 @@ bool FCortexGraphMigrationRetireAdditionalUnadmittedClassTest::RunTest(const FSt
 	Composite->CreateNewGuid();
 	Fixture.Graph->AddNode(Composite, true, false);
 	Composite->PostPlacedNewNode();
-	TestNotNull(TEXT("a real nested composite graph is created"), Composite->BoundGraph);
+	TestNotNull(TEXT("a real nested composite graph is created"), Composite->BoundGraph.Get());
 
 	// A bare tunnel's pins belong to its twin gateway inside a bound graph.
 	UK2Node_Tunnel* Tunnel = NewObject<UK2Node_Tunnel>(Fixture.Graph, NAME_None, RF_Transactional);
