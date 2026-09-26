@@ -23,6 +23,7 @@
 #include "Kismet/KismetStringLibrary.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
 #include "K2Node_AddDelegate.h"
 #include "K2Node_AssignDelegate.h"
@@ -1224,6 +1225,126 @@ TArray<FString> JsonStringArray(const TSharedPtr<FJsonObject>& Json, const TCHAR
 	}
 	return Values;
 }
+
+/** First pin of one node matching a direction and category, so a fixture never guesses pin names. */
+UEdGraphPin* FindTypedPin(UEdGraphNode* Node, const EEdGraphPinDirection Direction, const FName PinCategory)
+{
+	if (!Node) return nullptr;
+	for (UEdGraphPin* Pin : Node->Pins)
+	{
+		if (Pin && Pin->Direction == Direction && Pin->PinType.PinCategory == PinCategory) return Pin;
+	}
+	return nullptr;
+}
+
+/**
+ * The observed page's admitted non-entry nodes, built through engine APIs and linked into the
+ * selected entry's execution island:
+ *
+ *   AlphaBody.then -> DelayUntilNextTick.execute -> AddDelegate.execute -> macro instance
+ *   CreateDelegate.delegate -> AddDelegate.delegate
+ *   GetGameInstance -> macro wildcard input (a real object source, so the chain is compile-valid
+ *   exactly like the page's `IsValid` node, whose wildcard input is fed by a real object)
+ *
+ * The macro graph is taken from the engine's own standard macro library, so the fixture exercises the
+ * same `UK2Node_MacroInstance` the page holds.
+ */
+struct FAdmittedNodeChain
+{
+	UK2Node_CallFunction* Latent = nullptr;
+	UK2Node_CreateDelegate* CreateDelegate = nullptr;
+	UK2Node_AddDelegate* AddDelegate = nullptr;
+	UK2Node_MacroInstance* Macro = nullptr;
+	UK2Node_CallFunction* ObjectSource = nullptr;
+	UEdGraph* MacroGraph = nullptr;
+
+	bool IsComplete() const
+	{
+		return Latent && CreateDelegate && AddDelegate && Macro && ObjectSource && MacroGraph;
+	}
+
+	/** The explicitly requested additional identities of the chain. */
+	TArray<FString> Guids() const
+	{
+		TArray<FString> Values;
+		for (const UEdGraphNode* Node : { static_cast<const UEdGraphNode*>(Latent),
+			static_cast<const UEdGraphNode*>(CreateDelegate), static_cast<const UEdGraphNode*>(AddDelegate),
+			static_cast<const UEdGraphNode*>(Macro) })
+		{
+			if (Node) Values.Add(Node->NodeGuid.ToString());
+		}
+		return Values;
+	}
+
+	bool Build(FFixture& Fixture)
+	{
+		if (!Fixture.Graph) return false;
+		const UEdGraphSchema* Schema = Fixture.Graph->GetSchema();
+		if (!Schema) return false;
+
+		Latent = Fixture.AddCall(UKismetSystemLibrary::StaticClass()->FindFunctionByName(TEXT("DelayUntilNextTick")));
+		if (!Latent || !Schema->TryCreateConnection(Fixture.AlphaBody->FindPin(TEXT("then")), Latent->FindPin(TEXT("execute"))))
+		{
+			return false;
+		}
+
+		FMulticastDelegateProperty* ClickedDelegate =
+			FindFProperty<FMulticastDelegateProperty>(UButton::StaticClass(), TEXT("OnClicked"));
+		if (!ClickedDelegate) return false;
+		CreateDelegate = NewObject<UK2Node_CreateDelegate>(Fixture.Graph, NAME_None, RF_Transactional);
+		CreateDelegate->CreateNewGuid();
+		CreateDelegate->AllocateDefaultPins();
+		Fixture.Graph->AddNode(CreateDelegate, true, false);
+		AddDelegate = NewObject<UK2Node_AddDelegate>(Fixture.Graph, NAME_None, RF_Transactional);
+		AddDelegate->SetFromProperty(ClickedDelegate, /*bSelfContext=*/false, UButton::StaticClass());
+		AddDelegate->CreateNewGuid();
+		AddDelegate->AllocateDefaultPins();
+		Fixture.Graph->AddNode(AddDelegate, true, false);
+		UEdGraphPin* CreatedDelegateOut = FindTypedPin(CreateDelegate, EGPD_Output, UEdGraphSchema_K2::PC_Delegate);
+		UEdGraphPin* AddedDelegateIn = FindTypedPin(AddDelegate, EGPD_Input, UEdGraphSchema_K2::PC_Delegate);
+		if (!CreatedDelegateOut || !AddedDelegateIn) return false;
+		if (!Schema->TryCreateConnection(Latent->FindPin(TEXT("then")), AddDelegate->FindPin(TEXT("execute")))) return false;
+		if (!Schema->TryCreateConnection(CreatedDelegateOut, AddedDelegateIn)) return false;
+
+		UBlueprint* const StandardMacros = LoadObject<UBlueprint>(nullptr,
+			TEXT("/Engine/EditorBlueprintResources/StandardMacros.StandardMacros"));
+		if (!StandardMacros) return false;
+		TArray<UEdGraph*> StandardGraphs;
+		StandardMacros->GetAllGraphs(StandardGraphs);
+		StandardGraphs.Sort([](const UEdGraph& A, const UEdGraph& B)
+		{
+			return A.GetName().Compare(B.GetName()) < 0;
+		});
+		for (UEdGraph* Candidate : StandardGraphs)
+		{
+			if (Candidate && Candidate->GetName() == TEXT("IsValid")) { MacroGraph = Candidate; break; }
+		}
+		if (!MacroGraph)
+		{
+			for (UEdGraph* Candidate : StandardGraphs)
+			{
+				if (Candidate && Candidate->GetName().Contains(TEXT("IsValid"))) { MacroGraph = Candidate; break; }
+			}
+		}
+		if (!MacroGraph) return false;
+
+		Macro = NewObject<UK2Node_MacroInstance>(Fixture.Graph, NAME_None, RF_Transactional);
+		Macro->SetMacroGraph(MacroGraph);
+		Macro->CreateNewGuid();
+		Macro->AllocateDefaultPins();
+		Fixture.Graph->AddNode(Macro, true, false);
+		UEdGraphPin* const MacroExecIn = FindTypedPin(Macro, EGPD_Input, UEdGraphSchema_K2::PC_Exec);
+		UEdGraphPin* const MacroWildcardIn = FindTypedPin(Macro, EGPD_Input, UEdGraphSchema_K2::PC_Wildcard);
+		if (!MacroExecIn || !MacroWildcardIn) return false;
+		if (!Schema->TryCreateConnection(AddDelegate->FindPin(TEXT("then")), MacroExecIn)) return false;
+
+		ObjectSource = Fixture.AddCall(UGameplayStatics::StaticClass()->FindFunctionByName(TEXT("GetGameInstance")));
+		if (!ObjectSource) return false;
+		UEdGraphPin* const ObjectOut = FindTypedPin(ObjectSource, EGPD_Output, UEdGraphSchema_K2::PC_Object);
+		if (!ObjectOut || !Schema->TryCreateConnection(ObjectOut, MacroWildcardIn)) return false;
+		return true;
+	}
+};
 
 /** Adds one standalone reroute knot to the fixture graph. */
 UK2Node_Knot* AddRerouteKnot(FFixture& Fixture)
@@ -4405,123 +4526,32 @@ bool FCortexGraphMigrationRetireAdditionalClassAdmissionTest::RunTest(const FStr
 	TestTrue(TEXT("retirement fixture with a cosmetic hook is created"),
 		Fixture.Build(TEXT("BP_RetireAdditionalClasses"), /*bRetainProducer=*/true));
 	if (!Fixture.Blueprint) { Fixture.Cleanup(); return false; }
-	const UEdGraphSchema* Schema = Fixture.Graph->GetSchema();
-	TestNotNull(TEXT("the fixture graph schema is available"), Schema);
-	if (!Schema) { Fixture.Cleanup(); return false; }
 	const FString AlphaGuid = Fixture.Alpha->NodeGuid.ToString();
 
-	// (a) The observed latent call, chained into the selected entry's island.
-	UK2Node_CallFunction* Latent = Fixture.AddCall(
-		UKismetSystemLibrary::StaticClass()->FindFunctionByName(TEXT("DelayUntilNextTick")));
-	TestNotNull(TEXT("the observed latent call node exists"), Latent);
-	TestTrue(TEXT("the engine marks the observed call as latent"), Latent && Latent->IsLatentFunction());
-	TestTrue(TEXT("the latent call is linked into the selected entry's execution island"),
-		Latent && Schema->TryCreateConnection(
-			Fixture.AlphaBody->FindPin(TEXT("then")), Latent->FindPin(TEXT("execute"))));
-
-	// (b) The observed delegate pair, exactly the shape the page carries: a create node feeding the
-	// delegate input of an add node that sits in the execution island.
-	FMulticastDelegateProperty* ClickedDelegate =
-		FindFProperty<FMulticastDelegateProperty>(UButton::StaticClass(), TEXT("OnClicked"));
-	TestNotNull(TEXT("the native button delegate the observed page binds is available"), ClickedDelegate);
-	UK2Node_CreateDelegate* CreateDelegate =
-		NewObject<UK2Node_CreateDelegate>(Fixture.Graph, NAME_None, RF_Transactional);
-	CreateDelegate->CreateNewGuid();
-	CreateDelegate->AllocateDefaultPins();
-	Fixture.Graph->AddNode(CreateDelegate, true, false);
-	UK2Node_AddDelegate* AddDelegate = NewObject<UK2Node_AddDelegate>(Fixture.Graph, NAME_None, RF_Transactional);
-	if (ClickedDelegate)
-	{
-		AddDelegate->SetFromProperty(ClickedDelegate, /*bSelfContext=*/false, UButton::StaticClass());
-	}
-	AddDelegate->CreateNewGuid();
-	AddDelegate->AllocateDefaultPins();
-	Fixture.Graph->AddNode(AddDelegate, true, false);
-	UEdGraphPin* CreatedDelegateOut = nullptr;
-	for (UEdGraphPin* Pin : CreateDelegate->Pins)
-	{
-		if (Pin && Pin->Direction == EGPD_Output && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Delegate)
-		{
-			CreatedDelegateOut = Pin;
-			break;
-		}
-	}
-	UEdGraphPin* AddedDelegateIn = nullptr;
-	for (UEdGraphPin* Pin : AddDelegate->Pins)
-	{
-		if (Pin && Pin->Direction == EGPD_Input && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Delegate)
-		{
-			AddedDelegateIn = Pin;
-			break;
-		}
-	}
-	TestNotNull(TEXT("the delegate create node exposes a delegate output"), CreatedDelegateOut);
-	TestNotNull(TEXT("the delegate add node exposes a delegate input"), AddedDelegateIn);
-	TestTrue(TEXT("the add node is chained into the selected entry's execution island"),
-		Latent && Latent->FindPin(TEXT("then")) && AddDelegate->FindPin(TEXT("execute"))
-			&& Schema->TryCreateConnection(Latent->FindPin(TEXT("then")), AddDelegate->FindPin(TEXT("execute"))));
-	TestTrue(TEXT("the create node feeds the add node's delegate input"),
-		CreatedDelegateOut && AddedDelegateIn && Schema->TryCreateConnection(CreatedDelegateOut, AddedDelegateIn));
-
-	// (c) The observed macro: the engine's own `IsValid` macro library graph, the node the page holds.
-	UBlueprint* StandardMacros = LoadObject<UBlueprint>(nullptr,
-		TEXT("/Engine/EditorBlueprintResources/StandardMacros.StandardMacros"));
-	TestNotNull(TEXT("the engine standard macro library is loadable"), StandardMacros);
-	UEdGraph* MacroGraph = nullptr;
-	if (StandardMacros)
-	{
-		TArray<UEdGraph*> StandardGraphs;
-		StandardMacros->GetAllGraphs(StandardGraphs);
-		StandardGraphs.Sort([](const UEdGraph& A, const UEdGraph& B)
-		{
-			return A.GetName().Compare(B.GetName()) < 0;
-		});
-		for (UEdGraph* Candidate : StandardGraphs)
-		{
-			if (Candidate && Candidate->GetName() == TEXT("IsValid")) { MacroGraph = Candidate; break; }
-		}
-		if (!MacroGraph)
-		{
-			for (UEdGraph* Candidate : StandardGraphs)
-			{
-				if (Candidate && Candidate->GetName().Contains(TEXT("IsValid"))) { MacroGraph = Candidate; break; }
-			}
-		}
-	}
-	TestNotNull(TEXT("the engine IsValid macro graph resolves"), MacroGraph);
-	UK2Node_MacroInstance* Macro = nullptr;
-	UEdGraphPin* MacroExecIn = nullptr;
-	if (MacroGraph)
-	{
-		Macro = NewObject<UK2Node_MacroInstance>(Fixture.Graph, NAME_None, RF_Transactional);
-		Macro->SetMacroGraph(MacroGraph);
-		Macro->CreateNewGuid();
-		Macro->AllocateDefaultPins();
-		Fixture.Graph->AddNode(Macro, true, false);
-		for (UEdGraphPin* Pin : Macro->Pins)
-		{
-			if (Pin && Pin->Direction == EGPD_Input && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
-			{
-				MacroExecIn = Pin;
-				break;
-			}
-		}
-		TestNotNull(TEXT("the macro instance exposes an execution input"), MacroExecIn);
-		TestTrue(TEXT("the macro instance is chained into the selected entry's execution island"),
-			MacroExecIn && AddDelegate->FindPin(TEXT("then"))
-				&& Schema->TryCreateConnection(AddDelegate->FindPin(TEXT("then")), MacroExecIn));
-		// The direct evidence that the class exception rests on: the instance owns no bound subgraph and
-		// its tunnel twin pointers are never wired for an instance, so `DestroyNode` cannot reach the
-		// shared macro graph it references.
-		TestTrue(TEXT("the macro instance owns no bound subgraph"), Macro->GetSubGraphs().IsEmpty());
-		TestNull(TEXT("the macro instance has no input sink twin"), Macro->InputSinkNode.Get());
-		TestNull(TEXT("the macro instance has no output source twin"), Macro->OutputSourceNode.Get());
-	}
-	if (!Latent || !CreateDelegate || !CreatedDelegateOut || !AddedDelegateIn || !AddDelegate || !Macro)
-	{
-		Fixture.Cleanup();
-		return false;
-	}
+	// The page's admitted non-entry chain (latent call, delegate create/add pair, engine macro
+	// instance) is built through engine APIs and linked into the selected entry's island.
+	FAdmittedNodeChain Chain;
+	TestTrue(TEXT("the page-shaped admitted chain is built"), Chain.Build(Fixture));
+	if (!Chain.IsComplete()) { Fixture.Cleanup(); return false; }
+	TestTrue(TEXT("the engine marks the observed call as latent"), Chain.Latent->IsLatentFunction());
+	TestNotNull(TEXT("the delegate create node exposes a delegate output"),
+		FindTypedPin(Chain.CreateDelegate, EGPD_Output, UEdGraphSchema_K2::PC_Delegate));
+	TestNotNull(TEXT("the delegate add node exposes a delegate input"),
+		FindTypedPin(Chain.AddDelegate, EGPD_Input, UEdGraphSchema_K2::PC_Delegate));
+	TestNotNull(TEXT("the macro instance exposes an execution input"),
+		FindTypedPin(Chain.Macro, EGPD_Input, UEdGraphSchema_K2::PC_Exec));
+	TestNotNull(TEXT("the macro instance exposes a wildcard data input"),
+		FindTypedPin(Chain.Macro, EGPD_Input, UEdGraphSchema_K2::PC_Wildcard));
+	TestTrue(TEXT("the macro instance owns no bound subgraph"), Chain.Macro->GetSubGraphs().IsEmpty());
+	TestNull(TEXT("the macro instance has no input sink twin"), Chain.Macro->InputSinkNode.Get());
+	TestNull(TEXT("the macro instance has no output source twin"), Chain.Macro->OutputSourceNode.Get());
+	UK2Node_CallFunction* const Latent = Chain.Latent;
+	UK2Node_CreateDelegate* const CreateDelegate = Chain.CreateDelegate;
+	UK2Node_AddDelegate* const AddDelegate = Chain.AddDelegate;
+	UK2Node_MacroInstance* const Macro = Chain.Macro;
+	UEdGraph* const MacroGraph = Chain.MacroGraph;
+	const FString MacroGraphBefore = CaptureNativeGraph(MacroGraph);
+	TestTrue(TEXT("the referenced macro graph is a real engine macro graph"), !MacroGraphBefore.IsEmpty());
 
 	const TArray<FString> Requested = { Latent->NodeGuid.ToString(), CreateDelegate->NodeGuid.ToString(),
 		AddDelegate->NodeGuid.ToString(), Macro->NodeGuid.ToString() };
@@ -4644,12 +4674,449 @@ bool FCortexGraphMigrationRetireAdditionalClassAdmissionTest::RunTest(const FStr
 		FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Fixture.RetainedBodyGuid));
 	TestTrue(TEXT("the retained cosmetic execution link survives the class-admitted retirement"),
 		Fixture.Retained->FindPin(TEXT("then"))->LinkedTo.Contains(Fixture.RetainedBody->FindPin(TEXT("execute"))));
-	TestTrue(TEXT("the referenced macro graph is untouched by the instance removal"),
-		MacroGraph->Nodes.Num() > 0);
+	TestTrue(TEXT("the referenced macro graph is byte-identical after the instance removal"),
+		CaptureNativeGraph(MacroGraph) == MacroGraphBefore);
 
 	Fixture.Cleanup();
 	return true;
 }
+
+// CortexSandbox #113: an admitted class the compiler consumes must be removed through the reviewed
+// path *with* the recompile the plan demands, and the compiled result must be read back: the retired
+// override is no longer implemented by the generated class, the retained cosmetic override still is,
+// the generated state really changed and the referenced macro graph and cosmetic links are untouched.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireAdditionalCompiledApplyTest,
+	"Cortex.Graph.Authoring.Migration.Retire.AppliesClassAdmittedRetirementWithCompile",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexGraphMigrationRetireAdditionalCompiledApplyTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexGraphMigrationRetireTest;
+	FFixture Fixture;
+	TestTrue(TEXT("retirement fixture with a cosmetic hook is created"),
+		Fixture.Build(TEXT("BP_RetireAdmittedCompile"), /*bRetainProducer=*/true));
+	if (!Fixture.Blueprint) { Fixture.Cleanup(); return false; }
+
+	FAdmittedNodeChain Chain;
+	TestTrue(TEXT("the page-shaped admitted chain is built"), Chain.Build(Fixture));
+	if (!Chain.IsComplete()) { Fixture.Cleanup(); return false; }
+	const FString AlphaGuid = Fixture.Alpha->NodeGuid.ToString();
+	const TArray<FString> Requested = Chain.Guids();
+
+	// Baseline compile: the generated class implements both override events, so the retirement has a
+	// real compiled artefact to clear.
+	FKismetEditorUtilities::CompileBlueprint(Fixture.Blueprint);
+	TestTrue(TEXT("the fixture compiles before the retirement"),
+		static_cast<int32>(Fixture.Blueprint->Status) != static_cast<int32>(BS_Error));
+	UClass* const GeneratedBefore = Fixture.Blueprint->GeneratedClass;
+	TestNotNull(TEXT("the retired override is implemented by the compiled class before the retirement"),
+		GeneratedBefore
+			? GeneratedBefore->FindFunctionByName(TEXT("OnLegacyAlpha"), EIncludeSuperFlag::ExcludeSuper) : nullptr);
+	TestNotNull(TEXT("the retained override is implemented by the compiled class before the retirement"),
+		GeneratedBefore
+			? GeneratedBefore->FindFunctionByName(TEXT("OnRetainedEvent"), EIncludeSuperFlag::ExcludeSuper) : nullptr);
+	const FString GeneratedDigestBefore = FCortexGraphPatchState::ComputeGeneratedStateDigest(Fixture.Blueprint);
+	const FString MacroGraphBefore = CaptureNativeGraph(Chain.MacroGraph);
+	const TSet<FGuid> RetainedGuids = { Fixture.RetainedGuid, Fixture.RetainedBodyGuid, Fixture.ProducerGuid };
+	const FString RetainedBefore = CaptureNativeGraph(Fixture.Graph, &RetainedGuids);
+
+	TSharedPtr<FJsonObject> Request;
+	TArray<FString> Approved;
+	FCortexCommandResult Error;
+	TestTrue(FString::Printf(TEXT("the compiled class-admitted request is prepared: %s"), *Error.ErrorMessage),
+		PrepareAdditionalRetirementRequest(Fixture, { AlphaGuid }, Requested,
+			TEXT("00000000-0000-0000-0000-000000114301"), Request, Approved, Error, /*bCompile=*/true));
+	TestTrue(TEXT("the reviewed approval covers the admitted chain"),
+		Approved.Contains(Chain.Latent->NodeGuid.ToString())
+			&& Approved.Contains(Chain.CreateDelegate->NodeGuid.ToString())
+			&& Approved.Contains(Chain.AddDelegate->NodeGuid.ToString())
+			&& Approved.Contains(Chain.Macro->NodeGuid.ToString()));
+	FOperations Operations;
+	Operations.Begin();
+	FCortexGraphPatchOutcome Outcome;
+	Error = FCortexCommandResult();
+	TestTrue(FString::Printf(TEXT("the compiled class-admitted retirement applies: %s"), *Error.ErrorMessage),
+		FCortexGraphPatchOps::Execute(Fixture.Blueprint, Request, Outcome, Error));
+	Operations.End();
+	TestEqual(TEXT("the compiled retirement reports applied"), Outcome.ApplyStatus, FString(TEXT("applied")));
+	TestEqual(TEXT("the compiled retirement reports the compile"), Outcome.CompileStatus, FString(TEXT("compiled")));
+	TestEqual(TEXT("the compiled retirement requests exactly one target compile"), Outcome.TargetCompileCount, 1);
+	TestEqual(TEXT("the compiled retirement performs exactly one target compile"), Operations.TargetCompiles, 1);
+	TestEqual(TEXT("the compiled retirement performs no recovery compile"), Operations.RecoveryCompiles, 0);
+	TestEqual(TEXT("the compiled retirement readback matches"), Outcome.ReadbackStatus, FString(TEXT("matched")));
+	TestEqual(TEXT("the compiled retirement needs no rollback"), Outcome.RollbackStatus, FString(TEXT("not_requested")));
+	TestFalse(TEXT("the compiled retirement saves nothing"), Outcome.bSaved);
+	TestTrue(TEXT("the compiled retirement leaves the Blueprint compiling"),
+		static_cast<int32>(Fixture.Blueprint->Status) != static_cast<int32>(BS_Error));
+
+	// Generated-class readback: the retired override is gone, the retained cosmetic override survives
+	// and the compiled state really changed.
+	UClass* const GeneratedAfter = Fixture.Blueprint->GeneratedClass;
+	TestNotNull(TEXT("the generated class survives the compiled retirement"), GeneratedAfter);
+	TestNull(TEXT("the retired override is no longer implemented by the generated class"),
+		GeneratedAfter
+			? GeneratedAfter->FindFunctionByName(TEXT("OnLegacyAlpha"), EIncludeSuperFlag::ExcludeSuper) : nullptr);
+	TestNotNull(TEXT("the retained cosmetic override is still implemented by the generated class"),
+		GeneratedAfter
+			? GeneratedAfter->FindFunctionByName(TEXT("OnRetainedEvent"), EIncludeSuperFlag::ExcludeSuper) : nullptr);
+	TestNotEqual(TEXT("the compiled retirement rebuilt the generated state"),
+		FCortexGraphPatchState::ComputeGeneratedStateDigest(Fixture.Blueprint), GeneratedDigestBefore);
+	TestTrue(TEXT("the admitted classes register no generated component delegate binding"),
+		CaptureComponentBindings(Fixture.Blueprint).IsEmpty());
+	for (const FString& GuidText : Approved)
+	{
+		FGuid Guid;
+		FGuid::Parse(GuidText, Guid);
+		TestNull(FString::Printf(TEXT("admitted node %s is absent after the compiled retirement"), *GuidText),
+			FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Guid));
+	}
+	TestEqual(TEXT("the referenced macro graph is byte-identical after the compiled retirement"),
+		CaptureNativeGraph(Chain.MacroGraph), MacroGraphBefore);
+	TestEqual(TEXT("the cosmetic hook, its body and the shared producer are unchanged"),
+		CaptureNativeGraph(Fixture.Graph, &RetainedGuids), RetainedBefore);
+	TestTrue(TEXT("the retained cosmetic execution link survives the compiled retirement"),
+		Fixture.Retained->FindPin(TEXT("then"))->LinkedTo.Contains(Fixture.RetainedBody->FindPin(TEXT("execute"))));
+	TestTrue(TEXT("the retired package is dirty after the compiled retirement"), Fixture.Package->IsDirty());
+
+	Fixture.Cleanup();
+	return true;
+}
+
+// CortexSandbox #113: a fault after approved removals, after all removals or during the retirement
+// readback must restore the exact pre-apply graph, including the explicitly requested additional
+// nodes and the referenced macro graph.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireAdditionalClassRollbackTest,
+	"Cortex.Graph.Authoring.Migration.Retire.RollsBackClassAdmittedRetirementOnFault",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexGraphMigrationRetireAdditionalClassRollbackTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexGraphMigrationRetireTest;
+	struct FFaultCase
+	{
+		const TCHAR* Name;
+		bool bReadback;
+	};
+	const FFaultCase Faults[] = {
+		{ TEXT("migration_retire_after_first_removal"), false },
+		{ TEXT("migration_retire_after_removals"), false },
+		{ TEXT("retire_after_removal"), true }
+	};
+	bool bAllPassed = true;
+	for (int32 Index = 0; Index < UE_ARRAY_COUNT(Faults); ++Index)
+	{
+		FFixture Fixture;
+		const FString AssetName = FString::Printf(TEXT("BP_RetireAdmittedRollback_%d"), Index);
+		bAllPassed &= TestTrue(TEXT("class-admitted rollback fixture is created"),
+			Fixture.Build(*AssetName, /*bRetainProducer=*/true));
+		if (!Fixture.Blueprint) { Fixture.Cleanup(); continue; }
+		FAdmittedNodeChain Chain;
+		bAllPassed &= TestTrue(TEXT("class-admitted rollback chain is built"), Chain.Build(Fixture));
+		if (!Chain.IsComplete()) { Fixture.Cleanup(); continue; }
+		const FString AlphaGuid = Fixture.Alpha->NodeGuid.ToString();
+		const FString GraphBefore = CaptureNativeGraph(Fixture.Graph);
+		const FString MacroGraphBefore = CaptureNativeGraph(Chain.MacroGraph);
+		const bool bDirtyBefore = Fixture.Package->IsDirty();
+		TSharedPtr<FJsonObject> Request;
+		TArray<FString> Approved;
+		FCortexCommandResult Error;
+		const FString PatchId = FString::Printf(TEXT("00000000-0000-0000-0000-00000011440%d"), Index);
+		if (!PrepareAdditionalRetirementRequest(Fixture, { AlphaGuid }, Chain.Guids(), *PatchId,
+			Request, Approved, Error))
+		{
+			bAllPassed &= TestFalse(FString::Printf(TEXT("%s request preparation failed: %s"), Faults[Index].Name,
+				*Error.ErrorMessage), true);
+			Fixture.Cleanup();
+			continue;
+		}
+		if (Faults[Index].bReadback)
+		{
+			FCortexGraphMigrationOps::SetRetirementReadbackFaultForTesting(FName(Faults[Index].Name));
+		}
+		else
+		{
+			FCortexGraphPatchOps::SetApplyFaultPointForTesting(FName(Faults[Index].Name));
+		}
+		FCortexGraphPatchOutcome Outcome;
+		Error = FCortexCommandResult();
+		bAllPassed &= TestFalse(FString::Printf(TEXT("%s causes Execute to fail"), Faults[Index].Name),
+			FCortexGraphPatchOps::Execute(Fixture.Blueprint, Request, Outcome, Error));
+		FCortexGraphPatchOps::SetApplyFaultPointForTesting(NAME_None);
+		FCortexGraphMigrationOps::ClearRetirementReadbackFaultForTesting();
+		bAllPassed &= TestEqual(FString::Printf(TEXT("%s restores the transaction"), Faults[Index].Name),
+			Outcome.RollbackStatus, FString(TEXT("restored")));
+		bAllPassed &= TestFalse(FString::Printf(TEXT("%s does not block the asset"), Faults[Index].Name),
+			Outcome.bBlocked);
+		bAllPassed &= TestEqual(FString::Printf(TEXT("%s restores the native graph snapshot"), Faults[Index].Name),
+			CaptureNativeGraph(Fixture.Graph), GraphBefore);
+		bAllPassed &= TestEqual(FString::Printf(TEXT("%s restores the referenced macro graph"), Faults[Index].Name),
+			CaptureNativeGraph(Chain.MacroGraph), MacroGraphBefore);
+		bAllPassed &= TestEqual(FString::Printf(TEXT("%s restores the dirty baseline"), Faults[Index].Name),
+			Fixture.Package->IsDirty(), bDirtyBefore);
+		for (const FString& GuidText : Approved)
+		{
+			FGuid Guid;
+			FGuid::Parse(GuidText, Guid);
+			bAllPassed &= TestNotNull(FString::Printf(TEXT("%s restores approved GUID %s"), Faults[Index].Name, *GuidText),
+				FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Guid));
+		}
+		Fixture.Cleanup();
+	}
+	FCortexGraphPatchOps::SetApplyFaultPointForTesting(NAME_None);
+	FCortexGraphMigrationOps::ClearRetirementReadbackFaultForTesting();
+	return bAllPassed;
+}
+
+// CortexSandbox #113 (Task 2 Step 3): the persistence outcomes of a class-admitted retirement - a
+// verified save, a failed save that keeps the verified in-memory result dirty, and a post-save
+// verification failure that reports a committed file requiring reopen instead of a rollback.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireAdditionalClassSaveTest,
+	"Cortex.Graph.Authoring.Migration.Retire.PersistsClassAdmittedRetirementAndReportsSaveFailures",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexGraphMigrationRetireAdditionalClassSaveTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexGraphMigrationRetireTest;
+	bool bAllPassed = true;
+
+	// (a) A verified save commits the compiled retirement.
+	{
+		FFixture Fixture;
+		bAllPassed &= TestTrue(TEXT("verified-save fixture is created"),
+			Fixture.Build(TEXT("BP_RetireAdmittedSave"), /*bRetainProducer=*/true));
+		if (Fixture.Blueprint)
+		{
+			FAdmittedNodeChain Chain;
+			bAllPassed &= TestTrue(TEXT("verified-save chain is built"), Chain.Build(Fixture));
+			if (Chain.IsComplete())
+			{
+				const FString Filename = Fixture.Filename();
+				IFileManager::Get().Delete(*Filename, false, true, true);
+				bAllPassed &= TestTrue(TEXT("the class-admitted baseline saves"), Fixture.SaveToDisk());
+				const TArray<uint8> BaselineBytes = ReadBytes(Filename);
+				bAllPassed &= TestFalse(TEXT("the baseline is clean before the retirement"), Fixture.Package->IsDirty());
+				TSharedPtr<FJsonObject> Request;
+				TArray<FString> Approved;
+				FCortexCommandResult Error;
+				bAllPassed &= TestTrue(FString::Printf(TEXT("the save request is prepared: %s"), *Error.ErrorMessage),
+					PrepareAdditionalRetirementRequest(Fixture, { Fixture.Alpha->NodeGuid.ToString() }, Chain.Guids(),
+						TEXT("00000000-0000-0000-0000-000000114501"), Request, Approved, Error,
+						/*bCompile=*/true, /*bSave=*/true));
+				FOperations Operations;
+				Operations.Begin();
+				FCortexGraphPatchOutcome Outcome;
+				bAllPassed &= TestTrue(FString::Printf(TEXT("the compiled retirement saves: %s"), *Error.ErrorMessage),
+					FCortexGraphPatchOps::Execute(Fixture.Blueprint, Request, Outcome, Error));
+				Operations.End();
+				bAllPassed &= TestEqual(TEXT("the saved retirement reports applied"),
+					Outcome.ApplyStatus, FString(TEXT("applied")));
+				bAllPassed &= TestEqual(TEXT("the saved retirement reports the compile"),
+					Outcome.CompileStatus, FString(TEXT("compiled")));
+				bAllPassed &= TestEqual(TEXT("the saved retirement reports matched readback"),
+					Outcome.ReadbackStatus, FString(TEXT("matched")));
+				bAllPassed &= TestEqual(TEXT("the saved retirement reports saved"),
+					Outcome.SaveStatus, FString(TEXT("saved")));
+				bAllPassed &= TestEqual(TEXT("the saved retirement reports verified persistence"),
+					Outcome.PostSaveStatus, FString(TEXT("verified")));
+				bAllPassed &= TestTrue(TEXT("the saved retirement reports bSaved"), Outcome.bSaved);
+				bAllPassed &= TestEqual(TEXT("one target compile precedes the save"), Operations.TargetCompiles, 1);
+				bAllPassed &= TestEqual(TEXT("one explicit package save occurs"), Operations.Saves, 1);
+				bAllPassed &= TestFalse(TEXT("the verified saved package is clean"), Fixture.Package->IsDirty());
+				bAllPassed &= TestFalse(TEXT("the committed file carries the retirement"),
+					SameBytes(BaselineBytes, ReadBytes(Filename)));
+			}
+			const FString CleanupFilename = Fixture.Filename();
+			Fixture.Cleanup();
+			IFileManager::Get().Delete(*CleanupFilename, false, true, true);
+		}
+	}
+
+	// (b) A failed save keeps the verified in-memory retirement dirty and never claims a rollback.
+	{
+		FFixture Fixture;
+		bAllPassed &= TestTrue(TEXT("save-failure fixture is created"),
+			Fixture.Build(TEXT("BP_RetireAdmittedSaveFail"), /*bRetainProducer=*/true));
+		if (Fixture.Blueprint)
+		{
+			FAdmittedNodeChain Chain;
+			bAllPassed &= TestTrue(TEXT("save-failure chain is built"), Chain.Build(Fixture));
+			if (Chain.IsComplete())
+			{
+				const FString Filename = Fixture.Filename();
+				IFileManager::Get().Delete(*Filename, false, true, true);
+				bAllPassed &= TestTrue(TEXT("the save-failure baseline saves"), Fixture.SaveToDisk());
+				const TArray<uint8> BaselineBytes = ReadBytes(Filename);
+				TSharedPtr<FJsonObject> Request;
+				TArray<FString> Approved;
+				FCortexCommandResult Error;
+				bAllPassed &= TestTrue(FString::Printf(TEXT("the save-failure request is prepared: %s"), *Error.ErrorMessage),
+					PrepareAdditionalRetirementRequest(Fixture, { Fixture.Alpha->NodeGuid.ToString() }, Chain.Guids(),
+						TEXT("00000000-0000-0000-0000-000000114502"), Request, Approved, Error,
+						/*bCompile=*/true, /*bSave=*/true));
+				FOperations Operations;
+				Operations.Begin();
+				FCortexGraphPatchOps::SetSaveFaultForTesting(true);
+				FCortexGraphPatchOutcome Outcome;
+				const bool bApplied = FCortexGraphPatchOps::Execute(Fixture.Blueprint, Request, Outcome, Error);
+				FCortexGraphPatchOps::SetSaveFaultForTesting(false);
+				Operations.End();
+				bAllPassed &= TestFalse(TEXT("an injected save failure fails the retirement"), bApplied);
+				bAllPassed &= TestEqual(TEXT("the save failure reports the save error code"),
+					Error.ErrorCode, FString(CortexErrorCodes::SaveFailed));
+				bAllPassed &= TestEqual(TEXT("the save failure keeps the verified in-memory result"),
+					Outcome.ApplyStatus, FString(TEXT("applied")));
+				bAllPassed &= TestEqual(TEXT("the save failure keeps the authoritative readback"),
+					Outcome.ReadbackStatus, FString(TEXT("matched")));
+				bAllPassed &= TestEqual(TEXT("the save failure reports the failed save"),
+					Outcome.SaveStatus, FString(TEXT("failed")));
+				bAllPassed &= TestEqual(TEXT("the save failure never claims post-save verification"),
+					Outcome.PostSaveStatus, FString(TEXT("not_requested")));
+				bAllPassed &= TestFalse(TEXT("the save failure keeps bSaved false"), Outcome.bSaved);
+				bAllPassed &= TestNotEqual(TEXT("the save failure is never reported as a rollback"),
+					Outcome.RollbackStatus, FString(TEXT("restored")));
+				bAllPassed &= TestEqual(TEXT("the save failure performs zero real saves"), Operations.Saves, 0);
+				bAllPassed &= TestTrue(TEXT("the save failure keeps the verified result dirty"),
+					Fixture.Package->IsDirty());
+				bAllPassed &= TestTrue(TEXT("the save failure leaves the file untouched"),
+					SameBytes(BaselineBytes, ReadBytes(Filename)));
+			}
+			const FString CleanupFilename = Fixture.Filename();
+			Fixture.Cleanup();
+			IFileManager::Get().Delete(*CleanupFilename, false, true, true);
+		}
+	}
+
+	// (c) A post-save verification failure reports the committed file, never a rollback.
+	{
+		FFixture Fixture;
+		bAllPassed &= TestTrue(TEXT("post-save fixture is created"),
+			Fixture.Build(TEXT("BP_RetireAdmittedPostSave"), /*bRetainProducer=*/true));
+		if (Fixture.Blueprint)
+		{
+			FAdmittedNodeChain Chain;
+			bAllPassed &= TestTrue(TEXT("post-save chain is built"), Chain.Build(Fixture));
+			if (Chain.IsComplete())
+			{
+				const FString Filename = Fixture.Filename();
+				IFileManager::Get().Delete(*Filename, false, true, true);
+				bAllPassed &= TestTrue(TEXT("the post-save baseline saves"), Fixture.SaveToDisk());
+				const TArray<uint8> BaselineBytes = ReadBytes(Filename);
+				TSharedPtr<FJsonObject> Request;
+				TArray<FString> Approved;
+				FCortexCommandResult Error;
+				bAllPassed &= TestTrue(FString::Printf(TEXT("the post-save request is prepared: %s"), *Error.ErrorMessage),
+					PrepareAdditionalRetirementRequest(Fixture, { Fixture.Alpha->NodeGuid.ToString() }, Chain.Guids(),
+						TEXT("00000000-0000-0000-0000-000000114503"), Request, Approved, Error,
+						/*bCompile=*/true, /*bSave=*/true));
+				FOperations Operations;
+				Operations.Begin();
+				FCortexGraphPatchOps::SetPostSaveVerificationFaultForTesting(TEXT("asset_file"));
+				FCortexGraphPatchOutcome Outcome;
+				const bool bApplied = FCortexGraphPatchOps::Execute(Fixture.Blueprint, Request, Outcome, Error);
+				FCortexGraphPatchOps::SetPostSaveVerificationFaultForTesting(NAME_None);
+				Operations.End();
+				bAllPassed &= TestFalse(TEXT("a failed post-save verification fails the retirement"), bApplied);
+				bAllPassed &= TestEqual(TEXT("the post-save failure reports the verification error code"),
+					Error.ErrorCode, FString(CortexErrorCodes::VerificationFailed));
+				bAllPassed &= TestEqual(TEXT("the post-save failure still reports the real save"),
+					Outcome.SaveStatus, FString(TEXT("saved")));
+				bAllPassed &= TestTrue(TEXT("the post-save failure keeps bSaved true"), Outcome.bSaved);
+				bAllPassed &= TestEqual(TEXT("the post-save failure reports the failed verification"),
+					Outcome.PostSaveStatus, FString(TEXT("failed")));
+				bAllPassed &= TestEqual(TEXT("the post-save failure preserves the applied outcome"),
+					Outcome.ApplyStatus, FString(TEXT("applied")));
+				bAllPassed &= TestNotEqual(TEXT("the post-save failure is never reported as a rollback"),
+					Outcome.RollbackStatus, FString(TEXT("restored")));
+				bAllPassed &= TestEqual(TEXT("the post-save failure performs exactly one real save"), Operations.Saves, 1);
+				bAllPassed &= TestTrue(TEXT("the post-save failure names the failed check"),
+					Error.ErrorMessage.Contains(TEXT("asset_file")));
+				bAllPassed &= TestTrue(TEXT("the post-save failure carries the reopen guidance"),
+					Error.ErrorMessage.Contains(TEXT("reopened before further authoring")));
+				bAllPassed &= TestTrue(TEXT("the post-save failure reports the same diagnostic in the outcome"),
+					FString::Join(Outcome.Diagnostics, TEXT(" | ")).Contains(TEXT("asset_file")));
+				bAllPassed &= TestFalse(TEXT("the post-save failure keeps the committed package clean"),
+					Fixture.Package->IsDirty());
+				bAllPassed &= TestFalse(TEXT("the post-save failure leaves the committed file on disk"),
+					SameBytes(BaselineBytes, ReadBytes(Filename)));
+			}
+			const FString CleanupFilename = Fixture.Filename();
+			Fixture.Cleanup();
+			IFileManager::Get().Delete(*CleanupFilename, false, true, true);
+		}
+	}
+
+	return bAllPassed;
+}
+
+// CortexSandbox #113 (Task 2 Step 3): after a class-admitted retirement the same reviewed request
+// replays as an idempotent no-op, while a partially reintroduced identity is refused.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireAdditionalClassReplayTest,
+	"Cortex.Graph.Authoring.Migration.Retire.ReplaysClassAdmittedRetirementAndRefusesPartialReplay",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexGraphMigrationRetireAdditionalClassReplayTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexGraphMigrationRetireTest;
+	FFixture Fixture;
+	TestTrue(TEXT("retirement fixture with a cosmetic hook is created"),
+		Fixture.Build(TEXT("BP_RetireAdmittedReplay"), /*bRetainProducer=*/true));
+	if (!Fixture.Blueprint) { Fixture.Cleanup(); return false; }
+	FAdmittedNodeChain Chain;
+	TestTrue(TEXT("the page-shaped admitted chain is built"), Chain.Build(Fixture));
+	if (!Chain.IsComplete()) { Fixture.Cleanup(); return false; }
+	const FString AlphaGuid = Fixture.Alpha->NodeGuid.ToString();
+	const TArray<FString> Requested = Chain.Guids();
+	const FString LatentGuid = Chain.Latent->NodeGuid.ToString();
+
+	TSharedPtr<FJsonObject> Request;
+	TArray<FString> Approved;
+	FCortexCommandResult Error;
+	TestTrue(FString::Printf(TEXT("the replay request is prepared: %s"), *Error.ErrorMessage),
+		PrepareAdditionalRetirementRequest(Fixture, { AlphaGuid }, Requested,
+			TEXT("00000000-0000-0000-0000-000000114601"), Request, Approved, Error));
+	FCortexGraphPatchOutcome Outcome;
+	Error = FCortexCommandResult();
+	TestTrue(FString::Printf(TEXT("the reviewed class-admitted retirement applies: %s"), *Error.ErrorMessage),
+		FCortexGraphPatchOps::Execute(Fixture.Blueprint, Request, Outcome, Error));
+	TestEqual(TEXT("the replay baseline retirement reports applied"),
+		Outcome.ApplyStatus, FString(TEXT("applied")));
+
+	// The all-absent replay removes nothing and republishes the same canonical removal set.
+	FCortexGraphMigrationRetirePlan ReplayPlan;
+	bool bReused = false;
+	Error = FCortexCommandResult();
+	TestTrue(FString::Printf(TEXT("the all-absent replay is accepted: %s"), *Error.ErrorMessage),
+		PlanWithAdditionalNodes(Fixture, { AlphaGuid }, Requested, ReplayPlan, bReused, Error, true, Approved));
+	TestTrue(TEXT("the all-absent replay is reported as reused"), bReused && ReplayPlan.bReused);
+	TestFalse(TEXT("the reused plan is no longer awaiting approval"), ReplayPlan.bAwaitingApproval);
+	TestEqual(TEXT("the reused plan publishes the exact approved removable set"),
+		FString::Join(ReplayPlan.RemovableGuids, TEXT(",")), FString::Join(Approved, TEXT(",")));
+	TestEqual(TEXT("the reused plan echoes the requested additional identities"),
+		FString::Join(JsonStringArray(ReplayPlan.ToJson(), TEXT("additional_guids")), TEXT(",")),
+		FString::Join(CanonicalGuids(Requested), TEXT(",")));
+
+	// A partially reintroduced identity is refused instead of being retired twice.
+	UK2Node_CallFunction* Reintroduced = NewObject<UK2Node_CallFunction>(Fixture.Graph, NAME_None, RF_Transactional);
+	Reintroduced->NodeGuid = FGuid(LatentGuid);
+	Fixture.Graph->AddNode(Reintroduced, true, false);
+	FCortexGraphMigrationRetirePlan PartialPlan;
+	Error = FCortexCommandResult();
+	TestFalse(TEXT("a partially reintroduced additional identity is refused"),
+		PlanWithAdditionalNodes(Fixture, { AlphaGuid }, Requested, PartialPlan, bReused, Error, true, Approved));
+	TestEqual(TEXT("the partial replay refusal is INVALID_OPERATION"),
+		Error.ErrorCode, FString(CortexErrorCodes::InvalidOperation));
+	TestTrue(FString::Printf(TEXT("the partial replay refusal names the present and absent identities: %s"),
+		*Error.ErrorMessage), Error.ErrorMessage.Contains(TEXT("retirement replay is partial"))
+			&& Error.ErrorMessage.Contains(LatentGuid));
+
+	Fixture.Cleanup();
+	return true;
+}
+
 
 // CortexSandbox #113: the exception is decided per node by exact engine class and only for a class
 // whose removal is proven local. A bound subgraph, a class whose own state is not proven, and a
