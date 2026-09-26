@@ -392,8 +392,13 @@ FString CaptureNativeGraph(UEdGraph* Graph, const TSet<FGuid>* Filter = nullptr)
 	return FString::Join(Records, TEXT("\n"));
 }
 
-bool PrepareApprovedRequest(
+/**
+ * Two-stage reviewed retirement request for an arbitrary entry set: preview, echo the published
+ * removable set, then approve it. `OutApproved` is the approved set the reviewed preview published.
+ */
+bool PrepareRetirementRequest(
 	FFixture& Fixture,
+	const TArray<FString>& Entries,
 	const TCHAR* PatchId,
 	TSharedPtr<FJsonObject>& OutRequest,
 	TArray<FString>& OutApproved,
@@ -412,8 +417,7 @@ bool PrepareApprovedRequest(
 	OutRequest->SetBoolField(TEXT("compile"), bCompile);
 	OutRequest->SetBoolField(TEXT("save"), false);
 	OutRequest->SetBoolField(TEXT("allow_noop"), false);
-	TSharedPtr<FJsonObject> Migration = Fixture.Migration({
-		Fixture.Alpha->NodeGuid.ToString(), Fixture.Beta->NodeGuid.ToString() });
+	TSharedPtr<FJsonObject> Migration = Fixture.Migration(Entries);
 	OutRequest->SetObjectField(TEXT("migration"), Migration);
 
 	FCortexGraphPreparedPatch Preview;
@@ -438,6 +442,21 @@ bool PrepareApprovedRequest(
 	OutRequest->SetBoolField(TEXT("save"), bSave);
 	OutRequest->SetStringField(TEXT("expected_validation_hash"), Reviewed.ValidationHash);
 	return true;
+}
+
+/** The reviewed retirement request of the fixture's two legacy entries. */
+bool PrepareApprovedRequest(
+	FFixture& Fixture,
+	const TCHAR* PatchId,
+	TSharedPtr<FJsonObject>& OutRequest,
+	TArray<FString>& OutApproved,
+	FCortexCommandResult& OutError,
+	const bool bCompile = false,
+	const bool bSave = false)
+{
+	return PrepareRetirementRequest(Fixture,
+		{ Fixture.Alpha->NodeGuid.ToString(), Fixture.Beta->NodeGuid.ToString() },
+		PatchId, OutRequest, OutApproved, OutError, bCompile, bSave);
 }
 
 /** Canonical widget-tree signature, so preview purity covers the preserved designer tree. */
@@ -1318,6 +1337,45 @@ bool FCortexGraphMigrationRetireLateRetainedProducerTest::RunTest(const FString&
 	TestFalse(TEXT("the reviewed retirement refuses instead of severing the retained execution link"),
 		PrepareApprovedRequest(Fixture, TEXT("patch-retire-late-retained-producer"), Request, Approved, ReviewError));
 	TestTrue(TEXT("the reviewed refusal is diagnostic"), !ReviewError.ErrorMessage.IsEmpty());
+
+	// The independent entry is then retired for real: a separately reviewed Beta-only request agrees on
+	// exactly its own removable pair, applies it, and the retained producer, its execution consumer and
+	// the execution link between them have to survive the applied removal.
+	const FString BetaBodyGuidText = Fixture.BetaBody->NodeGuid.ToString();
+	TSharedPtr<FJsonObject> IndependentRequest;
+	TArray<FString> IndependentApproved;
+	FCortexCommandResult IndependentError;
+	TestTrue(FString::Printf(TEXT("the independent reviewed request is prepared: %s"), *IndependentError.ErrorMessage),
+		PrepareRetirementRequest(Fixture, { BetaGuidText }, TEXT("patch-retire-independent-entry"),
+			IndependentRequest, IndependentApproved, IndependentError));
+	TestTrue(TEXT("the independent request approves exactly its own removable pair"),
+		IndependentApproved.Contains(BetaGuidText) && IndependentApproved.Contains(BetaBodyGuidText)
+			&& !IndependentApproved.Contains(ProducerGuidText) && !IndependentApproved.Contains(ConsumerGuidText));
+
+	FCortexGraphPatchOutcome Outcome;
+	TestTrue(FString::Printf(TEXT("the reviewed independent retirement applies: %s [%s]"),
+		*IndependentError.ErrorMessage, *FString::Join(Outcome.Diagnostics, TEXT("; "))),
+		FCortexGraphPatchOps::Execute(Fixture.Blueprint, IndependentRequest, Outcome, IndependentError));
+	TestEqual(TEXT("the independent retirement readback matches"), Outcome.ReadbackStatus, FString(TEXT("matched")));
+	TestNull(TEXT("the independent entry is absent after the applied retirement"),
+		FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Fixture.BetaGuid));
+	TestNull(TEXT("the independent entry body is absent after the applied retirement"),
+		FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Fixture.BetaBodyGuid));
+	UEdGraphNode* SurvivorProducer = FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Fixture.RetainedProducerGuid);
+	UEdGraphNode* SurvivorConsumer = FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Fixture.RetainedProducerConsumerGuid);
+	TestNotNull(TEXT("the retained producer survives the independent retirement"), SurvivorProducer);
+	TestNotNull(TEXT("the retained execution consumer survives the independent retirement"), SurvivorConsumer);
+	if (SurvivorProducer && SurvivorConsumer)
+	{
+		UEdGraphPin* ProducerThen = SurvivorProducer->FindPin(TEXT("then"));
+		UEdGraphPin* ConsumerExecute = SurvivorConsumer->FindPin(TEXT("execute"));
+		TestTrue(TEXT("the retained producer -> consumer execution link survives the applied retirement"),
+			ProducerThen && ConsumerExecute && ProducerThen->LinkedTo.Contains(ConsumerExecute));
+		UEdGraphPin* ProducerReturn = SurvivorProducer->FindPin(TEXT("ReturnValue"));
+		UEdGraphPin* RetainedBodyInput = Fixture.RetainedBody->FindPin(TEXT("InString"));
+		TestTrue(TEXT("the retained producer still feeds the retained cosmetic body"),
+			ProducerReturn && RetainedBodyInput && ProducerReturn->LinkedTo.Contains(RetainedBodyInput));
+	}
 
 	Fixture.Cleanup();
 	return true;
