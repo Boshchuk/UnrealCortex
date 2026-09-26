@@ -2330,6 +2330,49 @@ struct FGraphPatchJournal
 	TArray<UEdGraph*> AddedGraphs;
 	TArray<FGuid> AddedNodeGuids;
 	/**
+	 * Per-class node state that a removal destroys *before* the node is journaled, captured before the
+	 * operation mutates anything.
+	 *
+	 * The engine clears this state as a side effect of breaking the node's links
+	 * (`UK2Node_CreateDelegate` drops its selected function once its delegate output is unlinked), so a
+	 * capture taken at removal time - or after an earlier removal in the same batch broke that link -
+	 * would record a degraded node. Only journaled removals are restored, so this capture is consulted
+	 * when the node is really removed and is otherwise discarded.
+	 */
+	struct FPreRemovalNodeState
+	{
+		FGuid NodeGuid;
+		FName DelegateFunctionName = NAME_None;
+	};
+	TArray<FPreRemovalNodeState> PreRemovalState;
+
+	/** Captures the volatile per-class state of one node before the operation mutates anything. */
+	void CapturePreRemovalState(UEdGraphNode* Node)
+	{
+		if (!Node || !Node->NodeGuid.IsValid()) return;
+		for (const FPreRemovalNodeState& Existing : PreRemovalState)
+		{
+			if (Existing.NodeGuid == Node->NodeGuid) return;
+		}
+		FPreRemovalNodeState State;
+		State.NodeGuid = Node->NodeGuid;
+		if (const UK2Node_CreateDelegate* const CreateDelegate = Cast<UK2Node_CreateDelegate>(Node))
+		{
+			State.DelegateFunctionName = CreateDelegate->GetFunctionName();
+		}
+		PreRemovalState.Add(MoveTemp(State));
+	}
+
+	/** The pre-removal capture of one node, or null when nothing was captured for it. */
+	const FPreRemovalNodeState* FindPreRemovalState(const FGuid& NodeGuid) const
+	{
+		for (const FPreRemovalNodeState& Existing : PreRemovalState)
+		{
+			if (Existing.NodeGuid == NodeGuid) return &Existing;
+		}
+		return nullptr;
+	}
+	/**
 	 * Created nodes of a transfer, addressed by graph as well as identity. A move registers the
 	 * destination nodes before it deletes the source nodes, so for that window one identity is owned
 	 * by two graphs and recovery must resolve the created node inside its own graph.
@@ -2631,7 +2674,12 @@ void JournalNodeRemoved(UEdGraphNode* Node, FGraphPatchJournal& Journal)
 	}
 	if (const UK2Node_CreateDelegate* const CreateDelegate = Cast<UK2Node_CreateDelegate>(Node))
 	{
-		Entry.DelegateFunctionName = CreateDelegate->GetFunctionName();
+		// An earlier removal in the same batch may already have cleared this node's selection (breaking the
+		// delegate link makes the engine clear it), so the pre-removal capture wins over the live node.
+		const FGraphPatchJournal::FPreRemovalNodeState* const Captured =
+			Journal.FindPreRemovalState(Node->NodeGuid);
+		Entry.DelegateFunctionName = Captured
+			? Captured->DelegateFunctionName : CreateDelegate->GetFunctionName();
 	}
 	Entry.Node = Node;
 	Entry.Snapshot = MakeNodePinSnapshot(Node);
@@ -4421,14 +4469,14 @@ bool ApplyPrepared(
 			return Fail(TEXT("Test fault injected after destination wiring"));
 		}
 
-		// Journaled as a batch before the first removal: a removal breaks the links of the nodes it reaches,
-		// so every source node is captured while the source graph is still intact.
+		// Captured before the first removal, journaled only when the node is really removed.
 		for (UEdGraphNode* SourceNode : SourceNodes)
 		{
-			JournalNodeRemoved(SourceNode, Journal);
+			Journal.CapturePreRemovalState(SourceNode);
 		}
 		for (UEdGraphNode* SourceNode : SourceNodes)
 		{
+			JournalNodeRemoved(SourceNode, Journal);
 			SourceGraph->Modify();
 			if (!SourceGraph->RemoveNode(SourceNode))
 			{
@@ -4474,10 +4522,8 @@ bool ApplyPrepared(
 		// recovery, so a restored graph is proven instead of assumed.
 		Journal.PreservationContracts = { PrunePlan.Preservation };
 
-		// Every approved island node is journaled before the first removal: a removal breaks the links of
-		// the nodes it reaches and some node classes clear their own state when a link goes away, so a
-		// capture taken mid-removal would record a degraded node. Idempotent per GUID, so the per-node
-		// call in the removal loop stays a no-op.
+		// As in the retirement path: capture the volatile state of every approved identity before the first
+		// removal, but journal an entry only when the node is really removed.
 		for (const FString& GuidText : PrunePlan.ApprovedGuids)
 		{
 			FGuid ApprovedGuid;
@@ -4488,7 +4534,7 @@ bool ApplyPrepared(
 			{
 				return Fail(FString::Printf(TEXT("the approved island node '%s' no longer resolves in the pruned graph"), *GuidText));
 			}
-			JournalNodeRemoved(ApprovedNode, Journal);
+			Journal.CapturePreRemovalState(ApprovedNode);
 		}
 
 		for (const FString& GuidText : PrunePlan.ApprovedGuids)
@@ -4544,11 +4590,10 @@ bool ApplyPrepared(
 		Journal.Locators.SubgraphPath.Reset();
 		Journal.PreservationContracts = { RetirePlan.Preservation };
 
-		// Every approved node is journaled before the first mutation. A removal breaks the links of the
-		// nodes it reaches, and node classes such as the create-delegate node clear their own state when a
-		// link goes away, so a capture taken mid-removal would record a node that is already degraded and
-		// could never be restored exactly. The capture is idempotent per GUID, so the per-node call below
-		// stays a no-op for the nodes already captured here.
+		// The volatile per-class state of every approved identity is captured before the first mutation,
+		// because a removal breaks the links of the nodes it reaches and some node classes clear their own
+		// state when a link goes away. The capture is not a removal entry: `JournalNodeRemoved` records the
+		// removal immediately before it happens, so only nodes that were really removed are restored.
 		for (const FString& GuidText : RetirePlan.ApprovedGuids)
 		{
 			FGuid ApprovedGuid;
@@ -4560,7 +4605,7 @@ bool ApplyPrepared(
 				return Fail(FString::Printf(TEXT("the approved retirement node '%s' no longer resolves in the named graph"),
 					*GuidText));
 			}
-			JournalNodeRemoved(ApprovedNode, Journal);
+			Journal.CapturePreRemovalState(ApprovedNode);
 		}
 
 		for (int32 Index = 0; Index < RetirePlan.ApprovedGuids.Num(); ++Index)
@@ -4783,9 +4828,9 @@ bool ApplyPrepared(
 		if (Plan.bRemoveMember)
 		{
 			// The engine's self-only variable removal destroys the referencing nodes, so they are
-			// detached and journaled first and come back with the member on recovery. The whole reference
-			// set is resolved and captured before the first removal, because a removal breaks the links of
-			// the nodes it reaches.
+			// detached and journaled first and come back with the member on recovery. Their volatile state
+			// is captured before the first removal; the removal entry is recorded only when one really
+			// happens.
 			TArray<UEdGraphNode*> ReferenceNodes;
 			for (const FString& GuidText : Plan.MemberReferenceNodeGuids)
 			{
@@ -4800,10 +4845,11 @@ bool ApplyPrepared(
 			}
 			for (UEdGraphNode* ReferenceNode : ReferenceNodes)
 			{
-				JournalNodeRemoved(ReferenceNode, Journal);
+				Journal.CapturePreRemovalState(ReferenceNode);
 			}
 			for (UEdGraphNode* ReferenceNode : ReferenceNodes)
 			{
+				JournalNodeRemoved(ReferenceNode, Journal);
 				ReferenceNode->GetGraph()->RemoveNode(ReferenceNode);
 			}
 			Journal.Member.Name = FName(*Plan.MemberName);
