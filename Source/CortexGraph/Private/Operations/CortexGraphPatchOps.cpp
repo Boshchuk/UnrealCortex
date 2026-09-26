@@ -2463,6 +2463,14 @@ struct FGraphPatchJournal
 		FName DelegatePropertyName = NAME_None;
 		UClass* DelegateOwnerClass = nullptr;
 		bool bCallInEditor = false;
+		/**
+		 * `UK2Node_CreateDelegate`'s selected function/event. It has to be captured before the removal:
+		 * `FBlueprintEditorUtils::RemoveNode` breaks the node's links first, and the create node clears
+		 * its own selection as soon as its delegate output is unlinked
+		 * (`UK2Node_CreateDelegate::HandleAnyChangeWithoutNotifying`), so the journal's node object no
+		 * longer carries it when recovery re-registers the node.
+		 */
+		FName DelegateFunctionName = NAME_None;
 		UEdGraphNode* Node = nullptr;
 		FNodePinSnapshot Snapshot;
 	};
@@ -2621,6 +2629,10 @@ void JournalNodeRemoved(UEdGraphNode* Node, FGraphPatchJournal& Journal)
 		Entry.DelegatePropertyName = BoundEvent->DelegatePropertyName;
 		Entry.DelegateOwnerClass = BoundEvent->DelegateOwnerClass;
 	}
+	if (const UK2Node_CreateDelegate* const CreateDelegate = Cast<UK2Node_CreateDelegate>(Node))
+	{
+		Entry.DelegateFunctionName = CreateDelegate->GetFunctionName();
+	}
 	Entry.Node = Node;
 	Entry.Snapshot = MakeNodePinSnapshot(Node);
 	Journal.RemovedNodes.Add(MoveTemp(Entry));
@@ -2715,6 +2727,20 @@ bool RestoreRemovedNodes(UBlueprint* Blueprint, const FGraphPatchJournal& Journa
 			}
 		}
 		if (!RestoreNodePinState(Blueprint, Journal, Entry.Snapshot)) return false;
+		// The create node's selection is re-applied *after* its scope and delegate links are back, so the
+		// signature resolves and the engine's own node maintenance keeps the name instead of clearing it
+		// as it does for an unlinked create node. The restored name is compared, not assumed.
+		if (UK2Node_CreateDelegate* const CreateDelegate = Cast<UK2Node_CreateDelegate>(Node))
+		{
+			if (!Entry.DelegateFunctionName.IsNone())
+			{
+				CreateDelegate->SetFunction(Entry.DelegateFunctionName);
+			}
+			if (CreateDelegate->GetFunctionName() != Entry.DelegateFunctionName)
+			{
+				return false;
+			}
+		}
 		Graph->NotifyGraphChanged();
 	}
 	return true;

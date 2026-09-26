@@ -5094,6 +5094,18 @@ bool FCortexGraphMigrationRetireAdditionalClassRollbackTest::RunTest(const FStri
 			bAllPassed &= TestNotNull(FString::Printf(TEXT("%s restores approved GUID %s"), Faults[Index].Name, *GuidText),
 				FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Guid));
 		}
+		// The create node's own selection and scope are node state the authoring fingerprint cannot see:
+		// removal clears the selection while the delegate output is unlinked, so the rollback has to bring
+		// it back or a later compile reports a nameless create event.
+		bAllPassed &= TestTrue(FString::Printf(TEXT("%s restores the create node's selected function"),
+			Faults[Index].Name),
+			Chain.CreateDelegate && Chain.CreateDelegate->GetFunctionName() == FName(TEXT("SetFocus")));
+		bAllPassed &= TestNotNull(FString::Printf(TEXT("%s restores the create node's scope"),
+			Faults[Index].Name),
+			Chain.CreateDelegate ? Chain.CreateDelegate->GetScopeClass() : nullptr);
+		bAllPassed &= TestNotNull(FString::Printf(TEXT("%s restores the create node's delegate signature"),
+			Faults[Index].Name),
+			Chain.CreateDelegate ? Chain.CreateDelegate->GetDelegateSignature() : nullptr);
 		if (Faults[Index].bCompile)
 		{
 			// The compiled fault has to undo the generated class as well: one target compile happened
