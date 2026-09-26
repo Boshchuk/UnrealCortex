@@ -19,6 +19,8 @@
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/ComponentDelegateBinding.h"
 #include "K2Node.h"
+#include "K2Node_AssignDelegate.h"
+#include "K2Node_BaseAsyncTask.h"
 #include "K2Node_AddDelegate.h"
 #include "K2Node_CallDelegate.h"
 #include "K2Node_CallFunction.h"
@@ -5024,13 +5026,17 @@ bool PruneBlockedReason(UEdGraphNode* Node, FString& OutReason)
  * - `UK2Node_CallFunction` that is latent: the latent action lives in the running world's
  *   `FLatentActionManager`, and the asset-side trace is the compiled latent statement plus the
  *   generated class's debug UUID association, both rebuilt by the required compile.
- * - `UK2Node_CreateDelegate`, `UK2Node_AddDelegate`, `UK2Node_CallDelegate`: the delegate declaration
- *   lives on the owning class the node merely references, and none of them declares a dynamic binding
- *   class, so no generated binding object is registered for them.
+ * - `UK2Node_CreateDelegate`, `UK2Node_AddDelegate`, `UK2Node_CallDelegate` and
+ *   `UK2Node_AssignDelegate`: the delegate declaration lives on the owning class. AssignDelegate
+ *   creates a separate custom event only when placed; removing the node does not destroy the event.
+ *   The partition protects the event and any retained consumer independently.
+ * - UMGEditor `UK2Node_PlayAnimation` (only this exact class): it adds proxy factory configuration
+ *   to `UK2Node_BaseAsyncTask`, has no bound graph or node deletion override, and expands into
+ *   intermediate calls and bindings rebuilt by the required compile. Other async proxy classes
+ *   remain blocked.
  *
  * Bound-graph owners (`UK2Node_Composite`), timelines, bare tunnels and editable-pin terminators,
- * `UK2Node_DelegateSet`/`UK2Node_AssignDelegate` and the async task/latent action proxy classes stay
- * unadmitted: their own state is not proven local.
+ * `UK2Node_DelegateSet` and other async task/latent action proxy classes stay unadmitted.
  */
 bool AdditionalNodeClassReason(const UEdGraphNode* Node, FString& OutReason)
 {
@@ -5062,6 +5068,17 @@ bool AdditionalNodeClassReason(const UEdGraphNode* Node, FString& OutReason)
 		|| Class == UK2Node_CallDelegate::StaticClass())
 	{
 		OutReason = TEXT("delegate node whose declaration lives on its owning class: it owns no graph, overrides no DestroyNode and registers no generated binding object");
+		return true;
+	}
+	if (Class == UK2Node_AssignDelegate::StaticClass())
+	{
+		OutReason = TEXT("delegate assignment node whose separate placement-created event remains independently owned: removing the assignment breaks its own links but does not delete the event");
+		return true;
+	}
+	if (Class->GetPathName() == TEXT("/Script/UMGEditor.K2Node_PlayAnimation")
+		&& Node->IsA<UK2Node_BaseAsyncTask>())
+	{
+		OutReason = TEXT("exact widget animation proxy node with no bound graph or deletion override: its intermediate calls and bindings are rebuilt by the required compile");
 		return true;
 	}
 	return false;

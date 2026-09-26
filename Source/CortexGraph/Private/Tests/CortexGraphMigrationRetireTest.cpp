@@ -29,6 +29,7 @@
 #include "Engine/World.h"
 #include "K2Node_AddDelegate.h"
 #include "K2Node_AssignDelegate.h"
+#include "K2Node_BaseAsyncTask.h"
 #include "K2Node_Composite.h"
 #include "K2Node_CreateDelegate.h"
 #include "K2Node_FunctionEntry.h"
@@ -4779,9 +4780,46 @@ bool FCortexGraphMigrationRetireAdditionalClassAdmissionTest::RunTest(const FStr
 	UEdGraph* const MacroGraph = Chain.MacroGraph;
 	const FString MacroGraphBefore = CaptureNativeGraph(MacroGraph);
 	TestTrue(TEXT("the referenced macro graph is a real engine macro graph"), !MacroGraphBefore.IsEmpty());
+	// Detail-screen tail: AssignDelegate creates a separate custom event on placement; removing
+	// the assign node must leave that event alone. UMG's PlayAnimation is an exact async-proxy class.
+	FMulticastDelegateProperty* const Clicked =
+		FindFProperty<FMulticastDelegateProperty>(UButton::StaticClass(), TEXT("OnClicked"));
+	if (!Clicked) { Fixture.Cleanup(); return false; }
+	UK2Node_AssignDelegate* const Assign = NewObject<UK2Node_AssignDelegate>(Fixture.Graph, NAME_None, RF_Transactional);
+	Assign->SetFromProperty(Clicked, /*bSelfContext=*/false, UButton::StaticClass());
+	Assign->CreateNewGuid();
+	Assign->AllocateDefaultPins();
+	Fixture.Graph->AddNode(Assign, true, false);
+	Assign->PostPlacedNewNode();
+	UEdGraphPin* const AssignedDelegate = FindTypedPin(Assign, EGPD_Input, UEdGraphSchema_K2::PC_Delegate);
+	UK2Node_CustomEvent* const CompanionEvent = AssignedDelegate && AssignedDelegate->LinkedTo.Num() == 1
+		? Cast<UK2Node_CustomEvent>(AssignedDelegate->LinkedTo[0]->GetOwningNode()) : nullptr;
+	TestNotNull(TEXT("assign placement creates an independently owned companion event"), CompanionEvent);
+	UClass* const AnimationClass = LoadClass<UK2Node_BaseAsyncTask>(nullptr,
+		TEXT("/Script/UMGEditor.K2Node_PlayAnimation"));
+	TestNotNull(TEXT("UMG's exact PlayAnimation node class loads"), AnimationClass);
+	if (!CompanionEvent || !AnimationClass) { Fixture.Cleanup(); return false; }
+	UK2Node_BaseAsyncTask* const Animation =
+		NewObject<UK2Node_BaseAsyncTask>(Fixture.Graph, AnimationClass, NAME_None, RF_Transactional);
+	Animation->CreateNewGuid();
+	Animation->AllocateDefaultPins();
+	Fixture.Graph->AddNode(Animation, true, false);
+	FString TailFailure;
+	UEdGraphPin* const MacroExit = FindTypedPin(Macro, EGPD_Output, UEdGraphSchema_K2::PC_Exec);
+	UEdGraphPin* const AnimationEntry = FindTypedPin(Animation, EGPD_Input, UEdGraphSchema_K2::PC_Exec);
+	TestTrue(TEXT("detail-shaped assign and animation belong to the selected execution island"),
+		ConnectTypedPins(Fixture.Graph->GetSchema(), MacroExit, Assign->FindPin(TEXT("execute")),
+			TEXT("macro to assign"), TailFailure)
+		&& ConnectTypedPins(Fixture.Graph->GetSchema(), Assign->FindPin(TEXT("then")), AnimationEntry,
+			TEXT("assign to animation"), TailFailure));
+	TestTrue(FString::Printf(TEXT("the detail tail is connected: %s"), *TailFailure), TailFailure.IsEmpty());
+	TestTrue(TEXT("animation node owns no bound graph"), Animation->GetSubGraphs().IsEmpty());
+	TestTrue(TEXT("assign node owns no bound graph"), Assign->GetSubGraphs().IsEmpty());
+	const FGuid CompanionGuid = CompanionEvent->NodeGuid;
 
 	const TArray<FString> Requested = { Latent->NodeGuid.ToString(), CreateDelegate->NodeGuid.ToString(),
-		AddDelegate->NodeGuid.ToString(), Macro->NodeGuid.ToString() };
+		AddDelegate->NodeGuid.ToString(), Macro->NodeGuid.ToString(), Assign->NodeGuid.ToString(),
+		Animation->NodeGuid.ToString() };
 	FCortexGraphMigrationRetirePlan PlanValue;
 	bool bReused = false;
 	FCortexCommandResult Error;
@@ -4791,7 +4829,9 @@ bool FCortexGraphMigrationRetireAdditionalClassAdmissionTest::RunTest(const FStr
 		PlanValue.RemovableGuids.Contains(Latent->NodeGuid.ToString())
 			&& PlanValue.RemovableGuids.Contains(CreateDelegate->NodeGuid.ToString())
 			&& PlanValue.RemovableGuids.Contains(AddDelegate->NodeGuid.ToString())
-			&& PlanValue.RemovableGuids.Contains(Macro->NodeGuid.ToString()));
+			&& PlanValue.RemovableGuids.Contains(Macro->NodeGuid.ToString())
+			&& PlanValue.RemovableGuids.Contains(Assign->NodeGuid.ToString())
+			&& PlanValue.RemovableGuids.Contains(Animation->NodeGuid.ToString()));
 	TestTrue(TEXT("the retained cosmetic hook stays out of the removal set"),
 		!PlanValue.RemovableGuids.Contains(Fixture.RetainedGuid.ToString())
 			&& !PlanValue.RemovableGuids.Contains(Fixture.RetainedBodyGuid.ToString()));
@@ -4838,6 +4878,10 @@ bool FCortexGraphMigrationRetireAdditionalClassAdmissionTest::RunTest(const FStr
 		AdmittedClassOf(AddDelegate->NodeGuid.ToString()), UK2Node_AddDelegate::StaticClass()->GetPathName());
 	TestEqual(TEXT("the macro instance is admitted as its exact engine class"),
 		AdmittedClassOf(Macro->NodeGuid.ToString()), UK2Node_MacroInstance::StaticClass()->GetPathName());
+	TestEqual(TEXT("the assign node is admitted as its exact engine class"),
+		AdmittedClassOf(Assign->NodeGuid.ToString()), UK2Node_AssignDelegate::StaticClass()->GetPathName());
+	TestEqual(TEXT("the widget animation node is admitted as its exact editor class"),
+		AdmittedClassOf(Animation->NodeGuid.ToString()), AnimationClass->GetPathName());
 	for (const FString& Guid : Requested)
 	{
 		TestTrue(FString::Printf(TEXT("the admitted additional node %s publishes its admitting proof"), *Guid),
@@ -4872,11 +4916,13 @@ bool FCortexGraphMigrationRetireAdditionalClassAdmissionTest::RunTest(const FStr
 	TestTrue(FString::Printf(TEXT("the two-stage class-admission request is prepared: %s"), *Error.ErrorMessage),
 		PrepareAdditionalRetirementRequest(Fixture, { AlphaGuid }, Requested,
 			TEXT("00000000-0000-0000-0000-000000114201"), Request, Approved, Error, /*bCompile=*/false));
-	TestTrue(TEXT("the reviewed approval covers the latent call and the delegate pair"),
+	TestTrue(TEXT("the reviewed approval covers the latent, delegate, macro and animation nodes"),
 		Approved.Contains(Latent->NodeGuid.ToString())
 			&& Approved.Contains(CreateDelegate->NodeGuid.ToString())
 			&& Approved.Contains(AddDelegate->NodeGuid.ToString())
-			&& Approved.Contains(Macro->NodeGuid.ToString()));
+			&& Approved.Contains(Macro->NodeGuid.ToString())
+			&& Approved.Contains(Assign->NodeGuid.ToString())
+			&& Approved.Contains(Animation->NodeGuid.ToString()));
 	FCortexGraphPatchOutcome Outcome;
 	Error = FCortexCommandResult();
 	TestTrue(FString::Printf(TEXT("the reviewed class-admitted retirement applies: %s"), *Error.ErrorMessage),
@@ -4903,6 +4949,8 @@ bool FCortexGraphMigrationRetireAdditionalClassAdmissionTest::RunTest(const FStr
 		Fixture.Retained->FindPin(TEXT("then"))->LinkedTo.Contains(Fixture.RetainedBody->FindPin(TEXT("execute"))));
 	TestTrue(TEXT("the referenced macro graph is byte-identical after the instance removal"),
 		CaptureNativeGraph(MacroGraph) == MacroGraphBefore);
+	TestNotNull(TEXT("removing the assign node preserves its separate custom event"),
+		FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, CompanionGuid));
 
 	Fixture.Cleanup();
 	return true;
@@ -5424,9 +5472,8 @@ bool FCortexGraphMigrationRetireAdditionalClassReplayTest::RunTest(const FString
 }
 
 
-// CortexSandbox #113: the exception is decided per node by exact engine class and only for a class
-// whose removal is proven local. A bound subgraph, a class whose own state is not proven, and a
-// requested node the cut cannot remove all keep their refusal.
+// CortexSandbox #113: class-specific admission never lifts structural ownership blocks. A bound
+// subgraph, a bare tunnel and a requested node the cut cannot remove all keep their refusal.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireAdditionalUnadmittedClassTest,
 	"Cortex.Graph.Authoring.Migration.Retire.RefusesUnadmittedAdditionalNodeClasses",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -5452,22 +5499,6 @@ bool FCortexGraphMigrationRetireAdditionalUnadmittedClassTest::RunTest(const FSt
 	Tunnel->CreateNewGuid();
 	Tunnel->AllocateDefaultPins();
 	Fixture.Graph->AddNode(Tunnel, true, false);
-
-	// A delegate node whose own state is not proven stays unadmitted even though it derives from an
-	// admitted class: the exception is exact-class, never a base-class blanket.
-	FMulticastDelegateProperty* ClickedDelegate =
-		FindFProperty<FMulticastDelegateProperty>(UButton::StaticClass(), TEXT("OnClicked"));
-	UK2Node_AssignDelegate* AssignDelegate =
-		NewObject<UK2Node_AssignDelegate>(Fixture.Graph, NAME_None, RF_Transactional);
-	if (ClickedDelegate)
-	{
-		AssignDelegate->SetFromProperty(ClickedDelegate, /*bSelfContext=*/false, UButton::StaticClass());
-	}
-	AssignDelegate->CreateNewGuid();
-	AssignDelegate->AllocateDefaultPins();
-	Fixture.Graph->AddNode(AssignDelegate, true, false);
-	TestTrue(TEXT("the assign-delegate node derives from the admitted add-delegate class"),
-		AssignDelegate->IsA<UK2Node_AddDelegate>() && AssignDelegate->GetClass() != UK2Node_AddDelegate::StaticClass());
 
 	auto ExpectRefusedNode = [&](const TCHAR* Label, UEdGraphNode* Node, const TArray<FString>& Fragments)
 	{
@@ -5506,9 +5537,6 @@ bool FCortexGraphMigrationRetireAdditionalUnadmittedClassTest::RunTest(const FSt
 		{ TEXT("not admitted"), TEXT("bound subgraph") });
 	ExpectRefusedNode(TEXT("a bare tunnel whose pins belong to its twin"), Tunnel,
 		{ TEXT("not admitted"), TEXT("tunnel") });
-	ExpectRefusedNode(TEXT("an assign-delegate node derived from an admitted class"), AssignDelegate,
-		{ TEXT("not admitted"), TEXT("delegate") });
-
 	// A requested node the cut cannot remove refuses with the partition reason instead of being
 	// silently dropped. This mirrors the page's shared cast: `OldPathProducer` sits in the island only
 	// as a data producer of the selected body, while its execution input comes from the retained
