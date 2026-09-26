@@ -1322,6 +1322,14 @@ struct FAdmittedNodeChain
 	 * state of the fixture as well as its evidence.
 	 */
 	bool bMacroDataInputFed = false;
+	/** Name of the macro graph the fixture instantiated, so a fallback is never mistaken for the page's. */
+	FString MacroGraphName;
+	/**
+	 * True only when the instantiated macro graph really is the engine's `IsValid` macro the page holds.
+	 * The execution-capable fallback keeps the chain wireable but is deliberately not proof of the
+	 * observed node, so the page-fidelity tests assert this flag.
+	 */
+	bool bMacroGraphIsIsValid = false;
 
 	bool IsComplete() const
 	{
@@ -1345,6 +1353,8 @@ struct FAdmittedNodeChain
 	{
 		Failure.Reset();
 		bMacroDataInputFed = false;
+		MacroGraphName.Reset();
+		bMacroGraphIsIsValid = false;
 		if (!Fixture.Graph) { Failure = TEXT("fixture graph is missing"); return false; }
 		const UEdGraphSchema* const Schema = Fixture.Graph->GetSchema();
 		if (!Schema) { Failure = TEXT("fixture graph has no schema"); return false; }
@@ -1435,9 +1445,11 @@ struct FAdmittedNodeChain
 			TArray<FString> Names;
 			for (const UEdGraph* Candidate : StandardGraphs) if (Candidate) Names.Add(Candidate->GetName());
 			Failure = FString::Printf(TEXT("macro: no IsValid graph and no execution-capable macro graph among [%s]"),
-				FString::Join(Names, TEXT(", ")));
+				*FString::Join(Names, TEXT(", ")));
 			return false;
 		}
+		MacroGraphName = MacroGraph->GetName();
+		bMacroGraphIsIsValid = MacroGraphName == TEXT("IsValid") || MacroGraphName.Contains(TEXT("IsValid"));
 
 		Macro = NewObject<UK2Node_MacroInstance>(Fixture.Graph, NAME_None, RF_Transactional);
 		Macro->SetMacroGraph(MacroGraph);
@@ -4680,6 +4692,9 @@ bool FCortexGraphMigrationRetireAdditionalClassAdmissionTest::RunTest(const FStr
 	TestNotNull(TEXT("the macro instance exposes an execution input"),
 		FindTypedPin(Chain.Macro, EGPD_Input, UEdGraphSchema_K2::PC_Exec));
 	TestTrue(TEXT("the macro instance owns no bound subgraph"), Chain.Macro->GetSubGraphs().IsEmpty());
+	TestTrue(FString::Printf(
+		TEXT("the fixture macro instance is the engine IsValid macro graph the page holds (chosen: %s)"),
+		*Chain.MacroGraphName), Chain.bMacroGraphIsIsValid);
 	TestTrue(TEXT("the macro instance belongs to the resolved engine macro graph"),
 		Chain.Macro->GetMacroGraph() == Chain.MacroGraph);
 	TestTrue(TEXT("the macro instance's data input is fed by the real object source, or the macro declares none"),
@@ -4845,6 +4860,9 @@ bool FCortexGraphMigrationRetireAdditionalCompiledApplyTest::RunTest(const FStri
 	if (!Chain.IsComplete()) { Fixture.Cleanup(); return false; }
 	const FString AlphaGuid = Fixture.Alpha->NodeGuid.ToString();
 	const TArray<FString> Requested = Chain.Guids();
+	TestTrue(FString::Printf(
+		TEXT("the compiled fixture uses the engine IsValid macro graph the page holds (chosen: %s)"),
+		*Chain.MacroGraphName), Chain.bMacroGraphIsIsValid);
 
 	// Baseline compile: the generated class implements both override events, so the retirement has a
 	// real compiled artefact to clear.
