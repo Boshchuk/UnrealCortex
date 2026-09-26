@@ -5843,7 +5843,7 @@ struct FPartitionBoundaryRecords
 };
 
 /** The graph-authoring hash of the live fixture, so purity assertions compare the real asset state. */
-FString LiveRetireHash(const UBlueprint* Blueprint)
+FString LiveRetireHash(UBlueprint* Blueprint)
 {
 	const TSharedPtr<FJsonObject> Fingerprint = FCortexGraphPatchState::ComputeFingerprint(Blueprint);
 	return Fingerprint.IsValid() ? Fingerprint->GetStringField(TEXT("graph_authoring_hash")) : FString();
