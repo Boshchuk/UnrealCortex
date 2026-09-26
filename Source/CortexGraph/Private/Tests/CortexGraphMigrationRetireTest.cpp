@@ -5553,6 +5553,111 @@ bool FCortexGraphMigrationRetireAdditionalUnadmittedClassTest::RunTest(const FSt
 	return true;
 }
 
+// CortexSandbox #113: an approved consumer whose create-delegate producer stays outside the removal set
+// is the one boundary where a removal can cut a retained node's delegate link and clear its selection.
+// Retirement refuses that boundary before mutating anything - the producer is either a blocked class or a
+// shared producer - so a retained node is never left in a state the compiler cannot resolve.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireRetainedDelegateProducerTest,
+	"Cortex.Graph.Authoring.Migration.Retire.RefusesApprovedConsumerOfRetainedDelegateProducer",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexGraphMigrationRetireRetainedDelegateProducerTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexGraphMigrationRetireTest;
+	FFixture Fixture;
+	TestTrue(TEXT("retirement fixture with a cosmetic hook is created"),
+		Fixture.Build(TEXT("BP_RetireRetainedDelegateProducer"), /*bRetainProducer=*/true));
+	if (!Fixture.Blueprint) { Fixture.Cleanup(); return false; }
+	const UEdGraphSchema* const Schema = Fixture.Graph->GetSchema();
+	FAdmittedNodeChain Chain;
+	const bool bChainBuilt = Chain.Build(Fixture);
+	TestTrue(FString::Printf(TEXT("the page-shaped admitted chain is built: %s"), *Chain.Failure), bChainBuilt);
+	if (!Chain.IsComplete() || !Schema) { EndFixtureCase(Fixture); return false; }
+
+	// A second consumer of the same create node, driven by the retained cosmetic hook: the producer now has
+	// an approved consumer inside the selected island and a retained one outside it.
+	FMulticastDelegateProperty* const ClickedDelegate =
+		FindFProperty<FMulticastDelegateProperty>(UButton::StaticClass(), TEXT("OnClicked"));
+	UK2Node_AddDelegate* const RetainedConsumer =
+		NewObject<UK2Node_AddDelegate>(Fixture.Graph, NAME_None, RF_Transactional);
+	if (ClickedDelegate)
+	{
+		RetainedConsumer->SetFromProperty(ClickedDelegate, /*bSelfContext=*/false, UButton::StaticClass());
+	}
+	RetainedConsumer->CreateNewGuid();
+	RetainedConsumer->AllocateDefaultPins();
+	Fixture.Graph->AddNode(RetainedConsumer, true, false);
+	UEdGraphPin* const CreatedDelegateOut = FindTypedPin(Chain.CreateDelegate, EGPD_Output, UEdGraphSchema_K2::PC_Delegate);
+	UEdGraphPin* const RetainedDelegateIn = FindTypedPin(RetainedConsumer, EGPD_Input, UEdGraphSchema_K2::PC_Delegate);
+	TestNotNull(TEXT("the retained consumer exposes a delegate input"), RetainedDelegateIn);
+	TestTrue(TEXT("the retained consumer is driven by the retained cosmetic body"),
+		Fixture.LinkPins(Fixture.RetainedBody, TEXT("then"), RetainedConsumer, TEXT("execute")));
+	TestTrue(TEXT("both consumers share the one create node"),
+		CreatedDelegateOut && RetainedDelegateIn
+			&& Schema->TryCreateConnection(CreatedDelegateOut, RetainedDelegateIn));
+
+	const FString AlphaGuid = Fixture.Alpha->NodeGuid.ToString();
+	const FString CreateDelegateGuid = Chain.CreateDelegate->NodeGuid.ToString();
+	const FString AddDelegateGuid = Chain.AddDelegate->NodeGuid.ToString();
+	const FString RetainedConsumerGuid = RetainedConsumer->NodeGuid.ToString();
+	const FString HashBefore = FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)
+		->GetStringField(TEXT("graph_authoring_hash"));
+	const int32 NodesBefore = Fixture.Graph->Nodes.Num();
+	const bool bDirtyBefore = Fixture.Package->IsDirty();
+	const FString GraphBefore = CaptureNativeGraph(Fixture.Graph);
+
+	// Case A: the producer is not requested, so the default class rule blocks it and the reviewed
+	// retirement refuses instead of cutting its link.
+	FCortexGraphMigrationRetirePlan UnlistedPlan;
+	bool bReused = false;
+	FCortexCommandResult Error;
+	const TArray<FString> UnlistedRequest = { Chain.Latent->NodeGuid.ToString(), AddDelegateGuid,
+		Chain.Macro->NodeGuid.ToString() };
+	TestTrue(FString::Printf(TEXT("the unlisted-producer preview succeeds: %s"), *Error.ErrorMessage),
+		PlanWithAdditionalNodes(Fixture, { AlphaGuid }, UnlistedRequest, UnlistedPlan, bReused, Error));
+	TestTrue(TEXT("an unlisted create node in the island is published as blocked"),
+		UnlistedPlan.Blocked.ContainsByPredicate(
+			[&](const FCortexGraphPruneNode& Node) { return Node.NodeGuid == CreateDelegateGuid; }));
+	const TArray<FString> UnlistedRemovable = UnlistedPlan.RemovableGuids;
+	Error = FCortexCommandResult();
+	TestFalse(TEXT("the reviewed retirement refuses the blocked retained producer"),
+		PlanWithAdditionalNodes(Fixture, { AlphaGuid }, UnlistedRequest, UnlistedPlan, bReused, Error,
+			true, UnlistedRemovable));
+	TestEqual(TEXT("the blocked-producer refusal is INVALID_OPERATION"),
+		Error.ErrorCode, FString(CortexErrorCodes::InvalidOperation));
+
+	// Case B: the producer is requested, so class admission applies, but the retained consumer keeps it out
+	// of the removable set and the request is refused with the cut reason naming that consumer.
+	FCortexGraphMigrationRetirePlan ListedPlan;
+	Error = FCortexCommandResult();
+	TestFalse(TEXT("a requested producer a retained consumer depends on is refused"),
+		PlanWithAdditionalNodes(Fixture, { AlphaGuid }, Chain.Guids(), ListedPlan, bReused, Error));
+	TestEqual(TEXT("the retained-producer refusal is INVALID_OPERATION"),
+		Error.ErrorCode, FString(CortexErrorCodes::InvalidOperation));
+	TestTrue(FString::Printf(TEXT("the refusal names the producer and its retained consumer: %s"), *Error.ErrorMessage),
+		Error.ErrorMessage.Contains(CreateDelegateGuid) && Error.ErrorMessage.Contains(TEXT("cannot be removed"))
+			&& Error.ErrorMessage.Contains(RetainedConsumerGuid));
+
+	// Neither refusal touched the graph: the retained producer keeps its selection, its links and the exact
+	// authoring state, so no runtime or compile state was silently degraded.
+	TestEqual(TEXT("the refused boundary leaves the graph hash unchanged"),
+		FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)->GetStringField(TEXT("graph_authoring_hash")),
+		HashBefore);
+	TestEqual(TEXT("the refused boundary leaves the node count unchanged"), Fixture.Graph->Nodes.Num(), NodesBefore);
+	TestEqual(TEXT("the refused boundary leaves the dirty state unchanged"),
+		Fixture.Package->IsDirty(), bDirtyBefore);
+	TestEqual(TEXT("the refused boundary leaves the exact graph unchanged"), CaptureNativeGraph(Fixture.Graph), GraphBefore);
+	TestTrue(TEXT("the retained producer keeps its selected function"),
+		Chain.CreateDelegate->GetFunctionName() == FName(TEXT("SetFocus")));
+	TestTrue(TEXT("the retained producer keeps resolving its scope and signature"),
+		CreatedDelegateOut && CreatedDelegateOut->LinkedTo.Num() == 2
+			&& Chain.CreateDelegate->GetScopeClass() && Chain.CreateDelegate->GetDelegateSignature());
+
+	EndFixtureCase(Fixture);
+	return true;
+}
+
 // CortexSandbox #113: naming a node in the request never overrides the ownership cut. A reroute knot a
 // retained consumer still depends on must stay out of the removable set and the request must refuse.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireAdditionalRetainedConsumerTest,

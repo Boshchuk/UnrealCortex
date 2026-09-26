@@ -2343,11 +2343,34 @@ struct FGraphPatchJournal
 	{
 		FGuid NodeGuid;
 		FName DelegateFunctionName = NAME_None;
+		/** True when the create node's delegate output was linked before the operation touched anything. */
+		bool bHadDelegateLink = false;
 	};
 	TArray<FPreRemovalNodeState> PreRemovalState;
 
-	/** Captures the volatile per-class state of one node before the operation mutates anything. */
+	/**
+	 * Captures the volatile per-class state of one node and of every adjacent create-delegate producer
+	 * whose delegate link a removal of this node would cut. A retained producer that keeps another link is
+	 * repaired, and one that only had this link is refused after the removal, so the capture has to cover
+	 * both the removal set and the producers pointing at it.
+	 */
 	void CapturePreRemovalState(UEdGraphNode* Node)
+	{
+		CaptureSingleNodeState(Node);
+		if (!Node) return;
+		for (const UEdGraphPin* Pin : Node->Pins)
+		{
+			if (!Pin || Pin->Direction != EGPD_Input) continue;
+			for (const UEdGraphPin* LinkedPin : Pin->LinkedTo)
+			{
+				UEdGraphNode* const Producer = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
+				if (Producer && Cast<UK2Node_CreateDelegate>(Producer)) CaptureSingleNodeState(Producer);
+			}
+		}
+	}
+
+	/** Captures the volatile per-class state of one node, once per identity. */
+	void CaptureSingleNodeState(UEdGraphNode* Node)
 	{
 		if (!Node || !Node->NodeGuid.IsValid()) return;
 		for (const FPreRemovalNodeState& Existing : PreRemovalState)
@@ -2359,6 +2382,8 @@ struct FGraphPatchJournal
 		if (const UK2Node_CreateDelegate* const CreateDelegate = Cast<UK2Node_CreateDelegate>(Node))
 		{
 			State.DelegateFunctionName = CreateDelegate->GetFunctionName();
+			const UEdGraphPin* const DelegateOut = CreateDelegate->GetDelegateOutPin();
+			State.bHadDelegateLink = DelegateOut && DelegateOut->LinkedTo.Num() > 0;
 		}
 		PreRemovalState.Add(MoveTemp(State));
 	}
@@ -2752,6 +2777,41 @@ bool RestoreRemovedNodes(UBlueprint* Blueprint, const FGraphPatchJournal& Journa
 		}
 		if (!RestoreNodePinState(Blueprint, Journal, Entry.Snapshot)) return false;
 		Graph->NotifyGraphChanged();
+	}
+	return true;
+}
+
+/**
+ * Re-applies the captured pre-removal state after a completed removal batch or after a rollback, and
+ * proves the invariant it exists for: a create node that had a delegate link before the operation must
+ * still have one unless the operation removed it, because a create node without a delegate link cannot
+ * resolve a signature and the compiler reports a nameless create event. `bRefuseUnlinkedProducer` is set
+ * on the success path, where refusing is correct; on the rollback path the links are restored, so only
+ * the repaired selection is verified there.
+ */
+bool ReapplyPreRemovalState(
+	UBlueprint* Blueprint,
+	const FGraphPatchJournal& Journal,
+	const bool bRefuseUnlinkedProducer)
+{
+	for (const FGraphPatchJournal::FPreRemovalNodeState& State : Journal.PreRemovalState)
+	{
+		UEdGraphNode* Node = nullptr;
+		FindNodeByGuid(Blueprint, State.NodeGuid, Node);
+		// A captured node the operation itself removed is expected to be gone; it is restored by the
+		// journal on a rollback and simply absent after a success.
+		if (!Node) continue;
+		UK2Node_CreateDelegate* const CreateDelegate = Cast<UK2Node_CreateDelegate>(Node);
+		if (!CreateDelegate) continue;
+		if (!State.DelegateFunctionName.IsNone())
+		{
+			CreateDelegate->SetFunction(State.DelegateFunctionName);
+		}
+		if (CreateDelegate->GetFunctionName() != State.DelegateFunctionName) return false;
+		const UEdGraphPin* const DelegateOut = CreateDelegate->GetDelegateOutPin();
+		const bool bHasLink = DelegateOut && DelegateOut->LinkedTo.Num() > 0;
+		if (State.bHadDelegateLink && !bHasLink && bRefuseUnlinkedProducer) return false;
+		if (bHasLink && (!CreateDelegate->GetScopeClass() || !CreateDelegate->GetDelegateSignature())) return false;
 	}
 	return true;
 }
@@ -3178,30 +3238,10 @@ bool RestoreJournal(UBlueprint* Blueprint, FGraphPatchJournal& Journal)
 
 	// The rollback invariant for the state that link churn clears: a removal breaks the delegate links of
 	// the nodes it reaches, and the engine's own node maintenance then clears a create node's selection -
-	// including on candidates that were never removed themselves, whose links were only restored here. Once
-	// every node, pin, link and added graph is back (or gone), the pre-removal capture is re-applied to
-	// every captured candidate, whether it was removed or stayed resident. Only captured candidates are
-	// touched, the restored selection is compared rather than assumed, and a candidate that is missing
-	// after the rollback refuses the recovery.
-	for (const FGraphPatchJournal::FPreRemovalNodeState& State : Journal.PreRemovalState)
-	{
-		if (State.DelegateFunctionName.IsNone()) continue;
-		UEdGraphNode* Node = nullptr;
-		FindNodeByGuid(Blueprint, State.NodeGuid, Node);
-		if (!Node) return false;
-		UK2Node_CreateDelegate* const CreateDelegate = Cast<UK2Node_CreateDelegate>(Node);
-		if (!CreateDelegate) return false;
-		CreateDelegate->SetFunction(State.DelegateFunctionName);
-		if (CreateDelegate->GetFunctionName() != State.DelegateFunctionName) return false;
-		// A create node that still carries its delegate link must resolve scope and signature again,
-		// otherwise the recovery compile would report the nameless create event this invariant prevents.
-		const UEdGraphPin* const DelegateOut = CreateDelegate->GetDelegateOutPin();
-		if (DelegateOut && DelegateOut->LinkedTo.Num() > 0
-			&& (!CreateDelegate->GetScopeClass() || !CreateDelegate->GetDelegateSignature()))
-		{
-			return false;
-		}
-	}
+	// including on candidates and on adjacent producers that were never removed themselves. Once every
+	// node, pin, link and added graph is back (or gone), the pre-removal capture is re-applied and verified
+	// for every captured node that is still present.
+	if (!ReapplyPreRemovalState(Blueprint, Journal, /*bRefuseUnlinkedProducer=*/false)) return false;
 	return true;
 }
 
@@ -4475,6 +4515,12 @@ bool ApplyPrepared(
 		{
 			return Fail(TEXT("Test fault injected after source removal"));
 		}
+		// A retained create-delegate producer that fed a moved node has to keep a resolvable selection, or
+		// severing its only link would refuse the move instead of leaving a node the compiler cannot use.
+		if (!ReapplyPreRemovalState(Blueprint, Journal, /*bRefuseUnlinkedProducer=*/true))
+		{
+			return Fail(TEXT("the transfer would leave a create-delegate node without a resolvable delegate link"));
+		}
 		SourceGraph->NotifyGraphChanged();
 		DestinationGraph->NotifyGraphChanged();
 		return true;
@@ -4547,6 +4593,12 @@ bool ApplyPrepared(
 		if (ShouldInjectApplyFault(TEXT("migration_prune_removed")))
 		{
 			return Fail(TEXT("Test fault injected after the approved island nodes were removed"));
+		}
+		// The prune severs approved boundary links, so a retained create-delegate producer is repaired here
+		// and refused when this removal took its only delegate link.
+		if (!ReapplyPreRemovalState(Blueprint, Journal, /*bRefuseUnlinkedProducer=*/true))
+		{
+			return Fail(TEXT("the prune would leave a create-delegate node without a resolvable delegate link"));
 		}
 		PruneGraph->NotifyGraphChanged();
 		return true;
@@ -4622,6 +4674,13 @@ bool ApplyPrepared(
 		if (ShouldInjectApplyFault(TEXT("migration_retire_after_removals")))
 		{
 			return Fail(TEXT("Test fault injected after the approved retirement nodes were removed"));
+		}
+		// A retained create-delegate producer whose link this retirement cut is repaired here, and the
+		// retirement is refused when it took the producer's only delegate link, so no retained node is left
+		// in a state the compiler cannot resolve.
+		if (!ReapplyPreRemovalState(Blueprint, Journal, /*bRefuseUnlinkedProducer=*/true))
+		{
+			return Fail(TEXT("the retirement would leave a create-delegate node without a resolvable delegate link"));
 		}
 		RetirementGraph->NotifyGraphChanged();
 		return true;
@@ -4880,6 +4939,12 @@ bool ApplyPrepared(
 		if (ShouldInjectApplyFault(TEXT("migration_entry_removed")))
 		{
 			return Fail(TEXT("Test fault injected after entry removal"));
+		}
+		// The replacement detaches the stale entry and the destroyed member-reference nodes, so a retained
+		// create-delegate producer is repaired here and refused when only this removal linked it.
+		if (!ReapplyPreRemovalState(Blueprint, Journal, /*bRefuseUnlinkedProducer=*/true))
+		{
+			return Fail(TEXT("the replacement would leave a create-delegate node without a resolvable delegate link"));
 		}
 
 		UEdGraphNode* ReplacementEntry = nullptr;
