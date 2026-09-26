@@ -5122,18 +5122,53 @@ struct FPrunePartition
 	FPruneScan Scan;
 };
 
+/** Only an explicitly named, impure call may join the island as a disconnected dead-end consumer.
+ * It cannot execute, cannot feed a retained consumer, and every linked input belongs to the island. */
+bool IsDisconnectedCallConsumer(const UEdGraphNode* Node, const UEdGraph* Graph, const TSet<FGuid>& Island)
+{
+	const UK2Node_CallFunction* const Call = Cast<UK2Node_CallFunction>(Node);
+	if (!Call || Call->GetClass() != UK2Node_CallFunction::StaticClass()
+		|| Call->IsNodePure() || Call->IsLatentFunction()) return false;
+	bool bHasExecInput = false;
+	bool bConsumesIsland = false;
+	for (const UEdGraphPin* Pin : Call->Pins)
+	{
+		if (!Pin) return false;
+		if (Pin->Direction == EGPD_Output)
+		{
+			if (!Pin->LinkedTo.IsEmpty()) return false;
+			continue;
+		}
+		if (Pin->Direction != EGPD_Input) return false;
+		if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
+		{
+			bHasExecInput = true;
+			if (!Pin->LinkedTo.IsEmpty()) return false;
+			continue;
+		}
+		for (const UEdGraphPin* Linked : Pin->LinkedTo)
+		{
+			const UEdGraphNode* const Producer = Linked ? Linked->GetOwningNode() : nullptr;
+			if (!Producer || Producer->GetGraph() != Graph || !Island.Contains(Producer->NodeGuid)) return false;
+			bConsumesIsland = true;
+		}
+	}
+	return bHasExecInput && bConsumesIsland;
+}
+
 /**
  * Computes the partition of the island of Entry inside Graph, with a bounded scan over the whole
  * asset and the island.
  *
  * The island is the execution-reachable set of the entry (exec outputs only, so branch, sequence and
  * loop bodies follow their own exec pins exactly as the trace helpers model them) plus the reverse
- * data-producer closure feeding it. A visited set bounds every traversal, so a data cycle inside the
- * island terminates instead of being refused. The entry and every graph terminator are retained by
- * kind, a node whose ownership cannot be proven is blocked, and a candidate is retained as shared as
- * soon as one of its consumers is not itself removable. That rule is also what makes a removal
- * unable to orphan a retained consumer's link: a consumer outside the removable set is exactly what
- * makes its producer shared, and the readback proves the retained link sets afterwards.
+ * data-producer closure feeding it. An explicitly requested, disconnected impure call may join
+ * only as a dead-end data consumer with all linked inputs from the island and no executable entry
+ * or linked output. A visited set bounds every traversal, so a data cycle terminates. The entry
+ * and every graph terminator are retained by kind. A node whose ownership cannot be proven is
+ * blocked, and a candidate is retained as shared as soon as one of its consumers is not removable.
+ * That rule also prevents a removal from orphaning a retained consumer's link: a consumer
+ * outside the removable set makes its producer shared; readback proves retained links afterward.
  *
  * The cut is the least fixed point of those constraints, not a single sweep: whenever a node becomes
  * retained - by kind, by an unprovable identity, or because a retained consumer uses it - its input
@@ -5151,7 +5186,7 @@ bool ComputeOwnedIslandPartition(
 	const bool bSelectedEntriesRemovable,
 	FPrunePartition& OutPartition,
 	FCortexCommandResult& OutError,
-	const TSet<FGuid>* AdmittedAdditionalGuids = nullptr)
+	const TSet<FGuid>* RequestedAdditionalGuids = nullptr)
 {
 	OutPartition = FPrunePartition();
 	OutError = FCortexCommandResult();
@@ -5245,6 +5280,24 @@ bool ComputeOwnedIslandPartition(
 			}
 		}
 	}
+	// Never chase arbitrary forward data edges: the caller must name a dead-end consumer of the
+	// complete original island. Its input producers already belong to that island.
+	if (bSelectedEntriesRemovable && RequestedAdditionalGuids)
+	{
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (!Node || Island.Contains(Node->NodeGuid)
+				|| !RequestedAdditionalGuids->Contains(Node->NodeGuid)
+				|| !IsDisconnectedCallConsumer(Node, Graph, Island)) continue;
+			Island.Add(Node->NodeGuid);
+			OutPartition.Scan.Visit(Node->NodeGuid);
+			if (OutPartition.Scan.bExhausted)
+			{
+				OutError = MakePruneScanRefusal(OutPartition.Scan);
+				return false;
+			}
+		}
+	}
 
 	TArray<UEdGraphNode*> IslandNodes;
 	for (UEdGraphNode* Node : Graph->Nodes)
@@ -5287,7 +5340,7 @@ bool ComputeOwnedIslandPartition(
 			continue;
 		}
 		if (!bSelectedEntry && PruneClassBlockedReason(Node, Reason)
-			&& !(AdmittedAdditionalGuids && AdmittedAdditionalGuids->Contains(Node->NodeGuid)))
+			&& !(RequestedAdditionalGuids && RequestedAdditionalGuids->Contains(Node->NodeGuid)))
 		{
 			BlockedReasons.Add(Node->NodeGuid, Reason);
 			continue;
@@ -7487,10 +7540,10 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 	}
 	// Every requested additional node is resolved and proven before the partition runs, so an
 	// unsupported class is refused with its class reason no matter where the node sits in the graph.
-	// Only the class-specific block is lifted, and only for the admitted classes below; the structural
-	// block (invalid identity, bound subgraph, non-K2 node) is never lifted.
+	// Only a proven exact-class block may be lifted; structural ownership is never lifted.
+	// The partition may add an explicitly named disconnected dead-end consumer, but cannot widen
+	// execution traversal or admit an arbitrary node outside the original island.
 	TArray<FCortexGraphMigrationRetireAdditionalNode> AdditionalEntries;
-	TSet<FGuid> AdmittedAdditionalGuids;
 	for (const FGuid& Guid : AdditionalGuids)
 	{
 		UEdGraphNode* Node = FindNodeByGuidInGraph(Graph, Guid);
@@ -7544,23 +7597,22 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 			Additional.ClassPath = Node->GetClass()->GetPathName();
 			Additional.Reason = AdmissionReason;
 			AdditionalEntries.Add(MoveTemp(Additional));
-			AdmittedAdditionalGuids.Add(Guid);
-			if (AdditionalNodeRequiresCompile(Node)) bRequiresCompile = true;
 		}
 		else
 		{
-			// The default partition already removes this node; naming it keeps it in the reviewed
-			// inventory without widening the removal set.
+			// A non-blocked node must still pass the island and retained-consumer partition;
+			// only a disconnected dead-end call may join from outside the original island.
 			FCortexGraphMigrationRetireAdditionalNode Additional;
 			Additional.NodeGuid = Guid.ToString();
 			Additional.ClassPath = Node->GetClass()->GetPathName();
-			Additional.Reason = TEXT("the default ownership partition already removes this node; the request only records it for the reviewed inventory");
+			Additional.Reason = TEXT("non-blocked node explicitly reviewed for removal; island membership and consumer ownership are proven by the partition");
 			AdditionalEntries.Add(MoveTemp(Additional));
 		}
+		if (AdditionalNodeRequiresCompile(Node)) bRequiresCompile = true;
 	}
 	FPrunePartition Partition;
 	if (!ComputeOwnedIslandPartition(Blueprint, Graph, SelectedNodes, true, Partition, OutError,
-		AdmittedAdditionalGuids.IsEmpty() ? nullptr : &AdmittedAdditionalGuids)) return false;
+		AdditionalSet.IsEmpty() ? nullptr : &AdditionalSet)) return false;
 	OutPlan.Op = Op;
 	OutPlan.GraphGuid = GraphGuid.ToString();
 	for (const FGuid& Guid : SelectedGuids) OutPlan.SelectedEntryGuids.Add(Guid.ToString());

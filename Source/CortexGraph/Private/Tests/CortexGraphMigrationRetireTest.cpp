@@ -4953,6 +4953,66 @@ bool FCortexGraphMigrationRetireAdditionalClassAdmissionTest::RunTest(const FStr
 		FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, CompanionGuid));
 
 	Fixture.Cleanup();
+	// Detail's old calendar call has an unconnected execution input but consumes a value from the
+	// selected island. It is not execution-reachable; explicitly approving that dead-end consumer
+	// must close the data boundary without admitting arbitrary nodes outside the island.
+	FFixture Detached;
+	TestTrue(TEXT("disconnected-consumer fixture is created"), Detached.Build(TEXT("BP_RetireDetachedConsumer"), true));
+	if (!Detached.Blueprint) { Detached.Cleanup(); return false; }
+	UK2Node_CallFunction* const Disconnected =
+		Detached.AddCall(UKismetSystemLibrary::StaticClass()->FindFunctionByName(TEXT("PrintString")));
+	if (!Disconnected) { Detached.Cleanup(); return false; }
+	const FGuid DisconnectedNodeGuid = Disconnected->NodeGuid;
+	const FString DisconnectedGuid = DisconnectedNodeGuid.ToString();
+	FCortexGraphMigrationRetirePlan DetachedPlan;
+	bool bDetachedReused = false;
+	FCortexCommandResult DetachedError;
+	TestFalse(TEXT("an unconnected call outside the island stays refused"),
+		PlanWithAdditionalNodes(Detached, { Detached.AlphaGuid.ToString() }, { DisconnectedGuid },
+			DetachedPlan, bDetachedReused, DetachedError));
+	TestTrue(TEXT("the old call consumes the selected island's string producer"),
+		Detached.LinkPins(Detached.Producer, TEXT("ReturnValue"), Disconnected, TEXT("InString")));
+	TestTrue(TEXT("the obsolete call can be driven by a retained path in the refusal case"),
+		Detached.LinkPins(Detached.RetainedBody, TEXT("then"), Disconnected, TEXT("execute")));
+	DetachedError = FCortexCommandResult();
+	TestFalse(TEXT("a call with a retained execution input is never admitted as disconnected"),
+		PlanWithAdditionalNodes(Detached, { Detached.AlphaGuid.ToString() }, { DisconnectedGuid },
+			DetachedPlan, bDetachedReused, DetachedError));
+	Disconnected->FindPin(TEXT("execute"))->BreakAllPinLinks();
+	UK2Node_CallFunction* const Downstream =
+		Detached.AddCall(UKismetSystemLibrary::StaticClass()->FindFunctionByName(TEXT("PrintString")));
+	TestTrue(TEXT("the obsolete call can feed another path in the refusal case"),
+		Downstream && Detached.LinkPins(Disconnected, TEXT("then"), Downstream, TEXT("execute")));
+	DetachedError = FCortexCommandResult();
+	TestFalse(TEXT("a call with a linked output is never admitted as a dead end"),
+		PlanWithAdditionalNodes(Detached, { Detached.AlphaGuid.ToString() }, { DisconnectedGuid },
+			DetachedPlan, bDetachedReused, DetachedError));
+	Disconnected->FindPin(TEXT("then"))->BreakAllPinLinks();
+	TestTrue(TEXT("the obsolete call has no executable entry"),
+		Disconnected->FindPin(TEXT("execute")) && Disconnected->FindPin(TEXT("execute"))->LinkedTo.IsEmpty());
+	TestTrue(TEXT("the obsolete call has no linked output"),
+		Disconnected->FindPin(TEXT("then")) && Disconnected->FindPin(TEXT("then"))->LinkedTo.IsEmpty());
+	TSharedPtr<FJsonObject> DetachedRequest;
+	TArray<FString> DetachedApproved;
+	DetachedError = FCortexCommandResult();
+	TestTrue(FString::Printf(TEXT("the reviewed disconnected consumer is prepared: %s"), *DetachedError.ErrorMessage),
+		PrepareAdditionalRetirementRequest(Detached, { Detached.AlphaGuid.ToString() }, { DisconnectedGuid },
+			TEXT("00000000-0000-0000-0000-000000114202"), DetachedRequest, DetachedApproved, DetachedError,
+			/*bCompile=*/false));
+	TestTrue(TEXT("the detached consumer joins the exact approved set"),
+		DetachedApproved.Contains(DisconnectedGuid));
+	FCortexGraphPatchOutcome DetachedOutcome;
+	DetachedError = FCortexCommandResult();
+	TestTrue(FString::Printf(TEXT("the reviewed disconnected consumer retires: %s"), *DetachedError.ErrorMessage),
+		FCortexGraphPatchOps::Execute(Detached.Blueprint, DetachedRequest, DetachedOutcome, DetachedError));
+	TestEqual(TEXT("disconnected-consumer readback matches"), DetachedOutcome.ReadbackStatus, FString(TEXT("matched")));
+	TestNull(TEXT("the disconnected call was retired"), FCortexGraphMigrationOps::FindNodeByGuid(
+		Detached.Blueprint, DisconnectedNodeGuid));
+	TestNotNull(TEXT("the shared string producer remains"), FCortexGraphMigrationOps::FindNodeByGuid(
+		Detached.Blueprint, Detached.ProducerGuid));
+	TestTrue(TEXT("the unrelated cosmetic execution link survives"),
+		Detached.Retained->FindPin(TEXT("then"))->LinkedTo.Contains(Detached.RetainedBody->FindPin(TEXT("execute"))));
+	Detached.Cleanup();
 	return true;
 }
 
