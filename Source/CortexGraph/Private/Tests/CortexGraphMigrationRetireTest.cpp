@@ -61,6 +61,17 @@ struct FFixture
 	FGuid AlphaBodyGuid;
 	FGuid BetaBodyGuid;
 	FGuid RetainedBodyGuid;
+	/** Late-retained producer chain: the execution body whose output feeds the retained cosmetic body. */
+	UK2Node_CallFunction* RetainedProducer = nullptr;
+	/** The execution body downstream of `RetainedProducer`, which must never be approved for removal. */
+	UK2Node_CallFunction* RetainedProducerConsumer = nullptr;
+	/** The pair of pure producers whose outputs feed each other inside the selected island. */
+	UK2Node_CallFunction* CycleFirst = nullptr;
+	UK2Node_CallFunction* CycleSecond = nullptr;
+	FGuid RetainedProducerGuid;
+	FGuid RetainedProducerConsumerGuid;
+	FGuid CycleFirstGuid;
+	FGuid CycleSecondGuid;
 
 
 	UK2Node_Event* AddEvent(const TCHAR* Name)
@@ -163,6 +174,59 @@ struct FFixture
 				|| !Link(Alpha, TEXT("Value"), RetainedData, TEXT("InInt"))
 				|| !Link(RetainedData, TEXT("ReturnValue"), RetainedBody, TEXT("InString"))) return false;
 		}
+		return true;
+	}
+
+	/** Links two pins of this fixture's graph, reporting whether the schema accepted the connection. */
+	bool LinkPins(UEdGraphNode* From, const TCHAR* FromName, UEdGraphNode* To, const TCHAR* ToName)
+	{
+		const UEdGraphSchema* Schema = Graph ? Graph->GetSchema() : nullptr;
+		UEdGraphPin* FromPin = From ? From->FindPin(FName(FromName)) : nullptr;
+		UEdGraphPin* ToPin = To ? To->FindPin(FName(ToName)) : nullptr;
+		return Schema && FromPin && ToPin && Schema->TryCreateConnection(FromPin, ToPin);
+	}
+
+	/**
+	 * Adds the late-retained producer chain the ownership cut must reach a fixed point over: the
+	 * selected entry Alpha drives the execution body `RetainedProducer`, whose string output is
+	 * consumed by the retained cosmetic body, and `RetainedProducer` drives the execution body
+	 * `RetainedProducerConsumer`.
+	 *
+	 * The producer is retained only because a retained consumer uses its output. That decision is made
+	 * after a candidate sweep over the island, so the consumer's incoming execution edge has to be
+	 * re-checked afterwards; otherwise approving the consumer's removal severs the retained
+	 * producer -> consumer execution link.
+	 */
+	bool AddLateRetainedProducerChain()
+	{
+		RetainedProducer = AddCall(UKismetSystemLibrary::StaticClass()->FindFunctionByName(TEXT("GetConsoleVariableStringValue")));
+		RetainedProducerConsumer = AddCall(UKismetSystemLibrary::StaticClass()->FindFunctionByName(TEXT("PrintString")));
+		if (!RetainedProducer || !RetainedProducerConsumer) return false;
+		if (!LinkPins(Retained, TEXT("then"), RetainedBody, TEXT("execute"))
+			|| !LinkPins(Alpha, TEXT("then"), RetainedProducer, TEXT("execute"))
+			|| !LinkPins(RetainedProducer, TEXT("then"), RetainedProducerConsumer, TEXT("execute"))
+			|| !LinkPins(RetainedProducer, TEXT("ReturnValue"), RetainedBody, TEXT("InString"))) return false;
+		RetainedProducerGuid = RetainedProducer->NodeGuid;
+		RetainedProducerConsumerGuid = RetainedProducerConsumer->NodeGuid;
+		return true;
+	}
+
+	/**
+	 * Adds a data cycle between two pure producers that only removable candidates consume, and feeds
+	 * the island's shared int producer from the cycle. The cycle therefore sits inside the scanned
+	 * island: the partition must terminate on it and keep both members removable instead of refusing,
+	 * spinning or reporting the cycle as unproven ownership.
+	 */
+	bool AddRemovableDataCycle()
+	{
+		CycleFirst = AddCall(UKismetStringLibrary::StaticClass()->FindFunctionByName(TEXT("Conv_StringToInt")));
+		CycleSecond = AddCall(UKismetStringLibrary::StaticClass()->FindFunctionByName(TEXT("Conv_IntToString")));
+		if (!CycleFirst || !CycleSecond) return false;
+		if (!LinkPins(CycleSecond, TEXT("ReturnValue"), CycleFirst, TEXT("InString"))
+			|| !LinkPins(CycleFirst, TEXT("ReturnValue"), CycleSecond, TEXT("InInt"))
+			|| !LinkPins(CycleFirst, TEXT("ReturnValue"), Producer, TEXT("InInt"))) return false;
+		CycleFirstGuid = CycleFirst->NodeGuid;
+		CycleSecondGuid = CycleSecond->NodeGuid;
 		return true;
 	}
 
@@ -1142,6 +1206,161 @@ bool FCortexGraphMigrationRetireSharedExecutionBodyTest::RunTest(const FString& 
 		Error.ErrorCode, FString(CortexErrorCodes::InvalidOperation));
 	TestEqual(TEXT("refused retirement leaves the complete graph unchanged"),
 		CaptureNativeGraph(Fixture.Graph), GraphBefore);
+
+	Fixture.Cleanup();
+	return true;
+}
+
+// RIP-44 / CortexSandbox #112 partition regression. The selected obsolete entry `Alpha` drives the
+// execution body A, A's string output is consumed by the retained cosmetic body, and A drives the
+// execution body B. A is retained only because that retained consumer uses its output, and that
+// decision lands after a one-pass candidate sweep had already accepted B, so approving B deleted the
+// retained A -> B execution link. The cut must reach a fixed point across both link kinds: B stays
+// retained, or the reviewed request refuses instead of severing the retained link. A different,
+// independent selected entry must still be retired, so the new closure may not over-retain.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireLateRetainedProducerTest,
+	"Cortex.Graph.Authoring.Migration.Retire.RetainsLateRetainedProducerExecConsumer",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexGraphMigrationRetireLateRetainedProducerTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexGraphMigrationRetireTest;
+	FFixture Fixture;
+	TestTrue(TEXT("Widget fixture is created"), Fixture.Build(TEXT("BP_RetireLateRetainedProducer")));
+	if (!Fixture.Blueprint) { Fixture.Cleanup(); return false; }
+	TestTrue(TEXT("the late-retained producer chain is created"), Fixture.AddLateRetainedProducerChain());
+	if (!Fixture.RetainedProducer || !Fixture.RetainedProducerConsumer) { Fixture.Cleanup(); return false; }
+
+	const FString ProducerGuidText = Fixture.RetainedProducerGuid.ToString();
+	const FString ConsumerGuidText = Fixture.RetainedProducerConsumerGuid.ToString();
+	const FString AlphaGuidText = Fixture.Alpha->NodeGuid.ToString();
+	const FString BetaGuidText = Fixture.Beta->NodeGuid.ToString();
+
+	FCortexGraphMigrationRetirePlan PlanValue;
+	bool bReused = false;
+	FCortexCommandResult Error;
+	TestTrue(FString::Printf(TEXT("retirement preview succeeds: %s"), *Error.ErrorMessage),
+		Plan(Fixture, { AlphaGuidText, BetaGuidText }, PlanValue, bReused, Error));
+
+	auto IsShared = [&PlanValue](const FString& GuidText)
+	{
+		return PlanValue.Shared.ContainsByPredicate([&GuidText](const FCortexGraphPruneNode& Node)
+			{ return Node.NodeGuid == GuidText; });
+	};
+	auto IsBlocked = [&PlanValue](const FString& GuidText)
+	{
+		return PlanValue.Blocked.ContainsByPredicate([&GuidText](const FCortexGraphPruneNode& Node)
+			{ return Node.NodeGuid == GuidText; });
+	};
+	auto IsRetained = [&IsShared, &IsBlocked](const FString& GuidText)
+	{
+		return IsShared(GuidText) || IsBlocked(GuidText);
+	};
+	TestTrue(TEXT("the data-shared producer is retained rather than removable"),
+		!PlanValue.RemovableGuids.Contains(ProducerGuidText) && IsShared(ProducerGuidText));
+	TestTrue(TEXT("the selected entry feeding the retained producer is blocked"), IsBlocked(AlphaGuidText));
+
+	TestFalse(TEXT("the execution consumer of the retained producer is not removable"),
+		PlanValue.RemovableGuids.Contains(ConsumerGuidText));
+	TestTrue(TEXT("the retained execution consumer is published as retained, never removable"),
+		IsRetained(ConsumerGuidText));
+	TestFalse(TEXT("the retained producer -> consumer execution link is not a boundary edge a removal severs"),
+		PlanValue.ExternalEdges.ContainsByPredicate([&ProducerGuidText, &ConsumerGuidText](const FCortexGraphPruneEdge& Edge)
+		{
+			return Edge.FromGuid == ProducerGuidText && Edge.FromPin == TEXT("then")
+				&& Edge.ToGuid == ConsumerGuidText && Edge.ToPin == TEXT("execute");
+		}));
+
+	TestTrue(TEXT("the independent selected entry stays removable"), PlanValue.RemovableGuids.Contains(BetaGuidText));
+	TestTrue(TEXT("the independent selected entry body stays removable"),
+		PlanValue.RemovableGuids.Contains(Fixture.BetaBody->NodeGuid.ToString()));
+
+	// The caller-visible inventory must publish the same fixed point: the consumer is never offered.
+	const TSharedPtr<FJsonObject> Inventory = FCortexGraphMigrationOps::MakeRetirementInventory(PlanValue.ToJson());
+	TestNotNull(TEXT("the retirement inventory is created"), Inventory.Get());
+	if (Inventory.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Removable = nullptr;
+		const TArray<TSharedPtr<FJsonValue>>* Shared = nullptr;
+		const TArray<TSharedPtr<FJsonValue>>* BlockedNodes = nullptr;
+		const TArray<TSharedPtr<FJsonValue>>* ExternalEdges = nullptr;
+		TestTrue(TEXT("the inventory publishes its removable set"),
+			Inventory->TryGetArrayField(TEXT("removable"), Removable) && Removable);
+		TestTrue(TEXT("the inventory publishes its shared set"),
+			Inventory->TryGetArrayField(TEXT("shared"), Shared) && Shared);
+		TestTrue(TEXT("the inventory publishes its blocked set"),
+			Inventory->TryGetArrayField(TEXT("blocked_nodes"), BlockedNodes) && BlockedNodes);
+		TestTrue(TEXT("the inventory publishes its boundary edges"),
+			Inventory->TryGetArrayField(TEXT("external_edges"), ExternalEdges) && ExternalEdges);
+		if (Removable && Shared && BlockedNodes && ExternalEdges)
+		{
+			auto NamesGuid = [&ConsumerGuidText](const TArray<TSharedPtr<FJsonValue>>& Values)
+			{
+				return Values.ContainsByPredicate([&ConsumerGuidText](const TSharedPtr<FJsonValue>& Value)
+					{ return Value->AsString().StartsWith(ConsumerGuidText); });
+			};
+			TestFalse(TEXT("the inventory never offers the retained execution consumer for approval"),
+				Removable->ContainsByPredicate([&ConsumerGuidText](const TSharedPtr<FJsonValue>& Value)
+					{ return Value->AsString() == ConsumerGuidText; }));
+			TestTrue(TEXT("the inventory names the retained execution consumer as retained"),
+				NamesGuid(*Shared) || NamesGuid(*BlockedNodes));
+			TestFalse(TEXT("the inventory publishes no boundary edge for the retained execution link"),
+				ExternalEdges->ContainsByPredicate([&ProducerGuidText, &ConsumerGuidText](const TSharedPtr<FJsonValue>& Value)
+					{ return Value->AsString() == FString::Printf(TEXT("%s.then -> %s.execute"), *ProducerGuidText, *ConsumerGuidText); }));
+		}
+	}
+
+	// Fail closed: the reviewed request may not approve a cut that severs the retained link.
+	TSharedPtr<FJsonObject> Request;
+	TArray<FString> Approved;
+	FCortexCommandResult ReviewError;
+	TestFalse(TEXT("the reviewed retirement refuses instead of severing the retained execution link"),
+		PrepareApprovedRequest(Fixture, TEXT("patch-retire-late-retained-producer"), Request, Approved, ReviewError));
+	TestTrue(TEXT("the reviewed refusal is diagnostic"), !ReviewError.ErrorMessage.IsEmpty());
+
+	Fixture.Cleanup();
+	return true;
+}
+
+// Same partition: a data cycle between removable producers, all of it inside the scanned island. The
+// fixed-point walk must terminate on the cycle and keep every member removable instead of refusing or
+// classifying the cycle as unproven ownership.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireRemovableDataCycleTest,
+	"Cortex.Graph.Authoring.Migration.Retire.BoundedRemovableDataCycle",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexGraphMigrationRetireRemovableDataCycleTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexGraphMigrationRetireTest;
+	FFixture Fixture;
+	TestTrue(TEXT("Widget fixture is created"), Fixture.Build(TEXT("BP_RetireRemovableDataCycle")));
+	if (!Fixture.Blueprint) { Fixture.Cleanup(); return false; }
+	TestTrue(TEXT("the removable data cycle is created"), Fixture.AddRemovableDataCycle());
+	if (!Fixture.CycleFirst || !Fixture.CycleSecond) { Fixture.Cleanup(); return false; }
+
+	FCortexGraphMigrationRetirePlan PlanValue;
+	bool bReused = false;
+	FCortexCommandResult Error;
+	TestTrue(FString::Printf(TEXT("retirement preview terminates on the cycle: %s"), *Error.ErrorMessage),
+		Plan(Fixture, { Fixture.Alpha->NodeGuid.ToString(), Fixture.Beta->NodeGuid.ToString() },
+			PlanValue, bReused, Error));
+	TestTrue(TEXT("the bounded cycle traversal reports a complete partition"), PlanValue.bComplete);
+	TestTrue(TEXT("the bounded cycle traversal counts the work it examined"),
+		PlanValue.ScannedNodes > 0 && PlanValue.ScannedLinks > 0);
+	TestTrue(TEXT("the first cycle member is removable"),
+		PlanValue.RemovableGuids.Contains(Fixture.CycleFirstGuid.ToString()));
+	TestTrue(TEXT("the second cycle member is removable"),
+		PlanValue.RemovableGuids.Contains(Fixture.CycleSecondGuid.ToString()));
+	TestTrue(TEXT("the whole cyclic island is removable"),
+		PlanValue.RemovableGuids.Contains(Fixture.Alpha->NodeGuid.ToString())
+			&& PlanValue.RemovableGuids.Contains(Fixture.AlphaBody->NodeGuid.ToString())
+			&& PlanValue.RemovableGuids.Contains(Fixture.Producer->NodeGuid.ToString())
+			&& PlanValue.RemovableGuids.Contains(Fixture.Beta->NodeGuid.ToString())
+			&& PlanValue.RemovableGuids.Contains(Fixture.BetaBody->NodeGuid.ToString()));
+	TestTrue(TEXT("the cycle retains and blocks nothing inside the island"),
+		PlanValue.Shared.Num() == 0 && PlanValue.Blocked.Num() == 0);
 
 	Fixture.Cleanup();
 	return true;

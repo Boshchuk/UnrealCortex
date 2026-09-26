@@ -5014,6 +5014,15 @@ struct FPrunePartition
  * soon as one of its consumers is not itself removable. That rule is also what makes a removal
  * unable to orphan a retained consumer's link: a consumer outside the removable set is exactly what
  * makes its producer shared, and the readback proves the retained link sets afterwards.
+ *
+ * The cut is the least fixed point of those constraints, not a single sweep: whenever a node becomes
+ * retained - by kind, by an unprovable identity, or because a retained consumer uses it - its input
+ * producers are re-checked, and in a retirement the execution consumers it drives are re-checked too,
+ * so a node retained late in the walk can no longer leave a candidate that an approval would remove
+ * while its own incoming execution edge from the retained node is severed. A prune is the deliberate
+ * exception: it removes the island body of an entry the caller keeps and journals every boundary link
+ * it severs, so the execution-consumer rule only applies when the selected entries themselves are the
+ * removable ones.
  */
 bool ComputeOwnedIslandPartition(
 	UBlueprint* Blueprint,
@@ -5165,6 +5174,11 @@ bool ComputeOwnedIslandPartition(
 		if (!Candidates.Contains(Node->NodeGuid)) RetainedWorklist.Add(Node);
 	}
 
+	// The two sweeps below seed the fixed point with the constraints the initial candidates already
+	// break, against the candidate set as it stands here; the worklist after them re-checks the same
+	// constraints for every node that becomes retained afterwards, so the published cut cannot depend on
+	// the order in which the island happens to be walked.
+	//
 	// A candidate body with an execution input from a retained entry cannot be safely removed:
 	// preservation capture intentionally excludes links crossing the approved removal set.
 	for (UEdGraphNode* Node : IslandNodes)
@@ -5227,6 +5241,9 @@ bool ComputeOwnedIslandPartition(
 			.Add(Node->NodeGuid, ConsumingReason);
 		RetainedWorklist.Add(Node);
 	}
+	// Fixed-point worklist: every retained node re-checks the constraints its own retention created. The
+	// loop above swept once, so a node retained late - a producer a retained consumer uses, or a consumer
+	// of a node retained that way - never had its own producers and execution consumers re-checked.
 	for (int32 Index = 0; Index < RetainedWorklist.Num(); ++Index)
 	{
 		UEdGraphNode* RetainedNode = RetainedWorklist[Index];
@@ -5245,6 +5262,25 @@ bool ComputeOwnedIslandPartition(
 				(bSelectedEntriesRemovable && Selected.Contains(Producer->NodeGuid) ? BlockedReasons : RetainedReasons)
 					.Add(Producer->NodeGuid, Reason);
 				RetainedWorklist.Add(Producer);
+			}
+		}
+		// A retirement may never sever an execution edge it retains, so a candidate execution consumer of
+		// a retained node is retained as well instead of being approved with its incoming retained edge.
+		// A prune is the deliberate exception: it removes the island body and journals the boundary links
+		// it severs, which the execution-input sweep above already exempts for the entry it retains.
+		if (!bSelectedEntriesRemovable) continue;
+		for (UEdGraphPin* Pin : RetainedNode->Pins)
+		{
+			if (!Pin || Pin->Direction != EGPD_Output || Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Exec) continue;
+			for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
+			{
+				OutPartition.Scan.ExamineLink();
+				UEdGraphNode* Consumer = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
+				if (!Consumer || !Candidates.Contains(Consumer->NodeGuid)) continue;
+				Candidates.Remove(Consumer->NodeGuid);
+				BlockedReasons.Add(Consumer->NodeGuid, FString::Printf(
+					TEXT("execution input is also linked from retained node '%s'"), *RetainedNode->NodeGuid.ToString()));
+				RetainedWorklist.Add(Consumer);
 			}
 		}
 	}
