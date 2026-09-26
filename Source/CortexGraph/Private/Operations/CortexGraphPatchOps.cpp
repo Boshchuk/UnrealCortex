@@ -2796,8 +2796,7 @@ bool ReapplyPreRemovalState(
 {
 	for (const FGraphPatchJournal::FPreRemovalNodeState& State : Journal.PreRemovalState)
 	{
-		UEdGraphNode* Node = nullptr;
-		FindNodeByGuid(Blueprint, State.NodeGuid, Node);
+		UEdGraphNode* const Node = FCortexGraphMigrationOps::FindNodeByGuid(Blueprint, State.NodeGuid);
 		// A captured node the operation itself removed is expected to be gone; it is restored by the
 		// journal on a rollback and simply absent after a success.
 		if (!Node) continue;
