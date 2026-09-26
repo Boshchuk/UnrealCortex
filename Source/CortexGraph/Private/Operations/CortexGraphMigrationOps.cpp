@@ -19,11 +19,15 @@
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/ComponentDelegateBinding.h"
 #include "K2Node.h"
+#include "K2Node_AddDelegate.h"
+#include "K2Node_CallDelegate.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_CallParentFunction.h"
 #include "K2Node_ComponentBoundEvent.h"
 #include "K2Node_Composite.h"
 #include "K2Node_CreateDelegate.h"
+#include "K2Node_Knot.h"
+#include "K2Node_MacroInstance.h"
 #include "K2Node_CustomEvent.h"
 #include "K2Node_DynamicCast.h"
 #include "K2Node_Event.h"
@@ -4929,8 +4933,12 @@ bool IsPruneEntryNode(const UEdGraphNode* Node, FString& OutReason)
 	return false;
 }
 
-/** True when the ownership proof fails for the node; the reason names why it is never removable. */
-bool PruneBlockedReason(UEdGraphNode* Node, FString& OutReason)
+/**
+ * True when the ownership proof fails for a structural reason every node class shares: an unusable
+ * identity, a bound subgraph a removal would orphan, or a graph node that is not a K2 node. None of
+ * these is ever lifted by the reviewed additional-node exception.
+ */
+bool PruneStructuralBlockedReason(UEdGraphNode* Node, FString& OutReason)
 {
 	OutReason.Reset();
 	if (!Node || !Node->GetClass() || !Node->NodeGuid.IsValid())
@@ -4943,6 +4951,28 @@ bool PruneBlockedReason(UEdGraphNode* Node, FString& OutReason)
 		OutReason = TEXT("the node owns a bound subgraph, which a removal would orphan");
 		return true;
 	}
+	if (!Node->IsA<UK2Node>() && !Node->IsA<UEdGraphNode_Comment>())
+	{
+		OutReason = FString::Printf(TEXT("non-K2 graph node class '%s'"), *Node->GetClass()->GetName());
+		return true;
+	}
+	return false;
+}
+
+/**
+ * True when the ownership proof fails because of what the node's class owns outside the named graph:
+ * a latent call whose action outlives the node, or a class in the engine block list (tunnel pins
+ * owned by their bound graph, timelines with their own bound state, editable-pin terminators,
+ * delegate sets and async task proxies).
+ *
+ * A reviewed additional-node request may lift exactly this reason, and only for a class whose removal
+ * semantics are proven - the engine block list is deliberately broader than the proven set, so the
+ * exception is decided per node by `AdditionalNodeClassReason`, never by the block list alone.
+ */
+bool PruneClassBlockedReason(UEdGraphNode* Node, FString& OutReason)
+{
+	OutReason.Reset();
+	if (!Node || !Node->GetClass()) return false;
 	if (const UK2Node_CallFunction* const Call = Cast<UK2Node_CallFunction>(Node))
 	{
 		if (Call->IsLatentFunction())
@@ -4965,12 +4995,85 @@ bool PruneBlockedReason(UEdGraphNode* Node, FString& OutReason)
 			return true;
 		}
 	}
-	if (!Node->IsA<UK2Node>() && !Node->IsA<UEdGraphNode_Comment>())
+	return false;
+}
+
+/** True when the ownership proof fails for the node; the reason names why it is never removable. */
+bool PruneBlockedReason(UEdGraphNode* Node, FString& OutReason)
+{
+	OutReason.Reset();
+	if (PruneStructuralBlockedReason(Node, OutReason)) return true;
+	return PruneClassBlockedReason(Node, OutReason);
+}
+
+/**
+ * Class-specific removal semantics a reviewed `migration.source.additional_node_guids` request may
+ * admit, with the proof the plan publishes for the node.
+ *
+ * Only the engine's exact class qualifies, and only where removal is proven to stay inside the named
+ * graph: the engine's own `FBlueprintEditorUtils::RemoveNode` path breaks the node's links and calls
+ * `DestroyNode`, which none of these classes override in a way that reaches outside the node.
+ *
+ * - `UK2Node_Knot`: `IsCompilerRelevant()` is false, it declares no serialized state and only infers
+ *   its pins from its links, so removal needs no recompilation and leaves no trace.
+ * - `UK2Node_MacroInstance`: `MacroGraphReference` is a shared reference to a graph the instance does
+ *   not own (`GetSubGraphs()` is `UEdGraphNode`'s empty override; only `UK2Node_Composite` returns a
+ *   bound graph) and the `UK2Node_Tunnel::DestroyNode` twin unlink does not apply, because
+ *   `InputSinkNode`/`OutputSourceNode` are assigned for composite boundary nodes only. Removal
+ *   detaches the instance and breaks its own links; the referenced macro graph stays in its asset.
+ * - `UK2Node_CallFunction` that is latent: the latent action lives in the running world's
+ *   `FLatentActionManager`, and the asset-side trace is the compiled latent statement plus the
+ *   generated class's debug UUID association, both rebuilt by the required compile.
+ * - `UK2Node_CreateDelegate`, `UK2Node_AddDelegate`, `UK2Node_CallDelegate`: the delegate declaration
+ *   lives on the owning class the node merely references, and none of them declares a dynamic binding
+ *   class, so no generated binding object is registered for them.
+ *
+ * Bound-graph owners (`UK2Node_Composite`), timelines, bare tunnels and editable-pin terminators,
+ * `UK2Node_DelegateSet`/`UK2Node_AssignDelegate` and the async task/latent action proxy classes stay
+ * unadmitted: their own state is not proven local.
+ */
+bool AdditionalNodeClassReason(const UEdGraphNode* Node, FString& OutReason)
+{
+	OutReason.Reset();
+	if (!Node || !Node->GetClass()) return false;
+	UClass* const Class = Node->GetClass();
+	if (Class == UK2Node_Knot::StaticClass())
 	{
-		OutReason = FString::Printf(TEXT("non-K2 graph node class '%s'"), *Node->GetClass()->GetName());
+		OutReason = TEXT("compiler-irrelevant reroute: it declares no state, owns no graph and infers its pins from its links, so removing it needs no recompilation");
+		return true;
+	}
+	if (Class == UK2Node_MacroInstance::StaticClass())
+	{
+		OutReason = TEXT("macro instance referencing a shared macro graph it does not own: its pins and wildcard resolution are node-local and no generated artefact is registered");
+		return true;
+	}
+	if (Class == UK2Node_CallFunction::StaticClass())
+	{
+		const UK2Node_CallFunction* const Call = static_cast<const UK2Node_CallFunction*>(Node);
+		if (Call->IsLatentFunction())
+		{
+			OutReason = TEXT("latent call whose action lives in the running world's latent action manager; the asset-side trace is rebuilt by the required compile");
+			return true;
+		}
+		return false;
+	}
+	if (Class == UK2Node_CreateDelegate::StaticClass()
+		|| Class == UK2Node_AddDelegate::StaticClass()
+		|| Class == UK2Node_CallDelegate::StaticClass())
+	{
+		OutReason = TEXT("delegate node whose declaration lives on its owning class: it owns no graph, overrides no DestroyNode and registers no generated binding object");
 		return true;
 	}
 	return false;
+}
+
+/**
+ * True when an admitted additional node only stops compiling once the graph is rebuilt. A
+ * compiler-irrelevant reroute is the one admitted class whose removal leaves no compiled trace.
+ */
+bool AdditionalNodeRequiresCompile(const UEdGraphNode* Node)
+{
+	return Node != nullptr && Node->IsCompilerRelevant();
 }
 
 FCortexGraphPruneNode MakePruneNode(const UEdGraphNode* Node, const FString& Reason)
@@ -5030,7 +5133,8 @@ bool ComputeOwnedIslandPartition(
 	const TArray<UEdGraphNode*>& SeedEntries,
 	const bool bSelectedEntriesRemovable,
 	FPrunePartition& OutPartition,
-	FCortexCommandResult& OutError)
+	FCortexCommandResult& OutError,
+	const TSet<FGuid>* AdmittedAdditionalGuids = nullptr)
 {
 	OutPartition = FPrunePartition();
 	OutError = FCortexCommandResult();
@@ -5160,7 +5264,13 @@ bool ComputeOwnedIslandPartition(
 			RetainedReasons.Add(Node->NodeGuid, Reason);
 			continue;
 		}
-		if (!bSelectedEntry && PruneBlockedReason(Node, Reason))
+		if (!bSelectedEntry && PruneStructuralBlockedReason(Node, Reason))
+		{
+			BlockedReasons.Add(Node->NodeGuid, Reason);
+			continue;
+		}
+		if (!bSelectedEntry && PruneClassBlockedReason(Node, Reason)
+			&& !(AdmittedAdditionalGuids && AdmittedAdditionalGuids->Contains(Node->NodeGuid)))
 		{
 			BlockedReasons.Add(Node->NodeGuid, Reason);
 			continue;
@@ -6873,6 +6983,48 @@ bool ReadRetireEntries(
 	}
 	return true;
 }
+
+/** Writes the reviewed additional-node admissions: identity, exact class and the admitting proof. */
+void WriteRetireAdditionalNodes(
+	const TArray<FCortexGraphMigrationRetireAdditionalNode>& Nodes,
+	TArray<TSharedPtr<FJsonValue>>& Out)
+{
+	for (const FCortexGraphMigrationRetireAdditionalNode& Node : Nodes)
+	{
+		TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+		Json->SetStringField(TEXT("node_guid"), Node.NodeGuid);
+		Json->SetStringField(TEXT("class_path"), Node.ClassPath);
+		Json->SetStringField(TEXT("reason"), Node.Reason);
+		Out.Add(MakeShared<FJsonValueObject>(Json));
+	}
+}
+
+/**
+ * Reads the reviewed additional nodes. The class and reason are required for every entry a prepared
+ * graph still holds; an idempotent replay echoes the requested identities without a class, because
+ * the node is already gone and its class proof belonged to the approved plan.
+ */
+bool ReadRetireAdditionalNodes(
+	const TSharedPtr<FJsonObject>& Source,
+	const TCHAR* Field,
+	TArray<FCortexGraphMigrationRetireAdditionalNode>& Out)
+{
+	const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+	if (!Source->TryGetArrayField(Field, Values) || !Values) return false;
+	for (const TSharedPtr<FJsonValue>& Value : *Values)
+	{
+		const TSharedPtr<FJsonObject> Json = Value.IsValid() ? Value->AsObject() : nullptr;
+		FCortexGraphMigrationRetireAdditionalNode Node;
+		if (!Json.IsValid() || !Json->TryGetStringField(TEXT("node_guid"), Node.NodeGuid) || Node.NodeGuid.IsEmpty())
+		{
+			return false;
+		}
+		Json->TryGetStringField(TEXT("class_path"), Node.ClassPath);
+		Json->TryGetStringField(TEXT("reason"), Node.Reason);
+		Out.Add(MoveTemp(Node));
+	}
+	return true;
+}
 }
 
 TSharedPtr<FJsonObject> FCortexGraphMigrationRetirePlan::ToJson() const
@@ -6893,6 +7045,8 @@ TSharedPtr<FJsonObject> FCortexGraphMigrationRetirePlan::ToJson() const
 	Values.Reset(); WriteRetireEntries(Entries, Values); Json->SetArrayField(TEXT("entries"), Values);
 	Values.Reset(); AppendRetireStrings(ApprovedGuids, Values); Json->SetArrayField(TEXT("approved_guids"), Values);
 	Values.Reset(); AppendRetireStrings(RemovableGuids, Values); Json->SetArrayField(TEXT("removable_guids"), Values);
+	Values.Reset(); AppendRetireStrings(AdditionalNodeGuids, Values); Json->SetArrayField(TEXT("additional_guids"), Values);
+	Values.Reset(); WriteRetireAdditionalNodes(AdditionalNodes, Values); Json->SetArrayField(TEXT("additional_nodes"), Values);
 	Values.Reset(); AppendRetireStrings(PreexistingDiagnostics, Values); Json->SetArrayField(TEXT("preexisting_diagnostics"), Values);
 	Values.Reset(); WriteRetirePartition(Shared, Values); Json->SetArrayField(TEXT("shared"), Values);
 	Values.Reset(); WriteRetirePartition(Blocked, Values); Json->SetArrayField(TEXT("blocked"), Values);
@@ -6933,6 +7087,8 @@ bool FCortexGraphMigrationRetirePlan::FromJson(
 		|| !Source->TryGetBoolField(TEXT("requires_compile"), OutPlan.bRequiresCompile)
 		|| !ReadRetireStrings(Source, TEXT("approved_guids"), OutPlan.ApprovedGuids)
 		|| !ReadRetireStrings(Source, TEXT("removable_guids"), OutPlan.RemovableGuids)
+		|| !ReadRetireStrings(Source, TEXT("additional_guids"), OutPlan.AdditionalNodeGuids)
+		|| !ReadRetireAdditionalNodes(Source, TEXT("additional_nodes"), OutPlan.AdditionalNodes)
 		|| !ReadRetireStrings(Source, TEXT("preexisting_diagnostics"), OutPlan.PreexistingDiagnostics)
 		|| !ReadRetirePartition(Source, TEXT("shared"), OutPlan.Shared)
 		|| !ReadRetirePartition(Source, TEXT("blocked"), OutPlan.Blocked)
@@ -7016,7 +7172,7 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 		return false;
 	}
 	if (!FCortexGraphPatchOps::HasOnlyFields(*SourcePtr,
-		{ TEXT("graph_ref"), TEXT("entry_node_guids") }, OutError, TEXT("migration.source"))) return false;
+		{ TEXT("graph_ref"), TEXT("entry_node_guids"), TEXT("additional_node_guids") }, OutError, TEXT("migration.source"))) return false;
 	const TSharedPtr<FJsonObject>* GraphRefPtr = nullptr;
 	if (!(*SourcePtr)->TryGetObjectField(TEXT("graph_ref"), GraphRefPtr) || !GraphRefPtr || !GraphRefPtr->IsValid())
 	{
@@ -7075,6 +7231,47 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 		}
 		SelectedSet.Add(Guid);
 		SelectedGuids.Add(Guid);
+	}
+	// The optional reviewed additional-node list. Field-level validation happens here, before any
+	// partition work: the entries must be unique valid GUIDs that do not repeat a selected entry, and
+	// an empty list is a request for nothing rather than a malformed one.
+	TArray<FGuid> AdditionalGuids;
+	TSet<FGuid> AdditionalSet;
+	if ((*SourcePtr)->HasField(TEXT("additional_node_guids")))
+	{
+		const TArray<TSharedPtr<FJsonValue>>* AdditionalValues = nullptr;
+		if (!(*SourcePtr)->TryGetArrayField(TEXT("additional_node_guids"), AdditionalValues) || !AdditionalValues)
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+				TEXT("migration.source.additional_node_guids must be an array"));
+			return false;
+		}
+		for (const TSharedPtr<FJsonValue>& Value : *AdditionalValues)
+		{
+			FString Text;
+			FGuid Guid;
+			if (!Value.IsValid() || !Value->TryGetString(Text) || !FGuid::Parse(Text, Guid) || !Guid.IsValid())
+			{
+				OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+					TEXT("additional_node_guids entries must be valid GUID strings"));
+				return false;
+			}
+			if (AdditionalSet.Contains(Guid))
+			{
+				OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+					TEXT("additional_node_guids must contain unique valid GUID strings"));
+				return false;
+			}
+			if (SelectedSet.Contains(Guid))
+			{
+				OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+					FString::Printf(TEXT("additional_node_guids must not repeat the selected entry '%s'"), *Guid.ToString()));
+				return false;
+			}
+			AdditionalSet.Add(Guid);
+			AdditionalGuids.Add(Guid);
+		}
+		AdditionalGuids.Sort([](const FGuid& A, const FGuid& B) { return A.ToString() < B.ToString(); });
 	}
 	const bool bHasApproval = Migration->HasField(TEXT("approved_node_guids"));
 	TArray<FGuid> Approved;
@@ -7180,6 +7377,26 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 			OutPlan.SelectedEntryGuids.Sort();
 			OutPlan.ApprovedGuids = PruneGuidText(Approved);
 			OutPlan.RemovableGuids = OutPlan.ApprovedGuids;
+			// An idempotent replay has no node left to classify, so the requested identities are
+			// echoed canonically without a class: the class-specific proof belonged to the plan that
+			// was approved, and the approved set already covers every requested identity.
+			for (const FGuid& Guid : AdditionalGuids)
+			{
+				if (!Approved.Contains(Guid))
+				{
+					OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+						FString::Printf(TEXT("approved_node_guids must include the requested additional node '%s'"),
+							*Guid.ToString()));
+					return false;
+				}
+			}
+			OutPlan.AdditionalNodeGuids = PruneGuidText(AdditionalGuids);
+			for (const FString& GuidText : OutPlan.AdditionalNodeGuids)
+			{
+				FCortexGraphMigrationRetireAdditionalNode Additional;
+				Additional.NodeGuid = GuidText;
+				OutPlan.AdditionalNodes.Add(MoveTemp(Additional));
+			}
 			OutPlan.bComplete = true;
 			OutPlan.bAwaitingApproval = false;
 			OutPlan.bReused = true;
@@ -7250,8 +7467,82 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 		}
 		SelectedNodes.Add(Node);
 	}
+	// Every requested additional node is resolved and proven before the partition runs, so an
+	// unsupported class is refused with its class reason no matter where the node sits in the graph.
+	// Only the class-specific block is lifted, and only for the admitted classes below; the structural
+	// block (invalid identity, bound subgraph, non-K2 node) is never lifted.
+	TArray<FCortexGraphMigrationRetireAdditionalNode> AdditionalEntries;
+	TSet<FGuid> AdmittedAdditionalGuids;
+	for (const FGuid& Guid : AdditionalGuids)
+	{
+		UEdGraphNode* Node = FindNodeByGuidInGraph(Graph, Guid);
+		if (!Node)
+		{
+			UEdGraph* OtherOwner = nullptr;
+			TArray<UEdGraph*> AssetGraphs;
+			Blueprint->GetAllGraphs(AssetGraphs);
+			for (UEdGraph* AssetGraph : AssetGraphs)
+			{
+				if (!AssetGraph || AssetGraph == Graph) continue;
+				for (UEdGraphNode* Owned : AssetGraph->Nodes)
+				{
+					if (Owned && Owned->NodeGuid == Guid) { OtherOwner = AssetGraph; break; }
+				}
+				if (OtherOwner) break;
+			}
+			if (OtherOwner)
+			{
+				OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+					FString::Printf(TEXT("additional node '%s' is owned by another graph '%s' of this asset"),
+						*Guid.ToString(), *OtherOwner->GraphGuid.ToString()));
+			}
+			else
+			{
+				OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+					FString::Printf(TEXT("additional node '%s' is not present in this asset"), *Guid.ToString()));
+			}
+			return false;
+		}
+		FString BlockedReason;
+		if (PruneStructuralBlockedReason(Node, BlockedReason))
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("additional node '%s' class '%s' is not admitted for reviewed removal: %s"),
+					*Guid.ToString(), *Node->GetClass()->GetName(), *BlockedReason));
+			return false;
+		}
+		if (PruneClassBlockedReason(Node, BlockedReason))
+		{
+			FString AdmissionReason;
+			if (!AdditionalNodeClassReason(Node, AdmissionReason))
+			{
+				OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+					FString::Printf(TEXT("additional node '%s' class '%s' is not admitted for reviewed removal: %s"),
+						*Guid.ToString(), *Node->GetClass()->GetName(), *BlockedReason));
+				return false;
+			}
+			FCortexGraphMigrationRetireAdditionalNode Additional;
+			Additional.NodeGuid = Guid.ToString();
+			Additional.ClassPath = Node->GetClass()->GetPathName();
+			Additional.Reason = AdmissionReason;
+			AdditionalEntries.Add(MoveTemp(Additional));
+			AdmittedAdditionalGuids.Add(Guid);
+			if (AdditionalNodeRequiresCompile(Node)) bRequiresCompile = true;
+		}
+		else
+		{
+			// The default partition already removes this node; naming it keeps it in the reviewed
+			// inventory without widening the removal set.
+			FCortexGraphMigrationRetireAdditionalNode Additional;
+			Additional.NodeGuid = Guid.ToString();
+			Additional.ClassPath = Node->GetClass()->GetPathName();
+			Additional.Reason = TEXT("the default ownership partition already removes this node; the request only records it for the reviewed inventory");
+			AdditionalEntries.Add(MoveTemp(Additional));
+		}
+	}
 	FPrunePartition Partition;
-	if (!ComputeOwnedIslandPartition(Blueprint, Graph, SelectedNodes, true, Partition, OutError)) return false;
+	if (!ComputeOwnedIslandPartition(Blueprint, Graph, SelectedNodes, true, Partition, OutError,
+		AdmittedAdditionalGuids.IsEmpty() ? nullptr : &AdmittedAdditionalGuids)) return false;
 	OutPlan.Op = Op;
 	OutPlan.GraphGuid = GraphGuid.ToString();
 	for (const FGuid& Guid : SelectedGuids) OutPlan.SelectedEntryGuids.Add(Guid.ToString());
@@ -7270,6 +7561,33 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 	OutPlan.Blocked = Partition.Blocked;
 	OutPlan.ExternalEdges = Partition.ExternalEdges;
 	OutPlan.RemovableGuids = PruneGuidText(Partition.Removable);
+	// A requested node the cut cannot remove refuses instead of being silently dropped: the request
+	// named an identity, so the retirement must either remove it or report exactly why it cannot.
+	AdditionalEntries.Sort([](const FCortexGraphMigrationRetireAdditionalNode& A,
+		const FCortexGraphMigrationRetireAdditionalNode& B) { return A.NodeGuid < B.NodeGuid; });
+	OutPlan.AdditionalNodeGuids = PruneGuidText(AdditionalGuids);
+	OutPlan.AdditionalNodes = AdditionalEntries;
+	for (const FString& GuidText : OutPlan.AdditionalNodeGuids)
+	{
+		if (OutPlan.RemovableGuids.Contains(GuidText)) continue;
+		FString CutReason;
+		const FCortexGraphPruneNode* const SharedNode = Partition.Shared.FindByPredicate(
+			[&](const FCortexGraphPruneNode& Node) { return Node.NodeGuid == GuidText; });
+		const FCortexGraphPruneNode* const BlockedNode = Partition.Blocked.FindByPredicate(
+			[&](const FCortexGraphPruneNode& Node) { return Node.NodeGuid == GuidText; });
+		if (SharedNode) CutReason = SharedNode->Reason;
+		else if (BlockedNode) CutReason = BlockedNode->Reason;
+		if (CutReason.IsEmpty())
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("additional node '%s' is outside the ownership island of the selected entries"),
+					*GuidText));
+			return false;
+		}
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+			FString::Printf(TEXT("additional node '%s' cannot be removed: %s"), *GuidText, *CutReason));
+		return false;
+	}
 	if (bHasApproval)
 	{
 		if (OutPlan.Blocked.Num() > 0 || SelectedGuids.ContainsByPredicate(
@@ -7358,6 +7676,16 @@ TSharedPtr<FJsonObject> FCortexGraphMigrationOps::MakeRetirementInventory(const 
 	}
 	FCortexGraphPatchOps::TrimDiagnostics(EntryLines);
 	Inventory->SetArrayField(TEXT("selected_entries"), ToValues(EntryLines));
+	// The caller reviews the requested additional nodes here, so each line names the identity, the
+	// exact engine class and the class-specific proof the preview admitted it under.
+	TArray<FString> AdditionalLines;
+	for (const FCortexGraphMigrationRetireAdditionalNode& Additional : Plan.AdditionalNodes)
+	{
+		AdditionalLines.Add(FString::Printf(TEXT("%s %s (%s)"), *Additional.NodeGuid, *Additional.ClassPath,
+			Additional.Reason.IsEmpty() ? TEXT("already removed: class proof was reviewed by the approved plan") : *Additional.Reason));
+	}
+	FCortexGraphPatchOps::TrimDiagnostics(AdditionalLines);
+	Inventory->SetArrayField(TEXT("additional_nodes"), ToValues(AdditionalLines));
 	Inventory->SetStringField(TEXT("blueprint_status_before"), Plan.BlueprintStatusBefore);
 	Inventory->SetArrayField(TEXT("preexisting_diagnostics"), ToValues(Plan.PreexistingDiagnostics));
 	Inventory->SetBoolField(TEXT("preexisting_diagnostics_truncated"), Plan.bPreexistingDiagnosticsTruncated);

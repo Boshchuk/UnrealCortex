@@ -266,6 +266,22 @@ struct FCortexGraphMigrationRetireEntry
 	bool bCallInEditor = false;
 };
 
+/**
+ * One explicitly requested `migration.source.additional_node_guids` node with the class-specific
+ * removal semantics the reviewed preview admitted it under.
+ *
+ * The class path and reason ride in the plan JSON, so they are part of the normalized request and of
+ * the validation hash the caller reviews: the selection cannot silently change class or reason
+ * without changing the hash the approval echoes back.
+ */
+struct FCortexGraphMigrationRetireAdditionalNode
+{
+	FString NodeGuid;
+	FString ClassPath;
+	/** The class-specific removal semantics that admitted this node, never a bare request echo. */
+	FString Reason;
+};
+
 /** Durable preview of a bounded set-level `retire_entries` migration. */
 struct FCortexGraphMigrationRetirePlan
 {
@@ -276,11 +292,17 @@ struct FCortexGraphMigrationRetirePlan
 	TArray<FString> RemovableGuids;
 	/** Class-specific identity of every selected entry, ordered by node GUID. */
 	TArray<FCortexGraphMigrationRetireEntry> Entries;
+	/** Canonical ascending identity of every explicitly requested additional node. */
+	TArray<FString> AdditionalNodeGuids;
+	/** Class-specific admission of every requested additional node, ordered by node GUID. */
+	TArray<FCortexGraphMigrationRetireAdditionalNode> AdditionalNodes;
 	/**
-	 * True when an approved entry leaves a compiled artefact behind: an event node registers a
-	 * dynamic component delegate binding and a custom event compiles into a callable generated
-	 * function. Removing the node clears both only on the next successful compile, so a staged
-	 * `compile=false` result is never reported as runtime-safe.
+	 * True when an approved removal leaves a compiled artefact behind: an event node registers a
+	 * dynamic component delegate binding, a custom event compiles into a callable generated function,
+	 * and every additional node the compiler consumes - a macro instance, a latent call or a delegate
+	 * node - only stops compiling once the graph is rebuilt. A compiler-irrelevant reroute is the one
+	 * admitted class that leaves no compiled trace. Removing the node clears those only on the next
+	 * successful compile, so a staged `compile=false` result is never reported as runtime-safe.
 	 */
 	bool bRequiresCompile = false;
 	TArray<FCortexGraphPruneNode> Shared;

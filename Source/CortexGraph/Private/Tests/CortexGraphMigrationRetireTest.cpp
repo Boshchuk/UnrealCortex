@@ -23,8 +23,14 @@
 #include "Kismet/KismetStringLibrary.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Engine/World.h"
+#include "K2Node_AddDelegate.h"
+#include "K2Node_AssignDelegate.h"
 #include "K2Node_Composite.h"
 #include "K2Node_FunctionEntry.h"
+#include "K2Node_Knot.h"
+#include "K2Node_MacroInstance.h"
+#include "K2Node_Tunnel.h"
 #include "K2Node_FunctionResult.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "UObject/Package.h"
@@ -1093,6 +1099,160 @@ bool ReferencerRefusalIsDiagnostic(const FCortexCommandResult& Error, const FStr
 		|| Error.ErrorMessage.Contains(TEXT("unloaded"))
 		|| Error.ErrorMessage.Contains(TEXT("resident"));
 	return bNamesReferencer && bExplainsWhy;
+}
+
+/**
+ * Attaches the reviewed `migration.source.additional_node_guids` list to a migration object the
+ * existing `FFixture::Migration` helper built, so a test never hand-rolls the source object. The
+ * field is always written, so an empty list is a request for nothing instead of a missing field.
+ */
+TSharedPtr<FJsonObject> WithAdditionalNodeGuids(TSharedPtr<FJsonObject> Migration,
+	const TArray<FString>& AdditionalGuids)
+{
+	const TSharedPtr<FJsonObject>* Source = nullptr;
+	if (!Migration.IsValid() || !Migration->TryGetObjectField(TEXT("source"), Source)
+		|| !Source || !Source->IsValid()) return Migration;
+	TArray<TSharedPtr<FJsonValue>> Values;
+	for (const FString& Guid : AdditionalGuids) Values.Add(MakeShared<FJsonValueString>(Guid));
+	(*Source)->SetArrayField(TEXT("additional_node_guids"), Values);
+	return Migration;
+}
+
+/** Reviewed retirement plan for a request that names explicit additional nodes. */
+bool PlanWithAdditionalNodes(FFixture& Fixture, const TArray<FString>& Entries,
+	const TArray<FString>& AdditionalGuids, FCortexGraphMigrationRetirePlan& OutPlan, bool& bReused,
+	FCortexCommandResult& OutError, const bool bApproved = false, const TArray<FString>& Approved = {})
+{
+	return FCortexGraphMigrationOps::PlanRetirement(Fixture.Blueprint,
+		WithAdditionalNodeGuids(Fixture.Migration(Entries, bApproved, Approved), AdditionalGuids),
+		OutPlan, bReused, OutError);
+}
+
+/** Preview-only request that names explicit additional nodes; no approval echo is involved. */
+bool PreviewAdditionalRetirement(FFixture& Fixture, const TArray<FString>& Entries,
+	const TArray<FString>& AdditionalGuids, const TCHAR* PatchId, FCortexGraphPreparedPatch& OutPreview,
+	FCortexCommandResult& OutError)
+{
+	TSharedPtr<FJsonObject> Request = MakeShared<FJsonObject>();
+	Request->SetStringField(TEXT("asset_path"), Fixture.Blueprint->GetPathName());
+	Request->SetStringField(TEXT("patch_id"), PatchId);
+	Request->SetObjectField(TEXT("expected_fingerprint"), FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint));
+	Request->SetArrayField(TEXT("nodes"), {});
+	Request->SetArrayField(TEXT("connections"), {});
+	Request->SetArrayField(TEXT("pin_updates"), {});
+	Request->SetBoolField(TEXT("dry_run"), true);
+	Request->SetBoolField(TEXT("compile"), false);
+	Request->SetBoolField(TEXT("save"), false);
+	Request->SetBoolField(TEXT("allow_noop"), false);
+	Request->SetObjectField(TEXT("migration"), WithAdditionalNodeGuids(Fixture.Migration(Entries), AdditionalGuids));
+	return FCortexGraphPatchOps::Preflight(Fixture.Blueprint, Request, OutPreview, OutError);
+}
+
+/**
+ * Two-stage reviewed retirement request that names explicit additional nodes: preview, echo the
+ * published removable set, then approve it. Mirrors `PrepareRetirementRequest`, which is the same
+ * sequence without the additional-node list.
+ */
+bool PrepareAdditionalRetirementRequest(
+	FFixture& Fixture,
+	const TArray<FString>& Entries,
+	const TArray<FString>& AdditionalGuids,
+	const TCHAR* PatchId,
+	TSharedPtr<FJsonObject>& OutRequest,
+	TArray<FString>& OutApproved,
+	FCortexCommandResult& OutError,
+	const bool bCompile = false,
+	const bool bSave = false)
+{
+	OutRequest = MakeShared<FJsonObject>();
+	OutRequest->SetStringField(TEXT("asset_path"), Fixture.Blueprint->GetPathName());
+	OutRequest->SetStringField(TEXT("patch_id"), PatchId);
+	OutRequest->SetObjectField(TEXT("expected_fingerprint"), FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint));
+	OutRequest->SetArrayField(TEXT("nodes"), {});
+	OutRequest->SetArrayField(TEXT("connections"), {});
+	OutRequest->SetArrayField(TEXT("pin_updates"), {});
+	OutRequest->SetBoolField(TEXT("dry_run"), true);
+	OutRequest->SetBoolField(TEXT("compile"), bCompile);
+	OutRequest->SetBoolField(TEXT("save"), false);
+	OutRequest->SetBoolField(TEXT("allow_noop"), false);
+	TSharedPtr<FJsonObject> Migration = WithAdditionalNodeGuids(Fixture.Migration(Entries), AdditionalGuids);
+	OutRequest->SetObjectField(TEXT("migration"), Migration);
+
+	FCortexGraphPreparedPatch Preview;
+	if (!FCortexGraphPatchOps::Preflight(Fixture.Blueprint, OutRequest, Preview, OutError)) return false;
+	const TSharedPtr<FJsonObject> Inventory =
+		FCortexGraphMigrationOps::MakeRetirementInventory(Preview.RetirementPlan);
+	const TArray<TSharedPtr<FJsonValue>>* Removable = nullptr;
+	if (!Inventory.IsValid() || !Inventory->TryGetArrayField(TEXT("removable"), Removable) || !Removable)
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+			TEXT("additional-node retirement preview did not publish its removable set"));
+		return false;
+	}
+	for (const TSharedPtr<FJsonValue>& Value : *Removable) OutApproved.Add(Value->AsString());
+	TArray<TSharedPtr<FJsonValue>> ApprovalValues;
+	for (const FString& Guid : OutApproved) ApprovalValues.Add(MakeShared<FJsonValueString>(Guid));
+	Migration->SetArrayField(TEXT("approved_node_guids"), ApprovalValues);
+
+	FCortexGraphPreparedPatch Reviewed;
+	if (!FCortexGraphPatchOps::Preflight(Fixture.Blueprint, OutRequest, Reviewed, OutError)) return false;
+	OutRequest->SetBoolField(TEXT("dry_run"), false);
+	OutRequest->SetBoolField(TEXT("save"), bSave);
+	OutRequest->SetStringField(TEXT("expected_validation_hash"), Reviewed.ValidationHash);
+	return true;
+}
+
+/** Canonical ascending GUID list: the order a durable plan must publish. */
+TArray<FString> CanonicalGuids(TArray<FString> Guids)
+{
+	Guids.Sort();
+	return Guids;
+}
+
+/** String values of one JSON array field; empty when the object is null or the field is absent. */
+TArray<FString> JsonStringArray(const TSharedPtr<FJsonObject>& Json, const TCHAR* Field)
+{
+	TArray<FString> Values;
+	const TArray<TSharedPtr<FJsonValue>>* Array = nullptr;
+	if (Json.IsValid() && Json->TryGetArrayField(Field, Array) && Array)
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *Array)
+		{
+			if (Value.IsValid()) Values.Add(Value->AsString());
+		}
+	}
+	return Values;
+}
+
+/** Adds one standalone reroute knot to the fixture graph. */
+UK2Node_Knot* AddRerouteKnot(FFixture& Fixture)
+{
+	if (!Fixture.Graph) return nullptr;
+	UK2Node_Knot* Knot = NewObject<UK2Node_Knot>(Fixture.Graph, NAME_None, RF_Transactional);
+	Knot->CreateNewGuid();
+	Knot->AllocateDefaultPins();
+	Fixture.Graph->AddNode(Knot, true, false);
+	return Knot;
+}
+
+/**
+ * Reroutes one existing link through a new reroute knot: breaks `From.FromPin -> To.ToPin`, adds the
+ * knot, then wires `From.FromPin -> knot -> To.ToPin`. The schema connection notifies the knot, which
+ * propagates its wildcard pins from the surviving link, so an execution link stays an execution link.
+ */
+UK2Node_Knot* RerouteThroughKnot(FFixture& Fixture, UEdGraphNode* From, const TCHAR* FromPin,
+	UEdGraphNode* To, const TCHAR* ToPin)
+{
+	UEdGraphPin* SourcePin = From ? From->FindPin(FName(FromPin)) : nullptr;
+	UEdGraphPin* TargetPin = To ? To->FindPin(FName(ToPin)) : nullptr;
+	const UEdGraphSchema* Schema = Fixture.Graph ? Fixture.Graph->GetSchema() : nullptr;
+	if (!SourcePin || !TargetPin || !Schema) return nullptr;
+	UK2Node_Knot* Knot = AddRerouteKnot(Fixture);
+	if (!Knot) return nullptr;
+	SourcePin->BreakLinkTo(TargetPin);
+	if (!Schema->TryCreateConnection(SourcePin, Knot->GetInputPin())) return nullptr;
+	if (!Schema->TryCreateConnection(Knot->GetOutputPin(), TargetPin)) return nullptr;
+	return Knot;
 }
 
 }
@@ -3799,6 +3959,890 @@ bool FCortexGraphMigrationRetireComponentBoundMismatchTest::RunTest(const FStrin
 
 	Fixture.Cleanup();
 	IFileManager::Get().Delete(*Filename, false, true, true);
+	return true;
+}
+
+// CortexSandbox #112/#113: the observed page keeps obsolete non-entry nodes the default ownership
+// partition blocks or shares. `migration.source.additional_node_guids` is the reviewed, explicitly
+// bounded way to name them, and the class-specific exception may only lift ownership rules the engine
+// proves removable. `UK2Node_Knot` is that class: `IsCompilerRelevant()` returns false (no compiled
+// artefact), it declares no serialized state, `GetSubGraphs()` is `UK2Node`'s (no bound graph) and it
+// overrides no `DestroyNode`, so `FBlueprintEditorUtils::RemoveNode` -> `Schema->BreakNodeLinks` ->
+// `UEdGraphNode::DestroyNode` -> `UEdGraph::RemoveNode` stays inside the named graph. Everything else
+// the observed page needs (delegate nodes owned by their delegate declaration, latent calls, the
+// tunnel-derived macro instance whose `UK2Node_Tunnel::DestroyNode` unlinks the twinned tunnels of a
+// graph the instance does not own) stays refused: an unproved class is never converted to removable
+// merely because its GUID appears in the request.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireAdditionalKnotTest,
+	"Cortex.Graph.Authoring.Migration.Retire.AdditionalRerouteKnotJoinsReviewedRemoval",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexGraphMigrationRetireAdditionalKnotTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexGraphMigrationRetireTest;
+	FFixture Fixture;
+	TestTrue(TEXT("retirement fixture with a cosmetic hook is created"),
+		Fixture.Build(TEXT("BP_RetireAdditionalKnot"), /*bRetainProducer=*/true));
+	if (!Fixture.Blueprint) { Fixture.Cleanup(); return false; }
+
+	// Two chained reroute knots between the selected entry and its body: both sit inside the island and
+	// neither has a retained consumer, so both are removable once the reviewed request names them.
+	UK2Node_Knot* InnerKnot = RerouteThroughKnot(Fixture, Fixture.Alpha, TEXT("then"), Fixture.AlphaBody, TEXT("execute"));
+	UK2Node_Knot* OuterKnot = InnerKnot
+		? RerouteThroughKnot(Fixture, Fixture.Alpha, TEXT("then"), InnerKnot, TEXT("InputPin")) : nullptr;
+	TestNotNull(TEXT("the selected entry's execution path is rerouted through a knot chain"), OuterKnot);
+	if (!InnerKnot || !OuterKnot) { Fixture.Cleanup(); return false; }
+	TestTrue(TEXT("the rerouted path starts at the selected entry's then pin"),
+		Fixture.Alpha->FindPin(TEXT("then"))->LinkedTo.Contains(OuterKnot->GetInputPin()));
+	TestTrue(TEXT("the inner reroute still carries an execution link"),
+		InnerKnot->GetInputPin()->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec);
+
+	const FString AlphaGuid = Fixture.Alpha->NodeGuid.ToString();
+	const FString InnerGuid = InnerKnot->NodeGuid.ToString();
+	const FString OuterGuid = OuterKnot->NodeGuid.ToString();
+	const TArray<FString> Entries = { AlphaGuid };
+	const TArray<FString> RequestedKnots = { InnerGuid, OuterGuid };
+
+	// An empty request list is a request for nothing, not a missing field: the default class rule keeps
+	// every unlisted knot blocked.
+	FCortexGraphPreparedPatch EmptyPreview;
+	FCortexCommandResult Error;
+	TestTrue(FString::Printf(TEXT("an empty additional list previews under the default rules: %s"), *Error.ErrorMessage),
+		PreviewAdditionalRetirement(Fixture, Entries, {}, TEXT("00000000-0000-0000-0000-000000114001"), EmptyPreview, Error));
+	TestTrue(TEXT("an empty additional list publishes an empty canonical list"),
+		JsonStringArray(EmptyPreview.RetirementPlan, TEXT("additional_guids")).IsEmpty());
+	TestFalse(TEXT("an empty additional list leaves the unlisted inner knot blocked"),
+		JsonStringArray(EmptyPreview.RetirementPlan, TEXT("removable_guids")).Contains(InnerGuid));
+	TestFalse(TEXT("an empty additional list leaves the unlisted outer knot blocked"),
+		JsonStringArray(EmptyPreview.RetirementPlan, TEXT("removable_guids")).Contains(OuterGuid));
+
+	FCortexGraphMigrationRetirePlan Unapproved;
+	bool bReused = false;
+	Error = FCortexCommandResult();
+	TestTrue(FString::Printf(TEXT("the additional-knot preview succeeds: %s"), *Error.ErrorMessage),
+		PlanWithAdditionalNodes(Fixture, Entries, RequestedKnots, Unapproved, bReused, Error));
+	TestTrue(TEXT("both explicitly requested reroute knots join the removable set"),
+		Unapproved.RemovableGuids.Contains(InnerGuid) && Unapproved.RemovableGuids.Contains(OuterGuid));
+	TestTrue(TEXT("the unlisted entry body stays removable"),
+		Unapproved.RemovableGuids.Contains(Fixture.AlphaBodyGuid.ToString()));
+	TestFalse(TEXT("the cosmetic hook stays out of the removal set"),
+		Unapproved.RemovableGuids.Contains(Fixture.RetainedGuid.ToString()));
+	TestFalse(TEXT("the retained cosmetic body stays out of the removal set"),
+		Unapproved.RemovableGuids.Contains(Fixture.RetainedBodyGuid.ToString()));
+	TestFalse(TEXT("the shared producer stays out of the removal set"),
+		Unapproved.RemovableGuids.Contains(Fixture.ProducerGuid.ToString()));
+
+	// The durable plan carries the canonical requested GUIDs and the exact class/reason per node, so the
+	// normalized hash and the readback cannot silently change the selection.
+	const TSharedPtr<FJsonObject> PlanJson = Unapproved.ToJson();
+	TestEqual(TEXT("the plan publishes the canonical requested additional GUIDs"),
+		FString::Join(JsonStringArray(PlanJson, TEXT("additional_guids")), TEXT(",")),
+		FString::Join(CanonicalGuids(RequestedKnots), TEXT(",")));
+	const TArray<TSharedPtr<FJsonValue>>* AdditionalNodes = nullptr;
+	TestTrue(TEXT("the plan publishes one reviewed additional node per requested GUID"),
+		PlanJson.IsValid() && PlanJson->TryGetArrayField(TEXT("additional_nodes"), AdditionalNodes)
+			&& AdditionalNodes && AdditionalNodes->Num() == RequestedKnots.Num());
+	if (AdditionalNodes)
+	{
+		TArray<FString> NodeGuids;
+		for (const TSharedPtr<FJsonValue>& Value : *AdditionalNodes)
+		{
+			const TSharedPtr<FJsonObject> NodeJson = Value.IsValid() ? Value->AsObject() : nullptr;
+			FString NodeGuid, ClassPath, Reason;
+			TestTrue(TEXT("a reviewed additional node carries its GUID, class and reason"),
+				NodeJson.IsValid() && NodeJson->TryGetStringField(TEXT("node_guid"), NodeGuid)
+					&& NodeJson->TryGetStringField(TEXT("class_path"), ClassPath)
+					&& NodeJson->TryGetStringField(TEXT("reason"), Reason) && !Reason.IsEmpty());
+			TestEqual(TEXT("an admitted additional node names the exact engine class it removes"),
+				ClassPath, UK2Node_Knot::StaticClass()->GetPathName());
+			NodeGuids.Add(NodeGuid);
+		}
+		NodeGuids.Sort();
+		TestEqual(TEXT("the reviewed additional nodes are the requested reroute knots"),
+			FString::Join(NodeGuids, TEXT(",")), FString::Join(CanonicalGuids(RequestedKnots), TEXT(",")));
+	}
+	FCortexGraphMigrationRetirePlan RoundTrip;
+	Error = FCortexCommandResult();
+	TestTrue(TEXT("the durable plan with additional nodes round-trips"),
+		FCortexGraphMigrationRetirePlan::FromJson(PlanJson, RoundTrip, Error));
+	TestEqual(TEXT("round-trip keeps the canonical additional GUID list"),
+		FString::Join(JsonStringArray(RoundTrip.ToJson(), TEXT("additional_guids")), TEXT(",")),
+		FString::Join(JsonStringArray(PlanJson, TEXT("additional_guids")), TEXT(",")));
+
+	// The caller reviews the inventory, so the requested additional nodes must be published there with
+	// their class and the reason they were admitted.
+	const TSharedPtr<FJsonObject> Inventory = FCortexGraphMigrationOps::MakeRetirementInventory(Unapproved.ToJson());
+	TestNotNull(TEXT("the reviewed retirement inventory is created"), Inventory.Get());
+	const TArray<TSharedPtr<FJsonValue>>* InventoryAdditional = nullptr;
+	TestTrue(TEXT("the inventory publishes one reviewed line per requested additional node"),
+		Inventory.IsValid() && Inventory->TryGetArrayField(TEXT("additional_nodes"), InventoryAdditional)
+			&& InventoryAdditional && InventoryAdditional->Num() == RequestedKnots.Num());
+	if (InventoryAdditional)
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *InventoryAdditional)
+		{
+			const FString Line = Value.IsValid() ? Value->AsString() : FString();
+			TestTrue(FString::Printf(TEXT("the inventory line names a requested knot and its class: %s"), *Line),
+				Line.Contains(TEXT("K2Node_Knot")) && (Line.Contains(InnerGuid) || Line.Contains(OuterGuid)));
+		}
+	}
+
+	// The reviewed preflight hash is built from the normalized plan, so two requests that differ only in
+	// the order of the requested GUIDs must not produce two different reviewed intents.
+	FCortexGraphPreparedPatch ForwardPreview;
+	FCortexGraphPreparedPatch ReversedPreview;
+	Error = FCortexCommandResult();
+	TestTrue(FString::Printf(TEXT("the forward-ordered reviewed preview succeeds: %s"), *Error.ErrorMessage),
+		PreviewAdditionalRetirement(Fixture, Entries, { InnerGuid, OuterGuid },
+			TEXT("00000000-0000-0000-0000-000000114002"), ForwardPreview, Error));
+	Error = FCortexCommandResult();
+	TestTrue(FString::Printf(TEXT("the reverse-ordered reviewed preview succeeds: %s"), *Error.ErrorMessage),
+		PreviewAdditionalRetirement(Fixture, Entries, { OuterGuid, InnerGuid },
+			TEXT("00000000-0000-0000-0000-000000114002"), ReversedPreview, Error));
+	TestEqual(TEXT("the reviewed preflight hash does not depend on the requested GUID order"),
+		ReversedPreview.ValidationHash, ForwardPreview.ValidationHash);
+	TestEqual(TEXT("both orders publish the same canonical requested list"),
+		FString::Join(JsonStringArray(ReversedPreview.RetirementPlan, TEXT("additional_guids")), TEXT(",")),
+		FString::Join(JsonStringArray(ForwardPreview.RetirementPlan, TEXT("additional_guids")), TEXT(",")));
+
+	// Approval stays strictly bounded: an approval that drops a requested additional node is refused
+	// before anything is deleted.
+	TArray<FString> TruncatedApproval = Unapproved.RemovableGuids;
+	TruncatedApproval.Remove(InnerGuid);
+	TruncatedApproval.Remove(OuterGuid);
+	const FString HashBefore = FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)
+		->GetStringField(TEXT("graph_authoring_hash"));
+	const int32 NodesBefore = Fixture.Graph->Nodes.Num();
+	const bool bDirtyBefore = Fixture.Package->IsDirty();
+	FCortexGraphMigrationRetirePlan RefusedPlan;
+	Error = FCortexCommandResult();
+	TestFalse(TEXT("an approval that omits an explicitly requested additional node is refused"),
+		PlanWithAdditionalNodes(Fixture, Entries, RequestedKnots, RefusedPlan, bReused, Error, true, TruncatedApproval));
+	TestEqual(TEXT("the bounded approval refusal is INVALID_OPERATION"),
+		Error.ErrorCode, FString(CortexErrorCodes::InvalidOperation));
+	TestTrue(TEXT("the bounded approval refusal demands the exact removable set"),
+		Error.ErrorMessage.Contains(TEXT("must exactly equal the removable set")));
+	TestTrue(TEXT("the bounded approval refusal names the omitted requested node"),
+		Error.ErrorMessage.Contains(InnerGuid) || Error.ErrorMessage.Contains(OuterGuid));
+	TestEqual(TEXT("the refused bounded approval leaves the graph hash unchanged"),
+		FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)->GetStringField(TEXT("graph_authoring_hash")),
+		HashBefore);
+	TestEqual(TEXT("the refused bounded approval leaves the node count unchanged"),
+		Fixture.Graph->Nodes.Num(), NodesBefore);
+	TestEqual(TEXT("the refused bounded approval leaves the dirty state unchanged"),
+		Fixture.Package->IsDirty(), bDirtyBefore);
+
+	// The full reviewed path: apply the exact published set and prove the cosmetic hook survived.
+	TSharedPtr<FJsonObject> Request;
+	TArray<FString> Approved;
+	Error = FCortexCommandResult();
+	TestTrue(FString::Printf(TEXT("the two-stage additional-node request is prepared: %s"), *Error.ErrorMessage),
+		PrepareAdditionalRetirementRequest(Fixture, Entries, RequestedKnots,
+			TEXT("00000000-0000-0000-0000-000000114003"), Request, Approved, Error));
+	TestTrue(TEXT("the reviewed approval covers both explicitly requested knots"),
+		Approved.Contains(InnerGuid) && Approved.Contains(OuterGuid));
+	const TSet<FGuid> RetainedGuids = { Fixture.RetainedGuid, Fixture.RetainedBodyGuid, Fixture.ProducerGuid };
+	const FGuid InnerKnotGuidValue = InnerKnot->NodeGuid;
+	const FString RetainedBefore = CaptureNativeGraph(Fixture.Graph, &RetainedGuids);
+	FCortexGraphPatchOutcome Outcome;
+	Error = FCortexCommandResult();
+	TestTrue(FString::Printf(TEXT("the reviewed additional-node retirement applies: %s"), *Error.ErrorMessage),
+		FCortexGraphPatchOps::Execute(Fixture.Blueprint, Request, Outcome, Error));
+	TestEqual(TEXT("the additional-node retirement reports applied"), Outcome.ApplyStatus, FString(TEXT("applied")));
+	TestEqual(TEXT("the additional-node retirement readback matches"), Outcome.ReadbackStatus, FString(TEXT("matched")));
+	for (const FString& GuidText : Approved)
+	{
+		FGuid Guid;
+		FGuid::Parse(GuidText, Guid);
+		TestNull(FString::Printf(TEXT("approved node %s is absent from the graph and asset"), *GuidText),
+			FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Guid));
+	}
+	TestNull(TEXT("the explicitly requested reroute knot is gone"),
+		FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, InnerKnotGuidValue));
+	TestNotNull(TEXT("the cosmetic hook remains"),
+		FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Fixture.RetainedGuid));
+	TestNotNull(TEXT("the retained cosmetic body remains"),
+		FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Fixture.RetainedBodyGuid));
+	TestNotNull(TEXT("the shared producer remains"),
+		FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Fixture.ProducerGuid));
+	TestEqual(TEXT("the cosmetic hook, its body and the shared producer are unchanged"),
+		CaptureNativeGraph(Fixture.Graph, &RetainedGuids), RetainedBefore);
+	TestTrue(TEXT("the retained cosmetic execution link survives the additional-node retirement"),
+		Fixture.Retained->FindPin(TEXT("then"))->LinkedTo.Contains(Fixture.RetainedBody->FindPin(TEXT("execute"))));
+	TestTrue(TEXT("the retained cosmetic data link survives the additional-node retirement"),
+		Fixture.Producer->FindPin(TEXT("ReturnValue"))->LinkedTo.Contains(Fixture.RetainedBody->FindPin(TEXT("InString"))));
+	TestTrue(TEXT("the additional-node retirement leaves the package dirty"), Fixture.Package->IsDirty());
+
+	Fixture.Cleanup();
+	return true;
+}
+
+// CortexSandbox #113: the additional-node request is a reviewed contract, so a malformed or foreign
+// list must be refused before the partition runs, and an active play session refuses the whole patch
+// before any additional-node work happens.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireAdditionalRequestContractTest,
+	"Cortex.Graph.Authoring.Migration.Retire.RefusesMalformedAdditionalNodeRequests",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexGraphMigrationRetireAdditionalRequestContractTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexGraphMigrationRetireTest;
+	FFixture Fixture;
+	TestTrue(TEXT("retirement fixture is created"), Fixture.Build(TEXT("BP_RetireAdditionalContract"), true));
+	if (!Fixture.Blueprint) { Fixture.Cleanup(); return false; }
+
+	UK2Node_Knot* Knot = RerouteThroughKnot(Fixture, Fixture.Alpha, TEXT("then"), Fixture.AlphaBody, TEXT("execute"));
+	TestNotNull(TEXT("the selected entry's execution path is rerouted through a knot"), Knot);
+	if (!Knot) { Fixture.Cleanup(); return false; }
+	const FString AlphaGuid = Fixture.Alpha->NodeGuid.ToString();
+	const FString KnotGuid = Knot->NodeGuid.ToString();
+	const TArray<FString> Entries = { AlphaGuid };
+
+	// A second graph of the same asset owns a node the request tries to name.
+	UEdGraph* OtherGraph = NewObject<UEdGraph>(Fixture.Blueprint);
+	OtherGraph->GraphGuid = FGuid::NewGuid();
+	Fixture.Blueprint->FunctionGraphs.Add(OtherGraph);
+	UK2Node_CallFunction* ForeignNode = NewObject<UK2Node_CallFunction>(OtherGraph);
+	ForeignNode->CreateNewGuid();
+	OtherGraph->AddNode(ForeignNode, true, false);
+	const FString ForeignGuid = ForeignNode->NodeGuid.ToString();
+	const FString AbsentGuid = FGuid::NewGuid().ToString();
+
+	auto ExpectRefused = [&](const TCHAR* Label, const TArray<FString>& AdditionalGuids,
+		const FString& ExpectedCode, const TArray<FString>& Fragments)
+	{
+		const FString CaseHashBefore = FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)
+			->GetStringField(TEXT("graph_authoring_hash"));
+		const int32 CaseNodesBefore = Fixture.Graph->Nodes.Num();
+		const bool bCaseDirtyBefore = Fixture.Package->IsDirty();
+		FCortexGraphMigrationRetirePlan CasePlan;
+		bool bCaseReused = false;
+		FCortexCommandResult CaseError;
+		const bool bPlanned = PlanWithAdditionalNodes(Fixture, Entries, AdditionalGuids,
+			CasePlan, bCaseReused, CaseError);
+		TestFalse(FString::Printf(TEXT("%s is refused"), Label), bPlanned);
+		TestEqual(FString::Printf(TEXT("%s reports the expected error code"), Label),
+			CaseError.ErrorCode, ExpectedCode);
+		for (const FString& Fragment : Fragments)
+		{
+			TestTrue(FString::Printf(TEXT("%s refusal names '%s': %s"), Label, *Fragment, *CaseError.ErrorMessage),
+				CaseError.ErrorMessage.Contains(Fragment));
+		}
+		TestEqual(FString::Printf(TEXT("%s leaves the graph hash unchanged"), Label),
+			FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)
+				->GetStringField(TEXT("graph_authoring_hash")), CaseHashBefore);
+		TestEqual(FString::Printf(TEXT("%s leaves the node count unchanged"), Label),
+			Fixture.Graph->Nodes.Num(), CaseNodesBefore);
+		TestEqual(FString::Printf(TEXT("%s leaves the dirty state unchanged"), Label),
+			Fixture.Package->IsDirty(), bCaseDirtyBefore);
+	};
+
+	ExpectRefused(TEXT("a repeated additional GUID"), { KnotGuid, KnotGuid },
+		FString(CortexErrorCodes::InvalidField),
+		{ TEXT("additional_node_guids"), TEXT("unique") });
+	ExpectRefused(TEXT("an additional GUID that repeats a selected entry"), { AlphaGuid },
+		FString(CortexErrorCodes::InvalidField),
+		{ TEXT("selected entry"), AlphaGuid });
+	ExpectRefused(TEXT("an additional entry that is not a GUID"), { TEXT("not-a-guid") },
+		FString(CortexErrorCodes::InvalidField),
+		{ TEXT("additional_node_guids"), TEXT("GUID") });
+	ExpectRefused(TEXT("an additional GUID absent from the asset"), { AbsentGuid },
+		FString(CortexErrorCodes::InvalidOperation),
+		{ AbsentGuid, TEXT("not present") });
+	ExpectRefused(TEXT("an additional GUID owned by another graph of the asset"), { ForeignGuid },
+		FString(CortexErrorCodes::InvalidOperation),
+		{ ForeignGuid, OtherGraph->GraphGuid.ToString(), TEXT("another graph") });
+
+	// An active play or simulate session refuses the patch before any additional-node work happens, and
+	// the very same request previews once the session ends.
+	UWorld* const EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	TestNotNull(TEXT("the editor world is available for the play-session precondition"), EditorWorld);
+	if (EditorWorld)
+	{
+		const FString PlayHashBefore = FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)
+			->GetStringField(TEXT("graph_authoring_hash"));
+		const int32 PlayNodesBefore = Fixture.Graph->Nodes.Num();
+		const bool bPlayDirtyBefore = Fixture.Package->IsDirty();
+		UWorld* const PlayWorldBefore = GEditor->PlayWorld;
+		GEditor->PlayWorld = EditorWorld;
+		FCortexGraphPreparedPatch PlayPreview;
+		FCortexCommandResult PlayError;
+		const bool bPlayPlanned = PreviewAdditionalRetirement(Fixture, Entries, { KnotGuid },
+			TEXT("00000000-0000-0000-0000-000000114101"), PlayPreview, PlayError);
+		GEditor->PlayWorld = PlayWorldBefore;
+		TestFalse(TEXT("an active play session refuses a request that names additional nodes"), bPlayPlanned);
+		TestEqual(TEXT("the play-session refusal is INVALID_OPERATION"),
+			PlayError.ErrorCode, FString(CortexErrorCodes::InvalidOperation));
+		TestTrue(TEXT("the play-session refusal names the play or simulate session"),
+			PlayError.ErrorMessage.Contains(TEXT("play or simulate session")));
+		TestEqual(TEXT("the refused play-session preview leaves the graph hash unchanged"),
+			FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)
+				->GetStringField(TEXT("graph_authoring_hash")), PlayHashBefore);
+		TestEqual(TEXT("the refused play-session preview leaves the node count unchanged"),
+			Fixture.Graph->Nodes.Num(), PlayNodesBefore);
+		TestEqual(TEXT("the refused play-session preview leaves the dirty state unchanged"),
+			Fixture.Package->IsDirty(), bPlayDirtyBefore);
+
+		FCortexGraphPreparedPatch EndedPreview;
+		FCortexCommandResult EndedError;
+		TestTrue(FString::Printf(TEXT("the same request previews once the play session ends: %s"), *EndedError.ErrorMessage),
+			PreviewAdditionalRetirement(Fixture, Entries, { KnotGuid },
+				TEXT("00000000-0000-0000-0000-000000114102"), EndedPreview, EndedError));
+	}
+
+	Fixture.Cleanup();
+	return true;
+}
+
+// CortexSandbox #113: the additional-node list may only join nodes of the selected entries' ownership
+// island, and it never lifts the class rule for a node it does not name.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireAdditionalIslandBoundaryTest,
+	"Cortex.Graph.Authoring.Migration.Retire.RefusesAdditionalNodeOutsideTheOwnershipIsland",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexGraphMigrationRetireAdditionalIslandBoundaryTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexGraphMigrationRetireTest;
+	FFixture Fixture;
+	TestTrue(TEXT("retirement fixture with a cosmetic hook is created"),
+		Fixture.Build(TEXT("BP_RetireAdditionalIsland"), /*bRetainProducer=*/true));
+	if (!Fixture.Blueprint) { Fixture.Cleanup(); return false; }
+
+	// A knot inside the retained cosmetic hook's own chain: a real node of the named graph that the
+	// selected entry's ownership island does not contain.
+	UK2Node_Knot* CosmeticKnot = RerouteThroughKnot(Fixture, Fixture.Retained, TEXT("then"),
+		Fixture.RetainedBody, TEXT("execute"));
+	UK2Node_Knot* IslandKnot = RerouteThroughKnot(Fixture, Fixture.Alpha, TEXT("then"),
+		Fixture.AlphaBody, TEXT("execute"));
+	TestTrue(TEXT("the cosmetic hook's execution path is rerouted through a knot"),
+		CosmeticKnot != nullptr && IslandKnot != nullptr);
+	if (!CosmeticKnot || !IslandKnot) { Fixture.Cleanup(); return false; }
+	const FString AlphaGuid = Fixture.Alpha->NodeGuid.ToString();
+	const FString CosmeticKnotGuid = CosmeticKnot->NodeGuid.ToString();
+	const FString IslandKnotGuid = IslandKnot->NodeGuid.ToString();
+
+	const FString HashBefore = FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)
+		->GetStringField(TEXT("graph_authoring_hash"));
+	const int32 NodesBefore = Fixture.Graph->Nodes.Num();
+	const bool bDirtyBefore = Fixture.Package->IsDirty();
+	FCortexGraphMigrationRetirePlan RefusedPlan;
+	bool bReused = false;
+	FCortexCommandResult Error;
+	TestFalse(TEXT("a requested additional node outside the selected entries' island is refused"),
+		PlanWithAdditionalNodes(Fixture, { AlphaGuid }, { CosmeticKnotGuid }, RefusedPlan, bReused, Error));
+	TestEqual(TEXT("the outside-island refusal is INVALID_OPERATION"),
+		Error.ErrorCode, FString(CortexErrorCodes::InvalidOperation));
+	TestTrue(TEXT("the outside-island refusal names the requested node and the island"),
+		Error.ErrorMessage.Contains(CosmeticKnotGuid) && Error.ErrorMessage.Contains(TEXT("island")));
+	TestEqual(TEXT("the refused outside-island request leaves the graph hash unchanged"),
+		FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)
+			->GetStringField(TEXT("graph_authoring_hash")), HashBefore);
+	TestEqual(TEXT("the refused outside-island request leaves the node count unchanged"),
+		Fixture.Graph->Nodes.Num(), NodesBefore);
+	TestEqual(TEXT("the refused outside-island request leaves the dirty state unchanged"),
+		Fixture.Package->IsDirty(), bDirtyBefore);
+
+	// The old rule holds for every node the request does not name: an unlisted in-island knot stays
+	// blocked by class, and the reviewed approval of the published removable set still refuses.
+	FCortexGraphMigrationRetirePlan UnlistedPlan;
+	Error = FCortexCommandResult();
+	TestTrue(FString::Printf(TEXT("the request without an additional list previews: %s"), *Error.ErrorMessage),
+		Plan(Fixture, { AlphaGuid }, UnlistedPlan, bReused, Error));
+	TestTrue(TEXT("an unlisted in-island knot is published as blocked"),
+		UnlistedPlan.Blocked.ContainsByPredicate(
+			[&](const FCortexGraphPruneNode& Node) { return Node.NodeGuid == IslandKnotGuid; }));
+	TestFalse(TEXT("an unlisted in-island knot is never removable"),
+		UnlistedPlan.RemovableGuids.Contains(IslandKnotGuid));
+	Error = FCortexCommandResult();
+	const TArray<FString> UnlistedRemovable = UnlistedPlan.RemovableGuids;
+	TestFalse(TEXT("the reviewed approval of a set with an unlisted blocked knot is refused"),
+		Plan(Fixture, { AlphaGuid }, RefusedPlan, bReused, Error, true, UnlistedRemovable));
+	TestEqual(TEXT("the unlisted blocked knot refusal is INVALID_OPERATION"),
+		Error.ErrorCode, FString(CortexErrorCodes::InvalidOperation));
+
+	Fixture.Cleanup();
+	return true;
+}
+
+// CortexSandbox #113: the reviewed additional-node exception exists because the observed page cannot
+// retire without this family. Each admitted class is proven removal-local inside the named graph:
+// the engine's own `FBlueprintEditorUtils::RemoveNode` breaks the node's links and calls `DestroyNode`,
+// which none of them overrides in a way that reaches outside the node.
+//   - `UK2Node_MacroInstance`: `MacroGraphReference` is a shared reference to a graph the instance does
+//     not own (`GetSubGraphs()` is `UEdGraphNode`'s empty override - only `UK2Node_Composite` returns a
+//     bound graph), and `UK2Node_Tunnel::DestroyNode`'s twin unlink cannot apply because
+//     `InputSinkNode`/`OutputSourceNode` are assigned for composite boundary nodes only.
+//   - a latent `UK2Node_CallFunction`: the pending action lives in the running world's
+//     `FLatentActionManager` (removed per object on reinstancing, `KismetReinstanceUtilities.cpp:805`)
+//     and the asset-side trace is the compiled latent statement plus the generated class's debug UUID
+//     association, both rebuilt by the recompile an admitted node requires.
+//   - `UK2Node_CreateDelegate` / `UK2Node_AddDelegate` / `UK2Node_CallDelegate`: the delegate
+//     declaration lives on the owning class the node references, and none of them overrides
+//     `GetDynamicBindingClass()` (`UComponentDelegateBinding` is registered by component-bound event
+//     nodes only), so no generated binding object is attached to them.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireAdditionalClassAdmissionTest,
+	"Cortex.Graph.Authoring.Migration.Retire.AdmitsProvenAdditionalNodeClasses",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexGraphMigrationRetireAdditionalClassAdmissionTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexGraphMigrationRetireTest;
+	FFixture Fixture;
+	TestTrue(TEXT("retirement fixture with a cosmetic hook is created"),
+		Fixture.Build(TEXT("BP_RetireAdditionalClasses"), /*bRetainProducer=*/true));
+	if (!Fixture.Blueprint) { Fixture.Cleanup(); return false; }
+	const UEdGraphSchema* Schema = Fixture.Graph->GetSchema();
+	TestNotNull(TEXT("the fixture graph schema is available"), Schema);
+	if (!Schema) { Fixture.Cleanup(); return false; }
+	const FString AlphaGuid = Fixture.Alpha->NodeGuid.ToString();
+
+	// (a) The observed latent call, chained into the selected entry's island.
+	UK2Node_CallFunction* Latent = Fixture.AddCall(
+		UKismetSystemLibrary::StaticClass()->FindFunctionByName(TEXT("DelayUntilNextTick")));
+	TestNotNull(TEXT("the observed latent call node exists"), Latent);
+	TestTrue(TEXT("the engine marks the observed call as latent"), Latent && Latent->IsLatentFunction());
+	TestTrue(TEXT("the latent call is linked into the selected entry's execution island"),
+		Latent && Schema->TryCreateConnection(
+			Fixture.AlphaBody->FindPin(TEXT("then")), Latent->FindPin(TEXT("execute"))));
+
+	// (b) The observed delegate pair, exactly the shape the page carries: a create node feeding the
+	// delegate input of an add node that sits in the execution island.
+	FMulticastDelegateProperty* ClickedDelegate =
+		FindFProperty<FMulticastDelegateProperty>(UButton::StaticClass(), TEXT("OnClicked"));
+	TestNotNull(TEXT("the native button delegate the observed page binds is available"), ClickedDelegate);
+	UK2Node_CreateDelegate* CreateDelegate =
+		NewObject<UK2Node_CreateDelegate>(Fixture.Graph, NAME_None, RF_Transactional);
+	CreateDelegate->CreateNewGuid();
+	CreateDelegate->AllocateDefaultPins();
+	Fixture.Graph->AddNode(CreateDelegate, true, false);
+	UK2Node_AddDelegate* AddDelegate = NewObject<UK2Node_AddDelegate>(Fixture.Graph, NAME_None, RF_Transactional);
+	if (ClickedDelegate)
+	{
+		AddDelegate->SetFromProperty(ClickedDelegate, /*bSelfContext=*/false, UButton::StaticClass());
+	}
+	AddDelegate->CreateNewGuid();
+	AddDelegate->AllocateDefaultPins();
+	Fixture.Graph->AddNode(AddDelegate, true, false);
+	UEdGraphPin* CreatedDelegateOut = nullptr;
+	for (UEdGraphPin* Pin : CreateDelegate->Pins)
+	{
+		if (Pin && Pin->Direction == EGPD_Output && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Delegate)
+		{
+			CreatedDelegateOut = Pin;
+			break;
+		}
+	}
+	UEdGraphPin* AddedDelegateIn = nullptr;
+	for (UEdGraphPin* Pin : AddDelegate->Pins)
+	{
+		if (Pin && Pin->Direction == EGPD_Input && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Delegate)
+		{
+			AddedDelegateIn = Pin;
+			break;
+		}
+	}
+	TestNotNull(TEXT("the delegate create node exposes a delegate output"), CreatedDelegateOut);
+	TestNotNull(TEXT("the delegate add node exposes a delegate input"), AddedDelegateIn);
+	TestTrue(TEXT("the add node is chained into the selected entry's execution island"),
+		Latent && Latent->FindPin(TEXT("then")) && AddDelegate->FindPin(TEXT("execute"))
+			&& Schema->TryCreateConnection(Latent->FindPin(TEXT("then")), AddDelegate->FindPin(TEXT("execute"))));
+	TestTrue(TEXT("the create node feeds the add node's delegate input"),
+		CreatedDelegateOut && AddedDelegateIn && Schema->TryCreateConnection(CreatedDelegateOut, AddedDelegateIn));
+
+	// (c) The observed macro: the engine's own `IsValid` macro library graph, the node the page holds.
+	UBlueprint* StandardMacros = LoadObject<UBlueprint>(nullptr,
+		TEXT("/Engine/EditorBlueprintResources/StandardMacros.StandardMacros"));
+	TestNotNull(TEXT("the engine standard macro library is loadable"), StandardMacros);
+	UEdGraph* MacroGraph = nullptr;
+	if (StandardMacros)
+	{
+		TArray<UEdGraph*> StandardGraphs;
+		StandardMacros->GetAllGraphs(StandardGraphs);
+		StandardGraphs.Sort([](const UEdGraph& A, const UEdGraph& B)
+		{
+			return A.GetName().ToString() < B.GetName().ToString();
+		});
+		for (UEdGraph* Candidate : StandardGraphs)
+		{
+			if (Candidate && Candidate->GetName() == TEXT("IsValid")) { MacroGraph = Candidate; break; }
+		}
+		if (!MacroGraph)
+		{
+			for (UEdGraph* Candidate : StandardGraphs)
+			{
+				if (Candidate && Candidate->GetName().Contains(TEXT("IsValid"))) { MacroGraph = Candidate; break; }
+			}
+		}
+	}
+	TestNotNull(TEXT("the engine IsValid macro graph resolves"), MacroGraph);
+	UK2Node_MacroInstance* Macro = nullptr;
+	UEdGraphPin* MacroExecIn = nullptr;
+	if (MacroGraph)
+	{
+		Macro = NewObject<UK2Node_MacroInstance>(Fixture.Graph, NAME_None, RF_Transactional);
+		Macro->SetMacroGraph(MacroGraph);
+		Macro->CreateNewGuid();
+		Macro->AllocateDefaultPins();
+		Fixture.Graph->AddNode(Macro, true, false);
+		for (UEdGraphPin* Pin : Macro->Pins)
+		{
+			if (Pin && Pin->Direction == EGPD_Input && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
+			{
+				MacroExecIn = Pin;
+				break;
+			}
+		}
+		TestNotNull(TEXT("the macro instance exposes an execution input"), MacroExecIn);
+		TestTrue(TEXT("the macro instance is chained into the selected entry's execution island"),
+			MacroExecIn && AddDelegate->FindPin(TEXT("then"))
+				&& Schema->TryCreateConnection(AddDelegate->FindPin(TEXT("then")), MacroExecIn));
+		// The direct evidence that the class exception rests on: the instance owns no bound subgraph and
+		// its tunnel twin pointers are never wired for an instance, so `DestroyNode` cannot reach the
+		// shared macro graph it references.
+		TestTrue(TEXT("the macro instance owns no bound subgraph"), Macro->GetSubGraphs().IsEmpty());
+		TestNull(TEXT("the macro instance has no input sink twin"), Macro->InputSinkNode.Get());
+		TestNull(TEXT("the macro instance has no output source twin"), Macro->OutputSourceNode.Get());
+	}
+	if (!Latent || !CreateDelegate || !CreatedDelegateOut || !AddedDelegateIn || !AddDelegate || !Macro)
+	{
+		Fixture.Cleanup();
+		return false;
+	}
+
+	const TArray<FString> Requested = { Latent->NodeGuid.ToString(), CreateDelegate->NodeGuid.ToString(),
+		AddDelegate->NodeGuid.ToString(), Macro->NodeGuid.ToString() };
+	FCortexGraphMigrationRetirePlan PlanValue;
+	bool bReused = false;
+	FCortexCommandResult Error;
+	TestTrue(FString::Printf(TEXT("the reviewed preview admits the proven additional classes: %s"), *Error.ErrorMessage),
+		PlanWithAdditionalNodes(Fixture, { AlphaGuid }, Requested, PlanValue, bReused, Error));
+	TestTrue(TEXT("every admitted additional node joins the removable set"),
+		PlanValue.RemovableGuids.Contains(Latent->NodeGuid.ToString())
+			&& PlanValue.RemovableGuids.Contains(CreateDelegate->NodeGuid.ToString())
+			&& PlanValue.RemovableGuids.Contains(AddDelegate->NodeGuid.ToString())
+			&& PlanValue.RemovableGuids.Contains(Macro->NodeGuid.ToString()));
+	TestTrue(TEXT("the retained cosmetic hook stays out of the removal set"),
+		!PlanValue.RemovableGuids.Contains(Fixture.RetainedGuid.ToString())
+			&& !PlanValue.RemovableGuids.Contains(Fixture.RetainedBodyGuid.ToString()));
+	TestTrue(TEXT("an admitted node the compiler consumes requires the recompile"), PlanValue.bRequiresCompile);
+
+	const TSharedPtr<FJsonObject> PlanJson = PlanValue.ToJson();
+	TestEqual(TEXT("the plan publishes the canonical requested additional GUIDs"),
+		FString::Join(JsonStringArray(PlanJson, TEXT("additional_guids")), TEXT(",")),
+		FString::Join(CanonicalGuids(Requested), TEXT(",")));
+	auto AdditionalNodeJson = [&](const FString& Guid) -> TSharedPtr<FJsonObject>
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
+		if (!PlanJson.IsValid() || !PlanJson->TryGetArrayField(TEXT("additional_nodes"), Nodes) || !Nodes) return nullptr;
+		for (const TSharedPtr<FJsonValue>& Value : *Nodes)
+		{
+			const TSharedPtr<FJsonObject> NodeJson = Value.IsValid() ? Value->AsObject() : nullptr;
+			FString NodeGuid;
+			if (NodeJson.IsValid() && NodeJson->TryGetStringField(TEXT("node_guid"), NodeGuid) && NodeGuid == Guid)
+			{
+				return NodeJson;
+			}
+		}
+		return nullptr;
+	};
+	auto AdmittedClassOf = [&](const FString& Guid) -> FString
+	{
+		const TSharedPtr<FJsonObject> NodeJson = AdditionalNodeJson(Guid);
+		FString ClassPath;
+		if (NodeJson.IsValid()) NodeJson->TryGetStringField(TEXT("class_path"), ClassPath);
+		return ClassPath;
+	};
+	auto AdmittedReasonOf = [&](const FString& Guid) -> FString
+	{
+		const TSharedPtr<FJsonObject> NodeJson = AdditionalNodeJson(Guid);
+		FString Reason;
+		if (NodeJson.IsValid()) NodeJson->TryGetStringField(TEXT("reason"), Reason);
+		return Reason;
+	};
+	TestEqual(TEXT("the latent call is admitted as its exact engine class"),
+		AdmittedClassOf(Latent->NodeGuid.ToString()), UK2Node_CallFunction::StaticClass()->GetPathName());
+	TestEqual(TEXT("the create node is admitted as its exact engine class"),
+		AdmittedClassOf(CreateDelegate->NodeGuid.ToString()), UK2Node_CreateDelegate::StaticClass()->GetPathName());
+	TestEqual(TEXT("the add node is admitted as its exact engine class"),
+		AdmittedClassOf(AddDelegate->NodeGuid.ToString()), UK2Node_AddDelegate::StaticClass()->GetPathName());
+	TestEqual(TEXT("the macro instance is admitted as its exact engine class"),
+		AdmittedClassOf(Macro->NodeGuid.ToString()), UK2Node_MacroInstance::StaticClass()->GetPathName());
+	for (const FString& Guid : Requested)
+	{
+		TestTrue(FString::Printf(TEXT("the admitted additional node %s publishes its admitting proof"), *Guid),
+			!AdmittedReasonOf(Guid).IsEmpty());
+	}
+	const TSharedPtr<FJsonObject> Inventory = FCortexGraphMigrationOps::MakeRetirementInventory(PlanJson);
+	const TArray<TSharedPtr<FJsonValue>>* InventoryAdditional = nullptr;
+	TestTrue(TEXT("the inventory publishes the reviewed additional nodes with class and reason"),
+		Inventory.IsValid() && Inventory->TryGetArrayField(TEXT("additional_nodes"), InventoryAdditional)
+			&& InventoryAdditional && InventoryAdditional->Num() == Requested.Num());
+	if (InventoryAdditional)
+	{
+		FString Joined;
+		for (const TSharedPtr<FJsonValue>& Value : *InventoryAdditional)
+		{
+			Joined += Value.IsValid() ? Value->AsString() : FString();
+			Joined += TEXT("\n");
+		}
+		TestTrue(TEXT("the inventory names the macro instance class"),
+			Joined.Contains(TEXT("K2Node_MacroInstance")));
+		TestTrue(TEXT("the inventory names the delegate classes"),
+			Joined.Contains(TEXT("K2Node_CreateDelegate")) && Joined.Contains(TEXT("K2Node_AddDelegate")));
+		TestTrue(TEXT("the inventory names the latent call class"),
+			Joined.Contains(TEXT("K2Node_CallFunction")));
+	}
+
+	// The staged reviewed path: a compile-consuming class must never be reported as runtime-safe
+	// without the recompile, and the retained cosmetic hook must survive the removal.
+	TSharedPtr<FJsonObject> Request;
+	TArray<FString> Approved;
+	Error = FCortexCommandResult();
+	TestTrue(FString::Printf(TEXT("the two-stage class-admission request is prepared: %s"), *Error.ErrorMessage),
+		PrepareAdditionalRetirementRequest(Fixture, { AlphaGuid }, Requested,
+			TEXT("00000000-0000-0000-0000-000000114201"), Request, Approved, Error, /*bCompile=*/false));
+	TestTrue(TEXT("the reviewed approval covers the latent call and the delegate pair"),
+		Approved.Contains(Latent->NodeGuid.ToString())
+			&& Approved.Contains(CreateDelegate->NodeGuid.ToString())
+			&& Approved.Contains(AddDelegate->NodeGuid.ToString())
+			&& Approved.Contains(Macro->NodeGuid.ToString()));
+	FCortexGraphPatchOutcome Outcome;
+	Error = FCortexCommandResult();
+	TestTrue(FString::Printf(TEXT("the reviewed class-admitted retirement applies: %s"), *Error.ErrorMessage),
+		FCortexGraphPatchOps::Execute(Fixture.Blueprint, Request, Outcome, Error));
+	TestEqual(TEXT("the class-admitted retirement reports applied"), Outcome.ApplyStatus, FString(TEXT("applied")));
+	TestEqual(TEXT("the class-admitted retirement readback matches"), Outcome.ReadbackStatus, FString(TEXT("matched")));
+	TestEqual(TEXT("the staged class-admitted retirement requests no compile"),
+		Outcome.CompileStatus, FString(TEXT("not_requested")));
+	TestTrue(TEXT("the staged class-admitted retirement reports that a compile is required before the result is runtime-safe"),
+		Outcome.Diagnostics.ContainsByPredicate(
+			[](const FString& Line) { return Line.Contains(TEXT("runtime-safe")); }));
+	for (const FString& GuidText : Approved)
+	{
+		FGuid Guid;
+		FGuid::Parse(GuidText, Guid);
+		TestNull(FString::Printf(TEXT("admitted node %s is absent from the graph and asset"), *GuidText),
+			FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Guid));
+	}
+	TestNotNull(TEXT("the cosmetic hook remains after the class-admitted retirement"),
+		FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Fixture.RetainedGuid));
+	TestNotNull(TEXT("the retained cosmetic body remains after the class-admitted retirement"),
+		FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Fixture.RetainedBodyGuid));
+	TestTrue(TEXT("the retained cosmetic execution link survives the class-admitted retirement"),
+		Fixture.Retained->FindPin(TEXT("then"))->LinkedTo.Contains(Fixture.RetainedBody->FindPin(TEXT("execute"))));
+	TestTrue(TEXT("the referenced macro graph is untouched by the instance removal"),
+		MacroGraph->Nodes.Num() > 0);
+
+	Fixture.Cleanup();
+	return true;
+}
+
+// CortexSandbox #113: the exception is decided per node by exact engine class and only for a class
+// whose removal is proven local. A bound subgraph, a class whose own state is not proven, and a
+// requested node the cut cannot remove all keep their refusal.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireAdditionalUnadmittedClassTest,
+	"Cortex.Graph.Authoring.Migration.Retire.RefusesUnadmittedAdditionalNodeClasses",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexGraphMigrationRetireAdditionalUnadmittedClassTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexGraphMigrationRetireTest;
+	FFixture Fixture;
+	TestTrue(TEXT("retirement fixture is created"), Fixture.Build(TEXT("BP_RetireUnadmittedClasses"), true));
+	if (!Fixture.Blueprint) { Fixture.Cleanup(); return false; }
+	const FString AlphaGuid = Fixture.Alpha->NodeGuid.ToString();
+
+	// A composite node owns the graph a removal would orphan: the structural reason is never lifted.
+	UK2Node_Composite* Composite = NewObject<UK2Node_Composite>(Fixture.Graph, NAME_None, RF_Transactional);
+	Composite->CreateNewGuid();
+	Fixture.Graph->AddNode(Composite, true, false);
+	Composite->PostPlacedNewNode();
+	TestNotNull(TEXT("a real nested composite graph is created"), Composite->BoundGraph);
+
+	// A bare tunnel's pins belong to its twin gateway inside a bound graph.
+	UK2Node_Tunnel* Tunnel = NewObject<UK2Node_Tunnel>(Fixture.Graph, NAME_None, RF_Transactional);
+	Tunnel->CreateNewGuid();
+	Tunnel->AllocateDefaultPins();
+	Fixture.Graph->AddNode(Tunnel, true, false);
+
+	// A delegate node whose own state is not proven stays unadmitted even though it derives from an
+	// admitted class: the exception is exact-class, never a base-class blanket.
+	FMulticastDelegateProperty* ClickedDelegate =
+		FindFProperty<FMulticastDelegateProperty>(UButton::StaticClass(), TEXT("OnClicked"));
+	UK2Node_AssignDelegate* AssignDelegate =
+		NewObject<UK2Node_AssignDelegate>(Fixture.Graph, NAME_None, RF_Transactional);
+	if (ClickedDelegate)
+	{
+		AssignDelegate->SetFromProperty(ClickedDelegate, /*bSelfContext=*/false, UButton::StaticClass());
+	}
+	AssignDelegate->CreateNewGuid();
+	AssignDelegate->AllocateDefaultPins();
+	Fixture.Graph->AddNode(AssignDelegate, true, false);
+	TestTrue(TEXT("the assign-delegate node derives from the admitted add-delegate class"),
+		AssignDelegate->IsA<UK2Node_AddDelegate>() && AssignDelegate->GetClass() != UK2Node_AddDelegate::StaticClass());
+
+	auto ExpectRefusedNode = [&](const TCHAR* Label, UEdGraphNode* Node, const TArray<FString>& Fragments)
+	{
+		const FString CaseHashBefore = FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)
+			->GetStringField(TEXT("graph_authoring_hash"));
+		const int32 CaseNodesBefore = Fixture.Graph->Nodes.Num();
+		const bool bCaseDirtyBefore = Fixture.Package->IsDirty();
+		FCortexGraphMigrationRetirePlan CasePlan;
+		bool bCaseReused = false;
+		FCortexCommandResult CaseError;
+		const bool bPlanned = PlanWithAdditionalNodes(Fixture, { AlphaGuid },
+			{ Node->NodeGuid.ToString() }, CasePlan, bCaseReused, CaseError);
+		TestFalse(FString::Printf(TEXT("%s is refused"), Label), bPlanned);
+		TestEqual(FString::Printf(TEXT("%s reports INVALID_OPERATION"), Label),
+			CaseError.ErrorCode, FString(CortexErrorCodes::InvalidOperation));
+		TestTrue(FString::Printf(TEXT("%s refusal names the requested GUID: %s"), Label, *CaseError.ErrorMessage),
+			CaseError.ErrorMessage.Contains(Node->NodeGuid.ToString()));
+		TestTrue(FString::Printf(TEXT("%s refusal names class '%s': %s"), Label,
+			*Node->GetClass()->GetName(), *CaseError.ErrorMessage),
+			CaseError.ErrorMessage.Contains(Node->GetClass()->GetName()));
+		for (const FString& Fragment : Fragments)
+		{
+			TestTrue(FString::Printf(TEXT("%s refusal names '%s': %s"), Label, *Fragment, *CaseError.ErrorMessage),
+				CaseError.ErrorMessage.Contains(Fragment));
+		}
+		TestEqual(FString::Printf(TEXT("%s leaves the graph hash unchanged"), Label),
+			FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)
+				->GetStringField(TEXT("graph_authoring_hash")), CaseHashBefore);
+		TestEqual(FString::Printf(TEXT("%s leaves the node count unchanged"), Label),
+			Fixture.Graph->Nodes.Num(), CaseNodesBefore);
+		TestEqual(FString::Printf(TEXT("%s leaves the dirty state unchanged"), Label),
+			Fixture.Package->IsDirty(), bCaseDirtyBefore);
+	};
+
+	ExpectRefusedNode(TEXT("a composite node that owns its bound graph"), Composite,
+		{ TEXT("not admitted"), TEXT("bound subgraph") });
+	ExpectRefusedNode(TEXT("a bare tunnel whose pins belong to its twin"), Tunnel,
+		{ TEXT("not admitted"), TEXT("tunnel") });
+	ExpectRefusedNode(TEXT("an assign-delegate node derived from an admitted class"), AssignDelegate,
+		{ TEXT("not admitted"), TEXT("delegate") });
+
+	// A requested node the cut cannot remove refuses with the partition reason instead of being
+	// silently dropped. This mirrors the page's shared cast: `OldPathProducer` sits in the island only
+	// as a data producer of the selected body, while its execution input comes from the retained
+	// cosmetic body, so approving it would sever a retained execution link.
+	UK2Node_CallFunction* OldPathProducer = Fixture.AddCall(
+		UKismetStringLibrary::StaticClass()->FindFunctionByName(TEXT("Conv_IntToString")));
+	TestNotNull(TEXT("the old-path producer exists"), OldPathProducer);
+	TestTrue(TEXT("the old-path producer feeds the selected entry's body"),
+		OldPathProducer && Fixture.LinkPins(OldPathProducer, TEXT("ReturnValue"), Fixture.AlphaBody, TEXT("InString")));
+	TestTrue(TEXT("the old-path producer is driven by the retained cosmetic body"),
+		Fixture.LinkPins(Fixture.RetainedBody, TEXT("then"), OldPathProducer, TEXT("execute")));
+	const FString HashBefore = FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)
+		->GetStringField(TEXT("graph_authoring_hash"));
+	const int32 NodesBefore = Fixture.Graph->Nodes.Num();
+	const bool bDirtyBefore = Fixture.Package->IsDirty();
+	if (!OldPathProducer)
+	{
+		Fixture.Cleanup();
+		return false;
+	}
+	FCortexGraphMigrationRetirePlan CutPlan;
+	bool bReused = false;
+	FCortexCommandResult Error;
+	TestFalse(TEXT("a requested island node fed by a retained execution link is refused"),
+		PlanWithAdditionalNodes(Fixture, { AlphaGuid }, { OldPathProducer->NodeGuid.ToString() },
+			CutPlan, bReused, Error));
+	TestEqual(TEXT("the retained-execution-link refusal is INVALID_OPERATION"),
+		Error.ErrorCode, FString(CortexErrorCodes::InvalidOperation));
+	TestTrue(FString::Printf(TEXT("the cut refusal names the node, the reason and the retained producer: %s"),
+		*Error.ErrorMessage), Error.ErrorMessage.Contains(OldPathProducer->NodeGuid.ToString())
+			&& Error.ErrorMessage.Contains(TEXT("cannot be removed"))
+			&& Error.ErrorMessage.Contains(Fixture.RetainedBodyGuid.ToString()));
+	TestEqual(TEXT("the refused cut request leaves the graph hash unchanged"),
+		FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)
+			->GetStringField(TEXT("graph_authoring_hash")), HashBefore);
+	TestEqual(TEXT("the refused cut request leaves the node count unchanged"),
+		Fixture.Graph->Nodes.Num(), NodesBefore);
+	TestEqual(TEXT("the refused cut request leaves the dirty state unchanged"),
+		Fixture.Package->IsDirty(), bDirtyBefore);
+
+	Fixture.Cleanup();
+	return true;
+}
+
+// CortexSandbox #113: naming a node in the request never overrides the ownership cut. A reroute knot a
+// retained consumer still depends on must stay out of the removable set and the request must refuse.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireAdditionalRetainedConsumerTest,
+	"Cortex.Graph.Authoring.Migration.Retire.RefusesAdditionalNodeWithRetainedConsumer",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexGraphMigrationRetireAdditionalRetainedConsumerTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexGraphMigrationRetireTest;
+	FFixture Fixture;
+	TestTrue(TEXT("retirement fixture with a cosmetic hook is created"),
+		Fixture.Build(TEXT("BP_RetireAdditionalShared"), /*bRetainProducer=*/true));
+	if (!Fixture.Blueprint) { Fixture.Cleanup(); return false; }
+	const UEdGraphSchema* Schema = Fixture.Graph->GetSchema();
+
+	// The ListView-style shape: one pure producer feeds the selected body and the retained cosmetic
+	// body, so a reroute knot on that data path has a consumer the retirement must retain.
+	UK2Node_Knot* SharedKnot = AddRerouteKnot(Fixture);
+	UEdGraphPin* ProducerOut = Fixture.Producer->FindPin(TEXT("ReturnValue"));
+	UEdGraphPin* AlphaBodyIn = Fixture.AlphaBody->FindPin(TEXT("InString"));
+	UEdGraphPin* RetainedBodyIn = Fixture.RetainedBody->FindPin(TEXT("InString"));
+	TestNotNull(TEXT("the data reroute knot exists"), SharedKnot);
+	TestTrue(TEXT("the shared producer feeds the retained cosmetic body before the reroute"),
+		ProducerOut && RetainedBodyIn && ProducerOut->LinkedTo.Contains(RetainedBodyIn));
+	if (!SharedKnot || !ProducerOut || !AlphaBodyIn || !RetainedBodyIn || !Schema)
+	{
+		Fixture.Cleanup();
+		return false;
+	}
+	ProducerOut->BreakLinkTo(AlphaBodyIn);
+	TestTrue(TEXT("the data reroute knot carries the shared producer's output"),
+		Schema->TryCreateConnection(ProducerOut, SharedKnot->GetInputPin()));
+	TestTrue(TEXT("the data reroute knot feeds the selected entry's body"),
+		Schema->TryCreateConnection(SharedKnot->GetOutputPin(), AlphaBodyIn));
+	TestTrue(TEXT("the data reroute knot also feeds the retained cosmetic body"),
+		Schema->TryCreateConnection(SharedKnot->GetOutputPin(), RetainedBodyIn));
+	TestTrue(TEXT("the retained cosmetic body is now fed by the reroute knot"),
+		RetainedBodyIn->LinkedTo.Contains(SharedKnot->GetOutputPin()));
+
+	const FString AlphaGuid = Fixture.Alpha->NodeGuid.ToString();
+	const FString SharedKnotGuid = SharedKnot->NodeGuid.ToString();
+	const FString HashBefore = FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)
+		->GetStringField(TEXT("graph_authoring_hash"));
+	const int32 NodesBefore = Fixture.Graph->Nodes.Num();
+	const bool bDirtyBefore = Fixture.Package->IsDirty();
+	FCortexGraphMigrationRetirePlan RefusedPlan;
+	bool bReused = false;
+	FCortexCommandResult Error;
+	TestFalse(TEXT("a requested additional node a retained consumer depends on is refused"),
+		PlanWithAdditionalNodes(Fixture, { AlphaGuid }, { SharedKnotGuid }, RefusedPlan, bReused, Error));
+	TestEqual(TEXT("the retained-consumer refusal is INVALID_OPERATION"),
+		Error.ErrorCode, FString(CortexErrorCodes::InvalidOperation));
+	TestTrue(TEXT("the retained-consumer refusal names the requested node"),
+		Error.ErrorMessage.Contains(SharedKnotGuid));
+	TestTrue(FString::Printf(TEXT("the retained-consumer refusal is explicable: %s"), *Error.ErrorMessage),
+		Error.ErrorMessage.Contains(TEXT("cannot be removed")));
+	TestTrue(TEXT("the retained-consumer refusal names the retained consumer that blocks it"),
+		Error.ErrorMessage.Contains(TEXT("consumed by retained consumer"))
+			&& Error.ErrorMessage.Contains(Fixture.RetainedBodyGuid.ToString()));
+	TestEqual(TEXT("the refused retained-consumer request leaves the graph hash unchanged"),
+		FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)
+			->GetStringField(TEXT("graph_authoring_hash")), HashBefore);
+	TestEqual(TEXT("the refused retained-consumer request leaves the node count unchanged"),
+		Fixture.Graph->Nodes.Num(), NodesBefore);
+	TestEqual(TEXT("the refused retained-consumer request leaves the dirty state unchanged"),
+		Fixture.Package->IsDirty(), bDirtyBefore);
+	TestNotNull(TEXT("the retained consumer is still in the graph"),
+		FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Fixture.RetainedBodyGuid));
+	TestNotNull(TEXT("the requested reroute knot is still in the graph"),
+		FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, SharedKnot->NodeGuid));
+
+	Fixture.Cleanup();
 	return true;
 }
 
