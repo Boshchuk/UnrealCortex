@@ -241,15 +241,14 @@ struct FCortexGraphMigrationPrunePlan
 /**
  * One selected `retire_entries` entry with the class-specific identity the reviewed approval binds.
  *
- * The retirement predicate accepts four disjoint entry classes, and only the class-specific facts
- * distinguish two entries with the same node class and shape. They ride in the plan JSON, so they
- * are part of the normalized request and of the validation hash the caller reviews; the compiled
- * readback also uses them to prove a generated binding or generated function really disappeared.
+ * The retirement predicate accepts four event entry classes plus an exact disconnected setter root.
+ * Class-specific facts distinguish eligible nodes and ride in the normalized plan JSON and
+ * validation hash; compiled readback proves generated bindings and functions disappeared.
  */
 struct FCortexGraphMigrationRetireEntry
 {
 	FString NodeGuid;
-	/** override_event | lifecycle_event | component_bound_event | custom_event */
+	/** override_event | lifecycle_event | component_bound_event | custom_event | disconnected_setter_root */
 	FString Kind;
 	FString ClassPath;
 	/** Override and lifecycle member identity; empty for component-bound and custom entries. */

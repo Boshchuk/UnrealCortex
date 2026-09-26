@@ -37,6 +37,7 @@
 #include "K2Node_MacroInstance.h"
 #include "K2Node_Tunnel.h"
 #include "K2Node_VariableGet.h"
+#include "K2Node_VariableSet.h"
 #include "K2Node_FunctionResult.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "UObject/Package.h"
@@ -5013,6 +5014,73 @@ bool FCortexGraphMigrationRetireAdditionalClassAdmissionTest::RunTest(const FStr
 	TestTrue(TEXT("the unrelated cosmetic execution link survives"),
 		Detached.Retained->FindPin(TEXT("then"))->LinkedTo.Contains(Detached.RetainedBody->FindPin(TEXT("execute"))));
 	Detached.Cleanup();
+
+	// A preserved calendar notification can leave its former body disconnected. Review the
+	// setter as an exact root, not as an additional node of an unrelated entry's island.
+	FFixture Orphan;
+	TestTrue(TEXT("disconnected-root fixture is created"), Orphan.Build(TEXT("BP_RetireDisconnectedRoot"), true));
+	if (!Orphan.Blueprint) { Orphan.Cleanup(); return false; }
+	FEdGraphPinType BoolType;
+	BoolType.PinCategory = UEdGraphSchema_K2::PC_Boolean;
+	TestTrue(TEXT("the detached setter has a real Blueprint property"),
+		FBlueprintEditorUtils::AddMemberVariable(Orphan.Blueprint, TEXT("bDetached"), BoolType));
+	UK2Node_VariableSet* const Root = NewObject<UK2Node_VariableSet>(Orphan.Graph, NAME_None, RF_Transactional);
+	Root->VariableReference.SetSelfMember(TEXT("bDetached"));
+	Root->CreateNewGuid();
+	Root->AllocateDefaultPins();
+	Orphan.Graph->AddNode(Root, true, false);
+	UK2Node_CallFunction* const Tail = Orphan.AddCall(
+		UKismetSystemLibrary::StaticClass()->FindFunctionByName(TEXT("PrintString")));
+	if (!Root || !Tail) { Orphan.Cleanup(); return false; }
+	const FGuid RootGuid = Root->NodeGuid;
+	const FGuid TailGuid = Tail->NodeGuid;
+	TestTrue(TEXT("the disconnected root has a live obsolete execution tail"),
+		Orphan.LinkPins(Root, TEXT("then"), Tail, TEXT("execute")));
+	TestTrue(TEXT("the tail consumes a producer also used by retained presentation"),
+		Orphan.LinkPins(Orphan.Producer, TEXT("ReturnValue"), Tail, TEXT("InString")));
+	TestTrue(TEXT("the root is refused while reachable from a retained execution path"),
+		Orphan.LinkPins(Orphan.RetainedBody, TEXT("then"), Root, TEXT("execute")));
+	FCortexGraphMigrationRetirePlan OrphanPlan;
+	bool bOrphanReused = false;
+	FCortexCommandResult OrphanError;
+	TestFalse(TEXT("a connected setter cannot be retired as a disconnected root"),
+		Plan(Orphan, { RootGuid.ToString() }, OrphanPlan, bOrphanReused, OrphanError));
+	Root->FindPin(TEXT("execute"))->BreakAllPinLinks();
+	OrphanError = FCortexCommandResult();
+	TestTrue(FString::Printf(TEXT("the detached setter and tail are discoverable: %s"),
+		*OrphanError.ErrorMessage),
+		Plan(Orphan, { RootGuid.ToString() }, OrphanPlan, bOrphanReused, OrphanError));
+	TestTrue(TEXT("the approved island includes the root and its execution tail"),
+		OrphanPlan.RemovableGuids.Contains(RootGuid.ToString())
+			&& OrphanPlan.RemovableGuids.Contains(TailGuid.ToString()));
+	TestFalse(TEXT("the shared producer remains outside the cut"),
+		OrphanPlan.RemovableGuids.Contains(Orphan.ProducerGuid.ToString()));
+	TSharedPtr<FJsonObject> OrphanRequest;
+	TArray<FString> OrphanApproved;
+	OrphanError = FCortexCommandResult();
+	TestTrue(FString::Printf(TEXT("the detached-root approval is prepared: %s"),
+		*OrphanError.ErrorMessage),
+		PrepareRetirementRequest(Orphan, { RootGuid.ToString() },
+			TEXT("00000000-0000-0000-0000-000000114203"), OrphanRequest, OrphanApproved, OrphanError));
+	if (OrphanRequest && OrphanApproved.Contains(RootGuid.ToString())
+		&& OrphanApproved.Contains(TailGuid.ToString()))
+	{
+		FCortexGraphPatchOutcome OrphanOutcome;
+		OrphanError = FCortexCommandResult();
+		TestTrue(FString::Printf(TEXT("the reviewed detached tail is removed: %s"),
+			*OrphanError.ErrorMessage),
+			FCortexGraphPatchOps::Execute(Orphan.Blueprint, OrphanRequest, OrphanOutcome, OrphanError));
+		TestEqual(TEXT("the detached-tail readback matches"), OrphanOutcome.ReadbackStatus, FString(TEXT("matched")));
+		TestNull(TEXT("the disconnected root is absent"),
+			FCortexGraphMigrationOps::FindNodeByGuid(Orphan.Blueprint, RootGuid));
+		TestNull(TEXT("its obsolete tail is absent"),
+			FCortexGraphMigrationOps::FindNodeByGuid(Orphan.Blueprint, TailGuid));
+		TestNotNull(TEXT("the retained cosmetic hook survives"),
+			FCortexGraphMigrationOps::FindNodeByGuid(Orphan.Blueprint, Orphan.RetainedGuid));
+		TestNotNull(TEXT("the shared data producer survives"),
+			FCortexGraphMigrationOps::FindNodeByGuid(Orphan.Blueprint, Orphan.ProducerGuid));
+	}
+	Orphan.Cleanup();
 	return true;
 }
 

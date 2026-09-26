@@ -6449,13 +6449,14 @@ bool ReadRetirePartition(const TSharedPtr<FJsonObject>& Source, const TCHAR* Fie
 
 namespace
 {
-/** The four disjoint entry classes `retire_entries` accepts, each with its own class-specific guard. */
+/** Event entries and exact disconnected setter roots supported by the reviewed retirement cut. */
 enum class ERetireEntryKind : uint8
 {
 	OverrideEvent,
 	LifecycleEvent,
 	ComponentBoundEvent,
 	CustomEvent,
+	DisconnectedSetterRoot,
 };
 
 const TCHAR* RetireEntryKindName(const ERetireEntryKind Kind)
@@ -6470,6 +6471,8 @@ const TCHAR* RetireEntryKindName(const ERetireEntryKind Kind)
 		return TEXT("component_bound_event");
 	case ERetireEntryKind::CustomEvent:
 		return TEXT("custom_event");
+	case ERetireEntryKind::DisconnectedSetterRoot:
+		return TEXT("disconnected_setter_root");
 	}
 	return TEXT("unsupported");
 }
@@ -6804,7 +6807,8 @@ void InvestigateExternalGeneratedFunctionCallers(
  * that semantic decision stays with the caller's explicit entry and island approval), a
  * component-bound delegate event must resolve a component property whose compiled class can host
  * the declared delegate plus its binding function, with no ambiguous duplicate and no in-asset
- * reference, and a custom event must have no in-asset reference and no foreign caller.
+ * reference; a custom event must have no in-asset reference and no foreign caller; and an exact
+ * setter root must have no execution input link or bound subgraph.
  */
 bool ClassifyRetireEntry(
 	UBlueprint* Blueprint,
@@ -6996,8 +7000,42 @@ bool ClassifyRetireEntry(
 		return true;
 	}
 
+	// Once a retained notification has been rewired, its old setter can be the first node of
+	// an unreachable execution tail. The caller must select that exact node and approve the
+	// partition's complete cut; a linked execution input is never an orphan.
+	if (Node->GetClass() == UK2Node_VariableSet::StaticClass())
+	{
+		bool bHasExecInput = false;
+		bool bHasLinkedExecOutput = false;
+		for (const UEdGraphPin* Pin : Node->Pins)
+		{
+			if (!Pin || Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Exec) continue;
+			if (Pin->Direction == EGPD_Input)
+			{
+				bHasExecInput = true;
+				if (!Pin->LinkedTo.IsEmpty())
+				{
+					OutReason = TEXT("its execution input is linked to a retained or unknown caller");
+					return false;
+				}
+			}
+			else if (Pin->Direction == EGPD_Output && !Pin->LinkedTo.IsEmpty())
+			{
+				bHasLinkedExecOutput = true;
+			}
+		}
+		if (!bHasExecInput || !bHasLinkedExecOutput || !Node->GetSubGraphs().IsEmpty())
+		{
+			OutReason = TEXT("it is not the disconnected setter root of an execution tail without subgraphs");
+			return false;
+		}
+		OutKind = ERetireEntryKind::DisconnectedSetterRoot;
+		OutEntry.Kind = RetireEntryKindName(OutKind);
+		return true;
+	}
+
 	OutReason = FString::Printf(
-		TEXT("node class '%s' is not an inherited unbound override event, a widget lifecycle override, a component-bound delegate event or an unreferenced custom event"),
+		TEXT("node class '%s' is not an inherited unbound override event, a widget lifecycle override, a component-bound delegate event, an unreferenced custom event or a disconnected setter root"),
 		*Node->GetClass()->GetName());
 	return false;
 }
@@ -7532,7 +7570,8 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 			return false;
 		}
 		SelectedEntries.Add(Entry);
-		if (Kind == ERetireEntryKind::ComponentBoundEvent || Kind == ERetireEntryKind::CustomEvent)
+		if (Kind == ERetireEntryKind::ComponentBoundEvent || Kind == ERetireEntryKind::CustomEvent
+			|| Kind == ERetireEntryKind::DisconnectedSetterRoot)
 		{
 			bRequiresCompile = true;
 		}
