@@ -5005,11 +5005,14 @@ bool FCortexGraphMigrationRetireAdditionalClassRollbackTest::RunTest(const FStri
 	{
 		const TCHAR* Name;
 		bool bReadback;
+		bool bCompile;
 	};
 	const FFaultCase Faults[] = {
-		{ TEXT("migration_retire_after_first_removal"), false },
-		{ TEXT("migration_retire_after_removals"), false },
-		{ TEXT("retire_after_removal"), true }
+		{ TEXT("migration_retire_after_first_removal"), false, false },
+		{ TEXT("migration_retire_after_removals"), false, false },
+		// The readback fault runs with the compile the admitted plan requires, so the rollback has to
+		// restore the generated class through a recovery compile, not only the authoring graph.
+		{ TEXT("retire_after_removal"), true, true }
 	};
 	bool bAllPassed = true;
 	for (int32 Index = 0; Index < UE_ARRAY_COUNT(Faults); ++Index)
@@ -5024,22 +5027,41 @@ bool FCortexGraphMigrationRetireAdditionalClassRollbackTest::RunTest(const FStri
 		bAllPassed &= TestTrue(FString::Printf(TEXT("class-admitted rollback chain is built: %s"), *Chain.Failure),
 			bRollbackChainBuilt);
 		if (!Chain.IsComplete()) { Fixture.Cleanup(); continue; }
+		if (Faults[Index].bCompile)
+		{
+			FKismetEditorUtilities::CompileBlueprint(Fixture.Blueprint);
+			bAllPassed &= TestTrue(TEXT("the compiled rollback fixture compiles before the fault"),
+				static_cast<int32>(Fixture.Blueprint->Status) != static_cast<int32>(BS_Error));
+		}
 		const FString AlphaGuid = Fixture.Alpha->NodeGuid.ToString();
 		const FString GraphBefore = CaptureNativeGraph(Fixture.Graph);
 		const FString MacroGraphBefore = CaptureNativeGraph(Chain.MacroGraph);
+		const FString GeneratedBefore = FCortexGraphPatchState::ComputeGeneratedStateDigest(Fixture.Blueprint);
+		UClass* const GeneratedBaseline = Fixture.Blueprint->GeneratedClass;
+		if (Faults[Index].bCompile)
+		{
+			bAllPassed &= TestNotNull(TEXT("the compiled baseline implements the retired override"),
+				GeneratedBaseline
+					? GeneratedBaseline->FindFunctionByName(TEXT("OnLegacyAlpha"), EIncludeSuperFlag::ExcludeSuper) : nullptr);
+			bAllPassed &= TestNotNull(TEXT("the compiled baseline implements the retained override"),
+				GeneratedBaseline
+					? GeneratedBaseline->FindFunctionByName(TEXT("OnRetainedEvent"), EIncludeSuperFlag::ExcludeSuper) : nullptr);
+		}
 		const bool bDirtyBefore = Fixture.Package->IsDirty();
 		TSharedPtr<FJsonObject> Request;
 		TArray<FString> Approved;
 		FCortexCommandResult Error;
 		const FString PatchId = FString::Printf(TEXT("00000000-0000-0000-0000-00000011440%d"), Index);
 		if (!PrepareAdditionalRetirementRequest(Fixture, { AlphaGuid }, Chain.Guids(), *PatchId,
-			Request, Approved, Error))
+			Request, Approved, Error, /*bCompile=*/Faults[Index].bCompile))
 		{
 			bAllPassed &= TestFalse(FString::Printf(TEXT("%s request preparation failed: %s"), Faults[Index].Name,
 				*Error.ErrorMessage), true);
 			Fixture.Cleanup();
 			continue;
 		}
+		FOperations Operations;
+		Operations.Begin();
 		if (Faults[Index].bReadback)
 		{
 			FCortexGraphMigrationOps::SetRetirementReadbackFaultForTesting(FName(Faults[Index].Name));
@@ -5052,6 +5074,7 @@ bool FCortexGraphMigrationRetireAdditionalClassRollbackTest::RunTest(const FStri
 		Error = FCortexCommandResult();
 		bAllPassed &= TestFalse(FString::Printf(TEXT("%s causes Execute to fail"), Faults[Index].Name),
 			FCortexGraphPatchOps::Execute(Fixture.Blueprint, Request, Outcome, Error));
+		Operations.End();
 		FCortexGraphPatchOps::SetApplyFaultPointForTesting(NAME_None);
 		FCortexGraphMigrationOps::ClearRetirementReadbackFaultForTesting();
 		bAllPassed &= TestEqual(FString::Printf(TEXT("%s restores the transaction"), Faults[Index].Name),
@@ -5070,6 +5093,37 @@ bool FCortexGraphMigrationRetireAdditionalClassRollbackTest::RunTest(const FStri
 			FGuid::Parse(GuidText, Guid);
 			bAllPassed &= TestNotNull(FString::Printf(TEXT("%s restores approved GUID %s"), Faults[Index].Name, *GuidText),
 				FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Guid));
+		}
+		if (Faults[Index].bCompile)
+		{
+			// The compiled fault has to undo the generated class as well: one target compile happened
+			// before the fault, the rollback recompiles, and the generated state comes back identical.
+			bAllPassed &= TestEqual(FString::Printf(TEXT("%s reports the compile it performed"), Faults[Index].Name),
+				Outcome.CompileStatus, FString(TEXT("compiled")));
+			bAllPassed &= TestEqual(FString::Printf(TEXT("%s compiles exactly once before the fault"),
+				Faults[Index].Name), Outcome.TargetCompileCount, 1);
+			bAllPassed &= TestEqual(FString::Printf(TEXT("%s observes one target compile"), Faults[Index].Name),
+				Operations.TargetCompiles, 1);
+			bAllPassed &= TestTrue(FString::Printf(TEXT("%s runs a recovery compile"), Faults[Index].Name),
+				Outcome.RecoveryCompileCount >= 1 && Operations.RecoveryCompiles >= 1);
+			bAllPassed &= TestEqual(FString::Printf(TEXT("%s restores the generated state digest"), Faults[Index].Name),
+				FCortexGraphPatchState::ComputeGeneratedStateDigest(Fixture.Blueprint), GeneratedBefore);
+			UClass* const GeneratedAfter = Fixture.Blueprint->GeneratedClass;
+			bAllPassed &= TestNotNull(FString::Printf(TEXT("%s restores the retired override in the generated class"),
+				Faults[Index].Name),
+				GeneratedAfter
+					? GeneratedAfter->FindFunctionByName(TEXT("OnLegacyAlpha"), EIncludeSuperFlag::ExcludeSuper) : nullptr);
+			bAllPassed &= TestNotNull(FString::Printf(TEXT("%s keeps the retained override in the generated class"),
+				Faults[Index].Name),
+				GeneratedAfter
+					? GeneratedAfter->FindFunctionByName(TEXT("OnRetainedEvent"), EIncludeSuperFlag::ExcludeSuper) : nullptr);
+		}
+		else
+		{
+			bAllPassed &= TestEqual(FString::Printf(TEXT("%s performs no target compile"), Faults[Index].Name),
+				Operations.TargetCompiles, 0);
+			bAllPassed &= TestEqual(FString::Printf(TEXT("%s performs no recovery compile"), Faults[Index].Name),
+				Operations.RecoveryCompiles, 0);
 		}
 		Fixture.Cleanup();
 	}
