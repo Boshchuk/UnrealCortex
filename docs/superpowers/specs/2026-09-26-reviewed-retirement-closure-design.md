@@ -1,7 +1,7 @@
 # Reviewed retirement closure for mixed Blueprint event graphs
 
 - Date: 2026-09-26
-- Status: Design awaiting written-spec approval; no code or Ripper asset mutation authorized by this document.
+- Status: Written design approved 2026-09-26; implementation plan and execution remain gated. No Ripper asset mutation authorized by this document.
 - Owner: UnrealCortex `CortexGraph` retirement migration and its MCP response contract.
 
 ## Intent and observed problem
