@@ -1335,8 +1335,10 @@ bool FCortexGraphMigrationRetireLateRetainedProducerTest::RunTest(const FString&
 	TArray<FString> Approved;
 	FCortexCommandResult ReviewError;
 	TestFalse(TEXT("the reviewed retirement refuses instead of severing the retained execution link"),
-		PrepareApprovedRequest(Fixture, TEXT("patch-retire-late-retained-producer"), Request, Approved, ReviewError));
+		PrepareApprovedRequest(Fixture, TEXT("00000000-0000-0000-0000-000000107601"), Request, Approved, ReviewError));
 	TestTrue(TEXT("the reviewed refusal is diagnostic"), !ReviewError.ErrorMessage.IsEmpty());
+	TestTrue(TEXT("the reviewed refusal names the blocked selected entry instead of a malformed request"),
+		ReviewError.ErrorMessage.Contains(TEXT("blocked")));
 
 	// The independent entry is then retired for real: a separately reviewed Beta-only request agrees on
 	// exactly its own removable pair, applies it, and the retained producer, its execution consumer and
@@ -1346,7 +1348,7 @@ bool FCortexGraphMigrationRetireLateRetainedProducerTest::RunTest(const FString&
 	TArray<FString> IndependentApproved;
 	FCortexCommandResult IndependentError;
 	TestTrue(FString::Printf(TEXT("the independent reviewed request is prepared: %s"), *IndependentError.ErrorMessage),
-		PrepareRetirementRequest(Fixture, { BetaGuidText }, TEXT("patch-retire-independent-entry"),
+		PrepareRetirementRequest(Fixture, { BetaGuidText }, TEXT("00000000-0000-0000-0000-000000107602"),
 			IndependentRequest, IndependentApproved, IndependentError));
 	TestTrue(TEXT("the independent request approves exactly its own removable pair"),
 		IndependentApproved.Contains(BetaGuidText) && IndependentApproved.Contains(BetaBodyGuidText)
