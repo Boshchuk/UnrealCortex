@@ -751,3 +751,74 @@ bool FCortexLevelOpenLevelDirtyTest::RunTest(const FString& Parameters)
 
 	return true;
 }
+
+// create_level (open=false) builds its world in memory and saves it. That in-memory world must be an
+// asset (UObject::IsAsset needs RF_Public), or the asset operations that follow in the same session -
+// rename_level, for one - reject it as "not a valid asset" even though the file on disk is fine.
+// Covers both branches that construct the world: a blank world and a duplicated template.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexLevelCreateLevelWorldIsAssetTest,
+	"Cortex.Level.Lifecycle.CreateLevel.WorldIsAsset",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexLevelCreateLevelWorldIsAssetTest::RunTest(const FString& Parameters)
+{
+	if (!TestNotNull(TEXT("GEditor is required"), GEditor))
+	{
+		return false;
+	}
+
+	struct FCase
+	{
+		const TCHAR* Label;
+		const TCHAR* Template;
+		FString Path;
+		FString Renamed;
+	};
+	const FCase Cases[] = {
+		{ TEXT("blank"), nullptr,
+			TEXT("/Game/Maps/_CortexTest/TestIsAssetBlank"), TEXT("/Game/Maps/_CortexTest/TestIsAssetBlankRenamed") },
+		{ TEXT("template"), TEXT("/Engine/Maps/Templates/Template_Default"),
+			TEXT("/Game/Maps/_CortexTest/TestIsAssetTemplate"), TEXT("/Game/Maps/_CortexTest/TestIsAssetTemplateRenamed") },
+	};
+
+	FCortexCommandRouter Router = CreateLifecycleRouter();
+	for (const FCase& Case : Cases)
+	{
+		TSharedPtr<FJsonObject> CreateParams = MakeShared<FJsonObject>();
+		CreateParams->SetStringField(TEXT("path"), Case.Path);
+		if (Case.Template)
+		{
+			CreateParams->SetStringField(TEXT("template"), Case.Template);
+		}
+		const FCortexCommandResult Created = Router.Execute(TEXT("level.create_level"), CreateParams);
+		if (!TestTrue(FString::Printf(TEXT("[%s] create_level succeeds (%s)"), Case.Label, *Created.ErrorMessage), Created.bSuccess))
+		{
+			continue;
+		}
+
+		UPackage* Package = FindPackage(nullptr, *Case.Path);
+		UWorld* World = Package ? FindObject<UWorld>(Package, *FPackageName::GetShortName(Case.Path)) : nullptr;
+		if (TestNotNull(FString::Printf(TEXT("[%s] created world is in memory"), Case.Label), World))
+		{
+			TestTrue(FString::Printf(TEXT("[%s] created world is an asset"), Case.Label), World->IsAsset());
+		}
+
+		TSharedPtr<FJsonObject> RenameParams = MakeShared<FJsonObject>();
+		RenameParams->SetStringField(TEXT("path"), Case.Path);
+		RenameParams->SetStringField(TEXT("new_path"), Case.Renamed);
+		const FCortexCommandResult Renamed = Router.Execute(TEXT("level.rename_level"), RenameParams);
+		TestTrue(FString::Printf(TEXT("[%s] rename_level succeeds right after create (%s)"), Case.Label, *Renamed.ErrorMessage), Renamed.bSuccess);
+
+		for (const FString& PackagePath : { Case.Path, Case.Renamed })
+		{
+			IFileManager::Get().Delete(*FPackageName::LongPackageNameToFilename(PackagePath, FPackageName::GetMapPackageExtension()), false, true);
+			if (UPackage* Leftover = FindPackage(nullptr, *PackagePath))
+			{
+				Leftover->MarkAsGarbage();
+			}
+		}
+	}
+	return true;
+}
