@@ -1328,7 +1328,7 @@ bool FCortexDataSchemaExportDeterministicRepeatedRunsTest::RunTest(const FString
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexDataExportPathSafetyTest,
-	"Cortex.Data.Export.PathSafety",
+	"Cortex.Data.Export.PathSafety.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 

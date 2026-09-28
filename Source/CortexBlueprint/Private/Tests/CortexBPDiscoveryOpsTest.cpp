@@ -143,7 +143,7 @@ namespace
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexBPListSCSComponentsTest,
-	"Cortex.Blueprint.Discovery.ListSCSComponents",
+	"Cortex.Blueprint.Discovery.ListSCSComponents.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FCortexBPListSCSComponentsTest::RunTest(const FString& Parameters)

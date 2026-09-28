@@ -34,7 +34,7 @@ static FCortexCommandResult ExecuteRemoveGraphWithPreview(
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexBPRemoveGraphTest,
-	"Cortex.Blueprint.RemoveGraph",
+	"Cortex.Blueprint.RemoveGraph.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
