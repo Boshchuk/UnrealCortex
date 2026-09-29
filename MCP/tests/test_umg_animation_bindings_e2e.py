@@ -54,10 +54,13 @@ def test_live_binding_schema(tcp_connection):
             assert "save" in param_names
 
     # Verify editor/build identity and domain registration
-    status_resp = tcp_connection.send_command("core.get_status", {})
-    assert status_resp.get("success") is True, f"core.get_status failed: {status_resp}"
+    status_resp = tcp_connection.send_command("get_status", {})
+    assert status_resp.get("success") is True, f"get_status failed: {status_resp}"
     status_data = status_resp.get("data", {})
-    domains = status_data.get("domains", {})
+    # get_status carries identity only; the registered domains come from get_capabilities.
+    caps_resp = tcp_connection.send_command("get_capabilities", {})
+    assert caps_resp.get("success") is True, f"get_capabilities failed: {caps_resp}"
+    domains = caps_resp.get("data", {}).get("domains", {})
     assert "umg" in domains, f"Domain 'umg' not found in registered domains: {domains.keys()}"
 
     # Verify build configuration and engine identity fields
