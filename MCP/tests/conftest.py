@@ -53,7 +53,7 @@ def _normalize_data_args(command: str, args: dict) -> dict:
 
 def _normalize_level_args(command: str, args: dict) -> dict:
     normalized = dict(args)
-    if command in {"spawn_actor", "add_component", "describe_class"}:
+    if command in {"add_component", "describe_class"}:
         class_name = normalized.pop("class_name", None)
         if class_name and "class" not in normalized:
             normalized["class"] = class_name
@@ -218,7 +218,7 @@ def actors_for_test(tcp_connection, cleanup_actors):
     for key, spec in specs.items():
         resp = tcp_connection.send_command(
             "level.spawn_actor",
-            {"class": spec["class"], "label": spec["label"]},
+            {"class_name": spec["class"], "label": spec["label"]},
         )
         cleanup_actors.append(spec["label"])
         actors[key] = spec["label"]
