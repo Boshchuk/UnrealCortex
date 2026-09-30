@@ -5,6 +5,7 @@
 #include "CortexBatchMutation.h"
 #include "CortexBlueprintModule.h"
 #include "CortexEditorUtils.h"
+#include "CortexAssetMutationGuard.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Kismet2/KismetEditorUtilities.h"
@@ -740,6 +741,12 @@ namespace
 
 	FCortexBatchPreflightResult PreflightBatchCompileBlueprint(const FCortexBatchMutationItem& Item)
 	{
+		FString BlockReason;
+		if (FCortexAssetMutationGuard::IsPathBlocked(Item.Target, BlockReason))
+		{
+			return FCortexBatchPreflightResult::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("Asset is blocked after failed recovery: %s"), *BlockReason));
+		}
 		FString ValidationError;
 		if (!CortexBPAssetOpsPrivate::ValidateWritableCompileTargetPath(Item.Target, ValidationError))
 		{
@@ -751,6 +758,11 @@ namespace
 		if (!Blueprint)
 		{
 			return FCortexBatchPreflightResult::Error(CortexErrorCodes::BlueprintNotFound, LoadError);
+		}
+		if (FCortexAssetMutationGuard::IsBlocked(Blueprint, BlockReason))
+		{
+			return FCortexBatchPreflightResult::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("Asset is blocked after failed recovery: %s"), *BlockReason));
 		}
 
 		return FCortexBatchPreflightResult::Success(MakeBlueprintAssetFingerprint(Blueprint).ToJson());
@@ -765,6 +777,12 @@ namespace
 
 	FCortexBatchPreflightResult PreflightBatchSaveBlueprint(const FCortexBatchMutationItem& Item)
 	{
+		FString BlockReason;
+		if (FCortexAssetMutationGuard::IsPathBlocked(Item.Target, BlockReason))
+		{
+			return FCortexBatchPreflightResult::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("Asset is blocked after failed recovery: %s"), *BlockReason));
+		}
 		FString ValidationError;
 		if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(Item.Target, ValidationError))
 		{
@@ -776,6 +794,11 @@ namespace
 		if (!Blueprint)
 		{
 			return FCortexBatchPreflightResult::Error(CortexErrorCodes::BlueprintNotFound, LoadError);
+		}
+		if (FCortexAssetMutationGuard::IsBlocked(Blueprint, BlockReason))
+		{
+			return FCortexBatchPreflightResult::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("Asset is blocked after failed recovery: %s"), *BlockReason));
 		}
 
 		return FCortexBatchPreflightResult::Success(MakeBlueprintAssetFingerprint(Blueprint).ToJson());

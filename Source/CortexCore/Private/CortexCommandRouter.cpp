@@ -3,6 +3,7 @@
 #include "CortexJsonCompat.h"
 #include "CortexBatchScope.h"
 #include "CortexCoreModule.h"
+#include "CortexPluginIdentity.h"
 #include "CortexEngineCompat.h"
 #include "CortexFileUtils.h"
 #include "ICortexDomainHandler.h"
@@ -105,7 +106,7 @@ FString BuildSerializationErrorResponse(const FString& RequestId)
 TSharedPtr<FJsonObject> BuildCapabilitiesData(const TArray<FCortexRegisteredDomain>& RegisteredDomains)
 {
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
-	Data->SetStringField(TEXT("plugin_version"), TEXT("0.1.16"));
+	Data->SetStringField(TEXT("plugin_version"), CortexPluginIdentity::GetVersionName());
 
 	TSharedPtr<FJsonObject> Domains = MakeShared<FJsonObject>();
 
@@ -1140,7 +1141,7 @@ FCortexCommandResult FCortexCommandRouter::HandleGetStatus(const TSharedPtr<FJso
 {
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetBoolField(TEXT("connected"), true);
-	Data->SetStringField(TEXT("plugin_version"), TEXT("0.1.16"));
+	Data->SetStringField(TEXT("plugin_version"), CortexPluginIdentity::GetVersionName());
 
 	// Engine version
 	Data->SetStringField(TEXT("engine_version"), FEngineVersion::Current().ToString());

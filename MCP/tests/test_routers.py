@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -59,6 +60,267 @@ def test_make_router_dispatches_domain_command():
     )
 
 
+
+def test_blueprint_remove_graph_forwards_guarded_envelope_unchanged():
+    connection = MagicMock()
+    connection.send_command.return_value = {
+        "data": {
+            "changed": True,
+            "apply_status": "applied",
+            "compile_status": "not_requested",
+            "readback_status": "matched",
+            "rollback_status": "not_requested",
+            "save_status": "not_requested",
+            "post_save_status": "not_requested",
+        }
+    }
+    router = make_router("blueprint", connection, "blueprint docs")
+    params = {
+        "asset_path": "/Game/BP_Test.BP_Test",
+        "name": "DeleteMe",
+        "dry_run": False,
+        "compile": False,
+        "save": False,
+        "cascade_exec_chain": False,
+        "expected_fingerprint": {
+            "package_saved_hash": "abc",
+            "is_dirty": True,
+            "dirty_epoch": "0",
+            "not_ready": False,
+            "graph_authoring_version": 1,
+            "graph_authoring_hash": "def",
+        },
+        "expected_validation_hash": "token",
+    }
+
+    expected_params = deepcopy(params)
+    payload = json.loads(router("remove_graph", params))
+    assert payload["readback_status"] == "matched"
+    connection.send_command.assert_called_once_with("blueprint.remove_graph", expected_params)
+    assert params == expected_params
+
+
+def test_blueprint_remove_graph_preserves_structured_phase_errors():
+    connection = MagicMock()
+    connection.send_command.side_effect = UECommandError(
+        "blueprint.remove_graph",
+        "VERIFICATION_FAILED",
+        "remove_graph readback failed",
+        {
+            "apply_status": "failed",
+            "readback_status": "mismatched",
+            "rollback_status": "restored",
+            "save_status": "not_requested",
+        },
+    )
+    router = make_router("blueprint", connection, "blueprint docs")
+
+    payload = json.loads(
+        router(
+            "remove_graph",
+            {
+                "asset_path": "/Game/BP_Test.BP_Test",
+                "name": "DeleteMe",
+                "dry_run": False,
+                "compile": False,
+                "save": False,
+            },
+        )
+    )
+
+    assert payload["success"] is False
+    assert payload["_error"] == "VERIFICATION_FAILED"
+    assert payload["_message"] == "remove_graph readback failed"
+    assert payload["_command"] == "blueprint.remove_graph"
+    assert payload["apply_status"] == "failed"
+    assert payload["readback_status"] == "mismatched"
+    assert payload["rollback_status"] == "restored"
+    assert payload["save_status"] == "not_requested"
+def _graph_prune_request(**changes):
+    request = {
+        "asset_path": "/Game/Temp/BP_Test.BP_Test",
+        "patch_id": "prune-patch",
+        "expected_fingerprint": {"graph_authoring_hash": "fingerprint"},
+        "migration": {
+            "op": "prune_island",
+            "source": {
+                "graph_ref": {"graph_guid": "00000000-0000-0000-0000-000000000001"},
+                "entry_node_guid": "00000000-0000-0000-0000-000000000002",
+            },
+            "approved_node_guids": [],
+        },
+        "dry_run": True,
+        "compile": True,
+        "save": False,
+    }
+    request.update(changes)
+    return request
+
+
+def _graph_prune_preview(approved, token="approved-token"):
+    return {
+        "complete": True,
+        "validation_hash": token,
+        "removable": approved,
+        "approved_guids": approved,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("limit", 10), ("cursor", "opaque"), ("offset", 0)],
+)
+def test_graph_prune_apply_patch_rejects_pagination_before_dispatch(field, value):
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {}}
+    router = make_router("graph", connection, "graph docs")
+    params = _graph_prune_request()
+    params[field] = value
+
+    payload = json.loads(router("apply_patch", params))
+
+    assert payload.get("_error") == "INVALID_FIELD"
+    connection.send_command.assert_not_called()
+    connection.send_command_once.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("limit", 10), ("cursor", "opaque"), ("offset", 0)],
+)
+def test_registered_graph_cmd_rejects_non_prune_apply_pagination_before_dispatch(field, value):
+    from mcp.server.fastmcp import FastMCP
+
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {}}
+    mcp = FastMCP("graph-apply-pagination-test")
+    register_router_tools(mcp, connection, {"graph": "graph docs"}, domains=("graph",))
+    params = {
+        "asset_path": "/Game/Temp/BP_Test.BP_Test",
+        "patch_id": "update-patch",
+        "nodes": [],
+    }
+    params[field] = value
+
+    payload = _call_tool_payload(
+        mcp, "graph_cmd", {"command": "apply_patch", "params": params},
+    )
+
+    assert payload.get("_error") == "INVALID_FIELD"
+    connection.send_command.assert_not_called()
+    connection.send_command_once.assert_not_called()
+
+
+def test_graph_prune_preview_uses_one_native_call_through_router():
+    connection = MagicMock()
+    params = _graph_prune_request()
+    preview = _graph_prune_preview([])
+    connection.send_command.return_value = {"success": True, "data": preview}
+    router = make_router("graph", connection, "graph docs")
+
+    payload = json.loads(router("apply_patch", params))
+
+    assert payload == preview
+    connection.send_command.assert_called_once_with("graph.apply_patch", params)
+    connection.send_command_once.assert_not_called()
+
+
+def test_graph_prune_accepted_apply_routes_preview_then_one_shot_apply():
+    connection = MagicMock()
+    approved = ["00000000-0000-0000-0000-000000000003"]
+    params = _graph_prune_request(
+        migration={
+            "op": "prune_island",
+            "source": {
+                "graph_ref": {"graph_guid": "00000000-0000-0000-0000-000000000001"},
+                "entry_node_guid": "00000000-0000-0000-0000-000000000002",
+            },
+            "approved_node_guids": approved,
+        },
+        dry_run=False,
+        expected_validation_hash="approved-token",
+        save=True,
+    )
+    connection.send_command.return_value = {
+        "success": True,
+        "data": _graph_prune_preview(approved),
+    }
+    connection.send_command_once.return_value = {
+        "success": True,
+        "data": {"patch_id": params["patch_id"], "changed": True},
+    }
+    router = make_router("graph", connection, "graph docs")
+    expected_preview = dict(params)
+    expected_preview.pop("expected_validation_hash")
+    expected_preview["dry_run"] = True
+    expected_preview["save"] = False
+
+    payload = json.loads(router("apply_patch", params))
+
+    assert payload.get("changed") is True
+    connection.send_command.assert_called_once_with("graph.apply_patch", expected_preview)
+    connection.send_command_once.assert_called_once_with("graph.apply_patch", params)
+
+
+def test_graph_prune_stale_apply_routes_preview_without_apply():
+    connection = MagicMock()
+    approved = ["00000000-0000-0000-0000-000000000003"]
+    params = _graph_prune_request(
+        migration={
+            "op": "prune_island",
+            "source": {
+                "graph_ref": {"graph_guid": "00000000-0000-0000-0000-000000000001"},
+                "entry_node_guid": "00000000-0000-0000-0000-000000000002",
+            },
+            "approved_node_guids": approved,
+        },
+        dry_run=False,
+        expected_validation_hash="old-token",
+        save=True,
+    )
+    connection.send_command.return_value = {
+        "success": True,
+        "data": _graph_prune_preview(approved, token="new-token"),
+    }
+    router = make_router("graph", connection, "graph docs")
+
+    payload = json.loads(router("apply_patch", params))
+
+    assert payload.get("_error") == "STALE_PRECONDITION"
+    connection.send_command.assert_called_once()
+    connection.send_command_once.assert_not_called()
+
+
+def test_graph_prune_oversized_apply_routes_preview_without_apply():
+    connection = MagicMock()
+    approved = ["00000000-0000-0000-0000-000000000003"]
+    params = _graph_prune_request(
+        patch_id="p" * 50_000,
+        migration={
+            "op": "prune_island",
+            "source": {
+                "graph_ref": {"graph_guid": "00000000-0000-0000-0000-000000000001"},
+                "entry_node_guid": "00000000-0000-0000-0000-000000000002",
+            },
+            "approved_node_guids": approved,
+        },
+        dry_run=False,
+        expected_validation_hash="approved-token",
+        save=True,
+    )
+    connection.send_command.return_value = {
+        "success": True,
+        "data": _graph_prune_preview(approved),
+    }
+    router = make_router("graph", connection, "graph docs")
+
+    payload = json.loads(router("apply_patch", params))
+
+    assert payload.get("_error") == "LIMIT_EXCEEDED"
+    assert payload.get("prospective_apply_size_chars", 0) > 40_000
+    connection.send_command.assert_called_once()
+    connection.send_command_once.assert_not_called()
+
 def test_core_router_handles_batch_query_without_controls():
     """batch_query must still work with commands only."""
     connection = MagicMock()
@@ -115,6 +377,45 @@ def test_core_router_batch_query_accepts_steps_alias_and_json_string():
     )
 
 
+_BATCH_WITH_GRAPH_PATCH = [
+    {"command": "data.list_datatables", "params": {}},
+    {"command": "graph.apply_patch", "params": {"asset_path": "/Game/Test/BP_Test"}},
+]
+
+
+@pytest.mark.parametrize("batch_options", [{}, {"rollback_on_error": True}])
+def test_batch_query_rejects_graph_apply_patch_before_batch_dispatch(batch_options):
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {"count": 2}}
+    router = make_router("core", connection, "core docs")
+
+    payload = json.loads(router("batch_query", {
+        "commands": _BATCH_WITH_GRAPH_PATCH,
+        **batch_options,
+    }))
+
+    assert payload.get("_error") == "INVALID_OPERATION"
+    connection.send_command.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("field", "commands"),
+    [
+        ("steps", _BATCH_WITH_GRAPH_PATCH),
+        ("commands", json.dumps(_BATCH_WITH_GRAPH_PATCH)),
+    ],
+)
+def test_batch_query_rejects_graph_apply_patch_from_steps_alias_and_json_string(field, commands):
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {"count": 2}}
+    router = make_router("core", connection, "core docs")
+
+    payload = json.loads(router("batch_query", {field: commands}))
+
+    assert payload.get("_error") == "INVALID_OPERATION"
+    connection.send_command.assert_not_called()
+
+
 def test_core_router_handles_switch_editor_locally():
     connection = MagicMock()
     connection.port = 8742
@@ -137,22 +438,83 @@ def test_core_router_handles_switch_editor_locally():
 
 
 def test_core_router_handles_schema_status_locally(tmp_path):
+    from cortex_mcp.schema_generator import _render_meta
+
     schema_dir = tmp_path / ".cortex" / "schema"
-    schema_dir.mkdir(parents=True)
+    data_dir = schema_dir / "data"
+    data_dir.mkdir(parents=True)
     (schema_dir / "_catalog.md").write_text(
-        "---\ngenerated: 2026-03-14T12:00:00Z\nschema_version: 1\n---\n",
+        f"# Catalog\n\n{_render_meta('catalog')}\n",
+        encoding="utf-8",
+    )
+    (schema_dir / "blueprints.md").write_text(
+        f"# Blueprints\n\n{_render_meta('blueprints')}\n",
+        encoding="utf-8",
+    )
+    (data_dir / "_index.md").write_text(
+        f"# Data\n\n{_render_meta('data-index')}\n",
+        encoding="utf-8",
+    )
+    (data_dir / "structs.md").write_text(
+        f"# Structs\n\n{_render_meta('data-structs')}\n",
+        encoding="utf-8",
+    )
+    (schema_dir / ".meta.json").write_text(
+        json.dumps({
+            "files": {
+                "_catalog.md": "2026-03-14T12:00:00Z",
+                "blueprints.md": "2026-03-14T12:01:00Z",
+                "data/_index.md": "2026-03-14T12:02:00Z",
+                "data/structs.md": "2026-03-14T12:03:00Z",
+            }
+        }),
         encoding="utf-8",
     )
 
     router = make_router("core", MagicMock(), "core docs")
-    with patch("cortex_mcp.tools.routers.get_schema_dir", return_value=schema_dir), patch(
-        "cortex_mcp.tools.routers.read_meta_from_file",
-        return_value={"generated": "2026-03-14T12:00:00Z", "schema_version": "1"},
-    ):
+    with patch("cortex_mcp.tools.routers.get_schema_dir", return_value=schema_dir):
         payload = json.loads(router("schema_status"))
 
     assert payload["exists"] is True
     assert payload["schema_dir"] == str(schema_dir)
+    assert payload["catalog"]["generated"] == "2026-03-14T12:00:00Z"
+    assert payload["current_schema_version"] == 3
+    assert payload["domains"]["blueprints"] == {
+        "file": "blueprints.md",
+        "generated": "2026-03-14T12:01:00Z",
+        "schema_version": 3,
+        "version_current": True,
+    }
+    assert payload["domains"]["data"]["files"] == {
+        "_index.md": "2026-03-14T12:02:00Z",
+        "structs.md": "2026-03-14T12:03:00Z",
+    }
+
+
+@pytest.mark.parametrize("sidecar_content", [None, "{not valid json"])
+def test_schema_status_reports_unknown_for_missing_or_corrupt_sidecar(tmp_path, sidecar_content):
+    from cortex_mcp.schema_generator import _render_meta
+
+    schema_dir = tmp_path / ".cortex" / "schema"
+    schema_dir.mkdir(parents=True)
+    data_dir = schema_dir / "data"
+    data_dir.mkdir()
+    (schema_dir / "_catalog.md").write_text(_render_meta("catalog"), encoding="utf-8")
+    (schema_dir / "blueprints.md").write_text(_render_meta("blueprints"), encoding="utf-8")
+    (data_dir / "_index.md").write_text(_render_meta("data-index"), encoding="utf-8")
+    if sidecar_content is not None:
+        (schema_dir / ".meta.json").write_text(sidecar_content, encoding="utf-8")
+
+    router = make_router("core", MagicMock(), "core docs")
+    with patch("cortex_mcp.tools.routers.get_schema_dir", return_value=schema_dir):
+        payload = json.loads(router("schema_status"))
+
+    assert payload["catalog"]["generated"] == "unknown"
+    assert payload["domains"]["blueprints"]["generated"] == "unknown"
+    assert payload["domains"]["blueprints"]["schema_version"] == 3
+    assert payload["domains"]["blueprints"]["version_current"] is True
+    assert payload["domains"]["data"]["generated"] == "unknown"
+    assert payload["domains"]["data"]["files"] == {"_index.md": "unknown"}
 
 
 def test_core_router_enriches_get_status_with_editor_discovery():

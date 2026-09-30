@@ -12,6 +12,31 @@
 #include "Operations/CortexBPStructureOps.h"
 #include "Operations/CortexBPTimelineOps.h"
 #include "Operations/CortexBPClassSettingsOps.h"
+#include "CortexAssetMutationGuard.h"
+#include "Engine/Blueprint.h"
+
+namespace
+{
+bool RejectBlockedBlueprintMutation(const TSharedPtr<FJsonObject>& Params, FCortexCommandResult& OutError)
+{
+	FString AssetPath;
+	if (!Params.IsValid()
+		|| (!Params->TryGetStringField(TEXT("asset_path"), AssetPath)
+			&& !Params->TryGetStringField(TEXT("source_path"), AssetPath)
+			&& !Params->TryGetStringField(TEXT("blueprint_path"), AssetPath)))
+	{
+		return false;
+	}
+	FString Reason;
+	if (FCortexAssetMutationGuard::IsPathBlocked(AssetPath, Reason))
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+			FString::Printf(TEXT("Asset is blocked after failed recovery: %s"), *Reason));
+		return true;
+	}
+	return false;
+}
+}
 
 FCortexCommandResult FCortexBPCommandHandler::Execute(
 	const FString& Command,
@@ -20,6 +45,16 @@ FCortexCommandResult FCortexBPCommandHandler::Execute(
 {
 	(void)DeferredCallback;
 
+	const bool bReadOnly = Command == TEXT("list") || Command == TEXT("get_info")
+		|| Command == TEXT("get_class_defaults") || Command == TEXT("list_inherited_properties")
+		|| Command == TEXT("list_settable_defaults") || Command == TEXT("list_scs_components")
+		|| Command == TEXT("analyze_for_migration") || Command == TEXT("compare_blueprints")
+		|| Command == TEXT("search");
+	if (!bReadOnly)
+	{
+		FCortexCommandResult GuardError;
+		if (RejectBlockedBlueprintMutation(Params, GuardError)) return GuardError;
+	}
 	if (Command == TEXT("create"))
 	{
 		return FCortexBPAssetOps::Create(Params);
@@ -249,12 +284,17 @@ TArray<FCortexCommandInfo> FCortexBPCommandHandler::GetSupportedCommands() const
 		.Optional(TEXT("access"), TEXT("string"), TEXT("Function access level"))
 		.Optional(TEXT("inputs"), TEXT("array"), TEXT("Input parameter definitions"))
 		.Optional(TEXT("outputs"), TEXT("array"), TEXT("Output parameter definitions")));
-	Commands.Add(FCortexCommandInfo{TEXT("remove_graph"), TEXT("Remove a graph (function, macro, event graph) or custom event from a Blueprint")}
+	Commands.Add(FCortexCommandInfo{
+		TEXT("remove_graph"),
+		TEXT("Preview or remove a graph/custom event with explicit compile/save lifecycle") }
 		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
-		.Required(TEXT("name"), TEXT("string"), TEXT("Name of graph or custom event to remove"))
-		.Optional(TEXT("cascade_exec_chain"), TEXT("boolean"), TEXT("Remove connected execution chain for custom events (default: false)"))
-		.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after removal (default: true)"))
-		.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Preview what would be removed without modifying anything")));
+		.Required(TEXT("name"), TEXT("string"), TEXT("Graph or custom-event name selector"))
+		.Required(TEXT("dry_run"), TEXT("boolean"), TEXT("true=preview, false=apply"))
+		.Required(TEXT("compile"), TEXT("boolean"), TEXT("Compile after apply"))
+		.Required(TEXT("save"), TEXT("boolean"), TEXT("Persist the verified result after compile/readback"))
+		.Optional(TEXT("cascade_exec_chain"), TEXT("boolean"), TEXT("Custom-event exec cascade, default false"))
+		.OptionalExpectedFingerprint()
+		.Optional(TEXT("expected_validation_hash"), TEXT("string"), TEXT("Validation hash returned by preview")));
 	Commands.Add(FCortexCommandInfo{TEXT("get_class_defaults"), TEXT("Read default property values from a Blueprint CDO")}
 		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
 		.Optional(TEXT("properties"), TEXT("array"), TEXT("Specific properties to read"))

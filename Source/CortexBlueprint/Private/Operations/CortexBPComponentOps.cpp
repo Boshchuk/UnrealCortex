@@ -3,6 +3,7 @@
 #include "Operations/CortexBPAssetOps.h"
 #include "Operations/CortexBPSCSDiagnostics.h"
 #include "CortexAssetFingerprint.h"
+#include "CortexAssetMutationGuard.h"
 #include "CortexBatchMutation.h"
 #include "CortexBlueprintModule.h"
 #include "CortexSerializer.h"
@@ -140,6 +141,12 @@ namespace CortexBPComponentOpsPrivate
 
 	FCortexBatchPreflightResult PreflightSetComponentDefaults(const FCortexBatchMutationItem& Item)
 	{
+		FString BlockReason;
+		if (FCortexAssetMutationGuard::IsPathBlocked(Item.Target, BlockReason))
+		{
+			return FCortexBatchPreflightResult::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("Asset is blocked after failed recovery: %s"), *BlockReason));
+		}
 		FString ValidationError;
 		if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(Item.Target, ValidationError))
 		{
@@ -151,6 +158,13 @@ namespace CortexBPComponentOpsPrivate
 		if (!Blueprint)
 		{
 			return FCortexBatchPreflightResult::Error(CortexErrorCodes::BlueprintNotFound, LoadError);
+		}
+
+		FString LoadedBlockReason;
+		if (FCortexAssetMutationGuard::IsBlocked(Blueprint, LoadedBlockReason))
+		{
+			return FCortexBatchPreflightResult::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("Asset is blocked after failed recovery: %s"), *LoadedBlockReason));
 		}
 
 		FString ComponentName;

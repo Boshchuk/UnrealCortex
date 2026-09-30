@@ -1,7 +1,7 @@
 {
   "FileVersion": 3,
-  "Version": 10,
-  "VersionName": "0.1.17",
+  "Version": 14,
+  "VersionName": "0.3.2",
   "FriendlyName": "Unreal Cortex",
   "Description": "Modular MCP plugin for AI-powered Unreal Engine development",
   "Category": "Developer Tools",
@@ -22,11 +22,6 @@
     {
       "Name": "PythonScriptPlugin",
       "Enabled": true
-    },
-    {
-      "Name": "StructUtils",
-      "Enabled": true,
-      "Optional": true
     },
     {
       "Name": "StateTree",

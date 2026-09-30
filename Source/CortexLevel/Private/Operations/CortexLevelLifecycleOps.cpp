@@ -1,5 +1,7 @@
 #include "Operations/CortexLevelLifecycleOps.h"
+#include "CortexEditorUtils.h"
 
+#include "CortexEditorUtils.h"
 #include "CortexEngineCompat.h"
 #include "CortexTypes.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -94,10 +96,11 @@ FCortexCommandResult FCortexLevelLifecycleOps::CreateLevel(const TSharedPtr<FJso
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter, TEXT("Missing required parameter: path"));
 	}
 
-	if (!IsValidContentPath(Path))
+	FString ValidationError;
+	if (!ValidateContentPath(Path, ValidationError))
 	{
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter,
-			FString::Printf(TEXT("Invalid content path: %s. Must start with /Game/ or /Plugins/"), *Path));
+			ValidationError);
 	}
 
 	if (DoesLevelExist(Path))
@@ -304,10 +307,11 @@ FCortexCommandResult FCortexLevelLifecycleOps::OpenLevel(const TSharedPtr<FJsonO
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter, TEXT("Missing required parameter: path"));
 	}
 
-	if (!IsValidContentPath(Path))
+	FString ValidationError;
+	if (!ValidateContentPath(Path, ValidationError))
 	{
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter,
-			FString::Printf(TEXT("Invalid content path: %s"), *Path));
+			ValidationError);
 	}
 
 	if (!DoesLevelExist(Path))
@@ -391,16 +395,17 @@ FCortexCommandResult FCortexLevelLifecycleOps::DuplicateLevel(const TSharedPtr<F
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter, TEXT("Missing required parameter: dest_path"));
 	}
 
-	if (!IsValidContentPath(SourcePath))
+	FString ValidationError;
+	if (!ValidateContentPath(SourcePath, ValidationError))
 	{
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter,
-			FString::Printf(TEXT("Invalid source path: %s"), *SourcePath));
+			ValidationError);
 	}
 
-	if (!IsValidContentPath(DestPath))
+	if (!ValidateContentPath(DestPath, ValidationError))
 	{
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter,
-			FString::Printf(TEXT("Invalid dest path: %s"), *DestPath));
+			ValidationError);
 	}
 
 	if (!DoesLevelExist(SourcePath))
@@ -481,9 +486,17 @@ FCortexCommandResult FCortexLevelLifecycleOps::RenameLevel(const TSharedPtr<FJso
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter, TEXT("Missing required parameter: new_path"));
 	}
 
-	if (!IsValidContentPath(Path) || !IsValidContentPath(NewPath))
+	FString ValidationError;
+	if (!ValidateContentPath(Path, ValidationError))
 	{
-		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter, TEXT("Invalid content path"));
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter,
+			ValidationError);
+	}
+
+	if (!ValidateContentPath(NewPath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter,
+			ValidationError);
 	}
 
 	if (!DoesLevelExist(Path))
@@ -548,10 +561,11 @@ FCortexCommandResult FCortexLevelLifecycleOps::DeleteLevel(const TSharedPtr<FJso
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter, TEXT("Missing required parameter: path"));
 	}
 
-	if (!IsValidContentPath(Path))
+	FString ValidationError;
+	if (!ValidateContentPath(Path, ValidationError))
 	{
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter,
-			FString::Printf(TEXT("Invalid content path: %s"), *Path));
+			ValidationError);
 	}
 
 	if (!DoesLevelExist(Path))
@@ -727,29 +741,21 @@ bool FCortexLevelLifecycleOps::IsCurrentLevelDirty()
 	return false;
 }
 
-bool FCortexLevelLifecycleOps::IsValidContentPath(const FString& Path)
+bool FCortexLevelLifecycleOps::ValidateContentPath(const FString& Path, FString& OutError)
 {
 	// Plugin content mounts at its own root (/LinearMuseum/...), never under "/Plugins/",
-	// so a prefix test rejected every level living in a plugin. Validate the syntax and
-	// require the mount root to actually be registered instead.
+	// so a prefix test rejects every level living in a plugin. Validate the syntax, then
+	// defer to the shared mounted-root policy: /Game plus every project content plugin
+	// root is accepted; /Engine, /Script, transient and unregistered roots are refused.
+	OutError.Reset();
+
 	if (!FPackageName::IsValidLongPackageName(Path))
 	{
+		OutError = FString::Printf(TEXT("Invalid long package name: %s"), *Path);
 		return false;
 	}
 
-	// Engine and transient roots are never valid targets for level lifecycle operations.
-	static const TCHAR* const BlockedRoots[] = {
-		TEXT("/Engine/"), TEXT("/Script/"), TEXT("/Temp/"), TEXT("/Memory/")
-	};
-	for (const TCHAR* const BlockedRoot : BlockedRoots)
-	{
-		if (Path.StartsWith(BlockedRoot))
-		{
-			return false;
-		}
-	}
-
-	return !FPackageName::GetPackageMountPoint(Path).IsNone();
+	return FCortexEditorUtils::IsWritableMountedContentPath(Path, OutError);
 }
 
 bool FCortexLevelLifecycleOps::DoesLevelExist(const FString& ContentPath)
