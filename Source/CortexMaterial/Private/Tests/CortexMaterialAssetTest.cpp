@@ -8,7 +8,7 @@
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexMaterialCreateTest,
-	"Cortex.Material.Asset.CreateMaterial",
+	"Cortex.Material.Asset.CreateMaterial.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
@@ -136,7 +136,7 @@ bool FCortexMaterialListTest::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexMaterialGetTest,
-	"Cortex.Material.Asset.GetMaterial",
+	"Cortex.Material.Asset.GetMaterial.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
@@ -433,7 +433,7 @@ bool FCortexMaterialGetNotFoundTest::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexMaterialDeleteTest,
-	"Cortex.Material.Asset.DeleteMaterial",
+	"Cortex.Material.Asset.DeleteMaterial.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
@@ -544,7 +544,7 @@ bool FCortexMaterialCreateInstanceTest::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexMaterialGetInstanceTest,
-	"Cortex.Material.Asset.GetInstance",
+	"Cortex.Material.Asset.GetInstance.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 

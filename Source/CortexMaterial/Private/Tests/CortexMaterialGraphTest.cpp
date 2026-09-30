@@ -112,7 +112,7 @@ bool FCortexMaterialListNodesTest::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexMaterialGetNodeTest,
-	"Cortex.Material.Graph.GetNode",
+	"Cortex.Material.Graph.GetNode.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
@@ -380,7 +380,7 @@ bool FCortexMaterialGetNodeNotFoundTest::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexMaterialConnectTest,
-	"Cortex.Material.Graph.Connect",
+	"Cortex.Material.Graph.Connect.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
@@ -438,7 +438,7 @@ bool FCortexMaterialConnectTest::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexMaterialListConnectionsTest,
-	"Cortex.Material.Graph.ListConnections",
+	"Cortex.Material.Graph.ListConnections.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
@@ -1024,7 +1024,7 @@ bool FCortexMaterialAutoLayoutEmptyTest::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexMaterialSetNodePropertyTest,
-	"Cortex.Material.Graph.SetNodeProperty",
+	"Cortex.Material.Graph.SetNodeProperty.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 

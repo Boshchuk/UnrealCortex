@@ -150,7 +150,7 @@ bool FCortexMaterialSetParamTest::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexMaterialSetParamsBatchTest,
-	"Cortex.Material.Param.SetParameters",
+	"Cortex.Material.Param.SetParameters.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 

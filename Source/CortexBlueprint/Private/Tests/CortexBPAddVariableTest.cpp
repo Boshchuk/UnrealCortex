@@ -7,7 +7,7 @@
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexBPAddVariableTest,
-	"Cortex.Blueprint.AddVariable",
+	"Cortex.Blueprint.AddVariable.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 

@@ -11,7 +11,7 @@
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexGraphSearchNodesTest,
-	"Cortex.Graph.SearchNodes",
+	"Cortex.Graph.SearchNodes.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
