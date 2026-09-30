@@ -373,3 +373,85 @@ bool FCortexEditorInjectInputActionAliasTest::RunTest(const FString& Parameters)
 
 	return true;
 }
+
+// Every case above is negative: it asserts a request is REJECTED. A suite made only of
+// rejections cannot tell a working command from one that was never registered, and the
+// defect this change fixes is precisely a command that reported success while doing
+// nothing. This case is the positive half. It asserts the registration itself - by exact
+// name and exact schema - and it asserts its own premise first, so an empty or broken
+// command list fails here instead of passing silently.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexEditorInputCommandsAreRegisteredTest,
+	"Cortex.Editor.Input.Registration.ExactSchema",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+namespace
+{
+const FCortexCommandInfo* FindCortexCommand(const TArray<FCortexCommandInfo>& Commands, const TCHAR* Name)
+{
+	return Commands.FindByPredicate(
+		[Name](const FCortexCommandInfo& Info) { return Info.Name == Name; });
+}
+
+/** Renders a command's params as "name:type:required" so one TestEqual pins the whole schema. */
+FString DescribeCortexParams(const FCortexCommandInfo& Info)
+{
+	TArray<FString> Parts;
+	Parts.Reserve(Info.Params.Num());
+	for (const FCortexParamInfo& Param : Info.Params)
+	{
+		Parts.Add(FString::Printf(
+			TEXT("%s:%s:%s"),
+			*Param.Name,
+			*Param.Type,
+			Param.bRequired ? TEXT("required") : TEXT("optional")));
+	}
+	return FString::Join(Parts, TEXT(","));
+}
+}
+
+bool FCortexEditorInputCommandsAreRegisteredTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexEditorCommandHandler Handler;
+	const TArray<FCortexCommandInfo> Commands = Handler.GetSupportedCommands();
+
+	// Premise, asserted rather than assumed: the handler really did advertise a command set,
+	// and it still contains a command that predates this change.
+	if (!TestTrue(TEXT("Editor handler advertises at least one command"), Commands.Num() > 0))
+	{
+		return false;
+	}
+	if (!TestNotNull(
+			TEXT("Control: the pre-existing inject_key command is advertised"),
+			FindCortexCommand(Commands, TEXT("inject_key"))))
+	{
+		return false;
+	}
+
+	const FCortexCommandInfo* Continuous = FindCortexCommand(Commands, TEXT("inject_input_continuous"));
+	if (!TestNotNull(TEXT("inject_input_continuous is advertised"), Continuous))
+	{
+		return false;
+	}
+	TestEqual(
+		TEXT("inject_input_continuous schema"),
+		DescribeCortexParams(*Continuous),
+		TEXT("action_name:string:required,value:object:optional,mode:string:optional,duration_ms:number:optional"));
+
+	// The single-shot command's required param is renamed by this change; the MCP fallback
+	// schema is generated from it, so a drift here is a silently wrong client contract.
+	const FCortexCommandInfo* Single = FindCortexCommand(Commands, TEXT("inject_input_action"));
+	if (!TestNotNull(TEXT("inject_input_action is advertised"), Single))
+	{
+		return false;
+	}
+	TestEqual(
+		TEXT("inject_input_action schema"),
+		DescribeCortexParams(*Single),
+		TEXT("action_name:string:required,value:object:optional,trigger_event:string:optional"));
+
+	return true;
+}

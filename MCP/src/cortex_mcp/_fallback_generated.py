@@ -473,7 +473,7 @@ FALLBACK_COMMANDS: dict[str, list[dict]] = {   'blueprint': [   {   'name': 'cre
                                     {'name': 'duration_ms', 'required': False, 'type': 'number'},
                                     {'name': 'delta', 'required': False, 'type': 'object'}]},
                   {   'name': 'inject_input_action',
-                      'params': [   {'name': 'action', 'required': True, 'type': 'string'},
+                      'params': [   {'name': 'action_name', 'required': True, 'type': 'string'},
                                     {'name': 'value', 'required': False, 'type': 'object'},
                                     {   'name': 'trigger_event',
                                         'required': False,
