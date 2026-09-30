@@ -1,5 +1,4 @@
 #include "CortexBPAssetOps.h"
-#include "CortexJsonCompat.h"
 #include "Operations/CortexBPTypeUtils.h"
 #include "CortexAssetFingerprint.h"
 #include "CortexBatchMutation.h"

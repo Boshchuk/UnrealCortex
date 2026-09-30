@@ -1,5 +1,4 @@
 #include "Operations/CortexDataMutationHelpers.h"
-#include "CortexJsonCompat.h"
 
 #include "CortexDataModule.h"
 #include "CortexEditorUtils.h"

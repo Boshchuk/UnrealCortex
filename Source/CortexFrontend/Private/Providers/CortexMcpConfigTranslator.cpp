@@ -1,5 +1,4 @@
 #include "Providers/CortexMcpConfigTranslator.h"
-#include "CortexJsonCompat.h"
 
 #include "CortexEngineCompat.h"
 #include "Dom/JsonObject.h"

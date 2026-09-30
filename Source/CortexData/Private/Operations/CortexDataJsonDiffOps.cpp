@@ -1,5 +1,4 @@
 #include "Operations/CortexDataJsonDiffOps.h"
-#include "CortexJsonCompat.h"
 
 #include "CortexEngineCompat.h"
 #include "CortexSafeFileContract.h"
@@ -259,7 +258,7 @@ namespace
 
 		for (const auto& Entry : Source->Values)
 		{
-			const FString FieldName = CortexJson::KeyToString(Entry.Key);
+			const FString FieldName = CortexEngineCompat::JsonKeyToString(Entry.Key);
 			if (!IgnoredFields.Contains(FieldName) && Entry.Value.IsValid())
 			{
 				Copy->SetField(FieldName, Entry.Value);

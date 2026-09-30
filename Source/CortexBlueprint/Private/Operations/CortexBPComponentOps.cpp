@@ -1,9 +1,9 @@
 #include "Operations/CortexBPComponentOps.h"
-#include "CortexJsonCompat.h"
 #include "Operations/CortexBPAssetOps.h"
 #include "Operations/CortexBPSCSDiagnostics.h"
 #include "CortexAssetFingerprint.h"
 #include "CortexAssetMutationGuard.h"
+#include "CortexEngineCompat.h"
 #include "CortexBatchMutation.h"
 #include "CortexBlueprintModule.h"
 #include "CortexSerializer.h"
@@ -875,7 +875,7 @@ FCortexCommandResult FCortexBPComponentOps::SetComponentDefaults(const TSharedPt
 
 	for (const auto& Pair : (*PropertiesObj)->Values)
 	{
-		const FString PropName = CortexJson::KeyToString(Pair.Key);
+		const FString PropName = CortexEngineCompat::JsonKeyToString(Pair.Key);
 		const TSharedPtr<FJsonValue>& PropValueJson = Pair.Value;
 		CortexBPComponentOpsPrivate::FResolvedPropertyPath PropertyPath;
 		if (!CortexBPComponentOpsPrivate::ParsePropertyPath(PropName, PropertyPath))

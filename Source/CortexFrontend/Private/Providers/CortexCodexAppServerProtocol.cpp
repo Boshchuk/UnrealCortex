@@ -1,5 +1,4 @@
 #include "Providers/CortexCodexAppServerProtocol.h"
-#include "CortexJsonCompat.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"

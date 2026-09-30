@@ -4608,7 +4608,7 @@ bool ApplyPrepared(
 		{
 			for (const auto& Pair : (*DefaultsPtr)->Values)
 			{
-				UEdGraphPin* Pin = Node->FindPin(FName(*Pair.Key));
+				UEdGraphPin* Pin = Node->FindPin(FName(*CortexEngineCompat::JsonKeyToString(Pair.Key)));
 				const TSharedPtr<FJsonObject> Literal = Pair.Value->AsObject();
 				if (!Pin || !Literal.IsValid()) return Fail(TEXT("Prepared node default no longer resolves"));
 				FCortexCommandResult DefaultError;

@@ -1,6 +1,6 @@
 #include "Operations/CortexDataImportQueueOps.h"
-#include "CortexJsonCompat.h"
 
+#include "CortexEngineCompat.h"
 #include "CortexSafeFileContract.h"
 #include "CortexTypes.h"
 #include "Dom/JsonObject.h"
@@ -260,12 +260,12 @@ namespace
 	{
 		for (const auto& Pair : Params->Values)
 		{
-			const FString ParamName = CortexJson::KeyToString(Pair.Key);
-			if (!AllowedFields.Contains(ParamName))
+			const FString FieldName = CortexEngineCompat::JsonKeyToString(Pair.Key);
+			if (!AllowedFields.Contains(FieldName))
 			{
 				OutError = MakeInvalidFieldError(
-					FString::Printf(TEXT("Unknown top-level param: %s"), *ParamName),
-					ParamName);
+					FString::Printf(TEXT("Unknown top-level param: %s"), *FieldName),
+					FieldName);
 				return false;
 			}
 		}
@@ -570,12 +570,12 @@ namespace
 
 		for (const auto& Pair : Operation.Params->Values)
 		{
-			const FString ParamName = CortexJson::KeyToString(Pair.Key);
-			if (!RequiredFields.Contains(ParamName) && !OptionalFields.Contains(ParamName))
+			const FString FieldName = CortexEngineCompat::JsonKeyToString(Pair.Key);
+			if (!RequiredFields.Contains(FieldName) && !OptionalFields.Contains(FieldName))
 			{
 				OutError = MakeInvalidFieldError(
-					FString::Printf(TEXT("Operation %s has unknown param: %s"), *Operation.Id, *ParamName),
-					ParamName);
+					FString::Printf(TEXT("Operation %s has unknown param: %s"), *Operation.Id, *FieldName),
+					FieldName);
 				return false;
 			}
 		}

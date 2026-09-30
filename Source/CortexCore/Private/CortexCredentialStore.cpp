@@ -1,8 +1,8 @@
 #include "CortexCredentialStore.h"
-#include "CortexJsonCompat.h"
 
 #include "CortexCoreModule.h"
 #include "Containers/UnrealString.h"
+#include "CortexEngineCompat.h"
 #include "Dom/JsonObject.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformMisc.h"
@@ -180,7 +180,7 @@ bool FCortexCredentialStore::Load()
 		FString LoadedKey;
 		if (Entry.Value.IsValid() && Entry.Value->TryGetString(LoadedKey) && !LoadedKey.IsEmpty())
 		{
-			ApiKeys.Add(NormalizeProviderId(CortexJson::KeyToString(Entry.Key)), LoadedKey);
+			ApiKeys.Add(NormalizeProviderId(CortexEngineCompat::JsonKeyToString(Entry.Key)), LoadedKey);
 		}
 	}
 

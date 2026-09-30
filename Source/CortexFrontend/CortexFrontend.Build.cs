@@ -41,10 +41,9 @@ public class CortexFrontend : ModuleRules
             "ContentBrowser",
         });
 
-        // LiveCoding lives in Developer/Windows and only exists where Live Coding is supported.
-        // Depending on it unconditionally pulled a Windows-only module into Linux/Mac editor
-        // builds, which fail on an undefined _WIN32 and a missing Microsoft/PreWindowsApiPrivate.h.
-        // The call sites are already #if WITH_LIVE_CODING guarded.
+        // LiveCoding lives in Developer/Windows and only exists where Live Coding is
+        // supported, so an unconditional dependency pulls a Windows-only module into
+        // Linux and Mac editor builds. Gate it the way engine modules do.
         if (Target.bWithLiveCoding)
         {
             PrivateDependencyModuleNames.Add("LiveCoding");

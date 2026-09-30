@@ -1,6 +1,6 @@
 #include "Operations/CortexBPClassDefaultsOps.h"
-#include "CortexJsonCompat.h"
 
+#include "CortexEngineCompat.h"
 #include "Operations/CortexBPAssetOps.h"
 #include "Operations/CortexBPSCSDiagnostics.h"
 #include "CortexAssetFingerprint.h"
@@ -1091,7 +1091,7 @@ FCortexCommandResult FCortexBPClassDefaultsOps::SetClassDefaults(const TSharedPt
 
 		for (const auto& Entry : (*PropertiesObject)->Values)
 		{
-			const FString PropertyName = CortexJson::KeyToString(Entry.Key);
+			const FString PropertyName = CortexEngineCompat::JsonKeyToString(Entry.Key);
 			const TSharedPtr<FJsonValue>& JsonValue = Entry.Value;
 
 			FProperty* Property = nullptr;

@@ -1,5 +1,4 @@
 #include "Operations/CortexLevelOrganizationOps.h"
-#include "CortexJsonCompat.h"
 
 #include "ActorGroupingUtils.h"
 #include "CortexAssetFingerprint.h"

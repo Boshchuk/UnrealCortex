@@ -1,6 +1,5 @@
 
 #include "CortexSerializer.h"
-#include "CortexJsonCompat.h"
 #include "CortexCoreModule.h"
 #include "CortexEngineCompat.h"
 #include "UObject/UnrealType.h"

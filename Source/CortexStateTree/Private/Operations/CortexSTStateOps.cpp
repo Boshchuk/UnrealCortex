@@ -1,7 +1,7 @@
 ﻿#include "Operations/CortexSTStateOps.h"
 
 #include "CortexCommandRouter.h"
-#include "CortexJsonCompat.h"
+#include "CortexEngineCompat.h"
 #include "CortexSTCompat.h"
 #include "CortexSTTypes.h"
 #include "CortexStateTreeModule.h"
@@ -397,10 +397,11 @@ bool ApplyStatePropertiesPatch(
 
 	for (const auto& Entry : Properties->Values)
 	{
-		if (!AllowedFieldSet.Contains(CortexJson::KeyToString(Entry.Key)))
+		const FString FieldName = CortexEngineCompat::JsonKeyToString(Entry.Key);
+		if (!AllowedFieldSet.Contains(FieldName))
 		{
 			OutError = MakeInvalidFieldError(
-				FString::Printf(TEXT("Unsupported state property: %s"), *Entry.Key),
+				FString::Printf(TEXT("Unsupported state property: %s"), *FieldName),
 				AllowedFields);
 			return false;
 		}
@@ -408,7 +409,7 @@ bool ApplyStatePropertiesPatch(
 
 	for (const auto& Entry : Properties->Values)
 	{
-		const FString FieldName = CortexJson::KeyToString(Entry.Key);
+		const FString FieldName = CortexEngineCompat::JsonKeyToString(Entry.Key);
 
 		if (FieldName == TEXT("name"))
 		{

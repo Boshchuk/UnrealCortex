@@ -1,6 +1,5 @@
 
 #include "CortexCommandRouter.h"
-#include "CortexJsonCompat.h"
 #include "CortexBatchScope.h"
 #include "CortexCoreModule.h"
 #include "CortexPluginIdentity.h"

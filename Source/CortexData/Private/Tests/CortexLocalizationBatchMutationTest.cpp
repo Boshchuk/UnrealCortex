@@ -1,5 +1,4 @@
 #include "Misc/AutomationTest.h"
-#include "CortexJsonCompat.h"
 #include "CortexCommandRouter.h"
 #include "CortexDataCommandHandler.h"
 #include "CortexEngineCompat.h"
