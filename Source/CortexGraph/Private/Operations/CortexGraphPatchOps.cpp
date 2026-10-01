@@ -5273,13 +5273,17 @@ bool SaveVerifiedTargetPackage(
 	FName FailedCheck = NAME_None;
 	if (!VerifySavedTargetPackage(Package, Filename, FailedCheck))
 	{
-		// The disk commit really happened, so the save result stays honest and only the persistence
-		// verification is reported as failed; nothing is rolled back and the asset is never blocked.
+		// The disk commit happened but post-save persistence verification failed.  The save result
+		// stays honest, nothing is rolled back, and the asset is blocked so that further authoring
+		// is refused until the asset is reopened and reconciled — the memory and disk states are
+		// diverged in an unknown way and a subsequent patch must not build on that assumption.
 		OutOutcome.PostSaveStatus = TEXT("failed");
+		OutOutcome.bBlocked = true;
 		const FString Message = FString::Printf(
 			TEXT("Post-save verification of '%s' failed after the file was committed; the in-memory result was not rolled back and the saved asset was not reloaded, so the asset must be reopened before further authoring"),
 			*FailedCheck.ToString());
 		OutOutcome.Diagnostics.Add(Message);
+		FCortexAssetMutationGuard::Block(Blueprint, TEXT("Graph patch post-save verification failed"));
 		OutError = FCortexCommandRouter::Error(CortexErrorCodes::VerificationFailed, Message);
 		return false;
 	}
