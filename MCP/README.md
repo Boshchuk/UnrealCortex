@@ -114,3 +114,7 @@ uv run pytest tests/test_e2e.py -v
 ```
 
 First run: `uv add --dev pytest pytest-cov`
+
+### Blueprint migration cleanup persistence
+
+`cleanup_blueprint_migration` and `blueprint.cleanup_migration` accept strict boolean `compile` and `save`, both defaulting to `true` for existing callers. `save=false` stages cleanup in memory and leaves package bytes on disk unchanged; compilation is independent. The response reports `saved`, `is_dirty`, `compiled` and `compile_status`. A compiler-error result is not saved. Saving writes the entire package, including any edits that were already dirty before cleanup. With `migrated_overrides`, initial cleanup and orphan pruning stay unsaved and uncompiled; final cleanup performs the requested compile/save after all pruning, and its final state is returned with the original mutation inventory.

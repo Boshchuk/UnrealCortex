@@ -323,6 +323,8 @@ def test_retirement_oversized_preview_never_publishes_a_partial_inventory():
     preview["shared"] = _guids(count)
     preview["blocked_nodes"] = _guids(count)
     preview["external_edges"] = _guids(count)
+    preview["orphan_component_guids"] = _guids(count)
+    preview["orphan_component_nodes"] = _guids(count)
     connection.send_command.return_value = {"success": True, "data": preview}
 
     payload = _payload(dispatch_graph_apply_patch(
@@ -334,7 +336,8 @@ def test_retirement_oversized_preview_never_publishes_a_partial_inventory():
     assert payload["approval_complete"] is False
     assert payload["complete"] is True          # the native claim is reported, never trusted
     assert payload["response_size_chars"] > MAX_RESPONSE_CHARS
-    for key in ("removable", "selected_entries", "shared", "blocked_nodes", "external_edges"):
+    for key in ("removable", "selected_entries", "shared", "blocked_nodes", "external_edges",
+                "orphan_component_guids", "orphan_component_nodes"):
         assert key not in payload, f"the refusal published a partial {key}"
     assert "_omitted_fields" not in payload
     assert len(json.dumps(payload, indent=2)) <= MAX_RESPONSE_CHARS
@@ -360,7 +363,8 @@ def test_retirement_discovery_hash_cannot_authorize_apply():
     connection.send_command_once.assert_not_called()
 
 
-def test_retirement_changed_additional_node_list_refuses_with_the_reviewed_token():
+@pytest.mark.parametrize("field", ["additional_node_guids", "orphan_component_node_guids"])
+def test_retirement_changed_reviewed_node_list_refuses_with_the_reviewed_token(field):
     """A changed additional GUID list is reviewed intent: the earlier token cannot authorize it.
 
     The bridge recomputes the preview over the caller's own source fields, so the requested GUIDs the
@@ -372,6 +376,8 @@ def test_retirement_changed_additional_node_list_refuses_with_the_reviewed_token
     changed = ["00000000-0000-0000-0000-000000000101", "00000000-0000-0000-0000-000000000103"]
     approved = _guids(2)
     request = retire_request(dry_run=False, approved=approved, additional=changed)
+    request["migration"]["source"].pop("additional_node_guids")
+    request["migration"]["source"][field] = changed
     request["expected_validation_hash"] = "reviewed-token"
     connection.send_command.return_value = {
         "success": True,
@@ -382,6 +388,21 @@ def test_retirement_changed_additional_node_list_refuses_with_the_reviewed_token
 
     assert payload["_error"] == "STALE_PRECONDITION"
     preview_request = connection.send_command.call_args.args[1]
-    assert preview_request["migration"]["source"]["additional_node_guids"] == changed
-    assert preview_request["migration"]["source"]["additional_node_guids"] != reviewed
+    assert preview_request["migration"]["source"][field] == changed
+    assert preview_request["migration"]["source"][field] != reviewed
+    connection.send_command_once.assert_not_called()
+
+
+def test_retirement_closed_component_proofs_are_published_whole():
+    connection = MagicMock()
+    preview = _preview(5)
+    preview["orphan_component_guids"] = _guids(5)
+    preview["orphan_component_nodes"] = [f"{guid} exact class and semantic proof" for guid in _guids(5)]
+    connection.send_command.return_value = {"success": True, "data": preview}
+    request = retire_request(dry_run=True)
+    request["migration"]["source"]["orphan_component_node_guids"] = _guids(5)
+    payload = _payload(dispatch_graph_apply_patch(connection, request, tool_name="graph_cmd"))
+    assert payload["orphan_component_guids"] == preview["orphan_component_guids"]
+    assert payload["orphan_component_nodes"] == preview["orphan_component_nodes"]
+    assert payload["complete"] is True
     connection.send_command_once.assert_not_called()

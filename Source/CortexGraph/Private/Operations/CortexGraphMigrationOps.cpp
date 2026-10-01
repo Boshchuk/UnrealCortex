@@ -5093,6 +5093,123 @@ bool AdditionalNodeRequiresCompile(const UEdGraphNode* Node)
 	return Node != nullptr && Node->IsCompilerRelevant();
 }
 
+/** Prove precisely the requested closed inventory, without traversal or inferred membership. */
+bool ProveClosedOrphanInventory(
+	UBlueprint* Blueprint, UEdGraph* Graph, const TSet<FGuid>& Requested,
+	const TArray<FCortexGraphMigrationRetireEntry>& Entries, FPruneScan& Scan,
+	TArray<FCortexGraphMigrationRetireAdditionalNode>& Proofs, bool& bRequiresCompile,
+	FCortexCommandResult& OutError)
+{
+	if (Requested.IsEmpty()) return true;
+	auto Refuse = [&](const FString& Reason)
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+			TEXT("orphan component proof refused: ") + Reason);
+		return false;
+	};
+	TArray<UEdGraph*> Graphs;
+	Blueprint->GetAllGraphs(Graphs);
+	TMap<FGuid, int32> Owners;
+	TMap<FGuid, UEdGraphNode*> Nodes;
+	for (UEdGraph* AssetGraph : Graphs)
+	{
+		if (!AssetGraph) continue;
+		for (UEdGraphNode* Node : AssetGraph->Nodes)
+		{
+			if (!Node) continue;
+			Scan.Visit(Node->NodeGuid);
+			if (Scan.bExhausted) { OutError = MakePruneScanRefusal(Scan); return false; }
+			++Owners.FindOrAdd(Node->NodeGuid);
+			if (Requested.Contains(Node->NodeGuid))
+			{
+				if (AssetGraph != Graph || Node->GetGraph() != Graph)
+					return Refuse(TEXT("a requested identity belongs to another graph"));
+				Nodes.Add(Node->NodeGuid, Node);
+			}
+		}
+	}
+	for (const FGuid& Guid : Requested)
+	{
+		if (Owners.FindRef(Guid) != 1 || !Nodes.Contains(Guid))
+			return Refuse(TEXT("every requested identity must have exactly one node in the named graph"));
+		UEdGraphNode* Node = Nodes.FindRef(Guid);
+		FString Reason;
+		if (PruneTerminatorReason(Node, Reason) || PruneStructuralBlockedReason(Node, Reason)) return Refuse(Reason);
+		if (Node->GetClass() == UK2Node_CallFunction::StaticClass())
+		{
+			const UK2Node_CallFunction* Call = static_cast<const UK2Node_CallFunction*>(Node);
+			if (Call->IsLatentFunction()) return Refuse(TEXT("latent calls are not orphan component members"));
+			const UFunction* Function = Call->GetTargetFunction();
+			const bool bRetiredFunction = Call->FunctionReference.IsSelfContext() && Entries.ContainsByPredicate(
+				[&](const FCortexGraphMigrationRetireEntry& Entry)
+				{
+					const FName Name = Call->FunctionReference.GetMemberName();
+					return (!Entry.CustomFunctionName.IsEmpty() && Name == FName(*Entry.CustomFunctionName))
+						|| (!Entry.BindingFunctionName.IsEmpty() && Name == FName(*Entry.BindingFunctionName));
+				});
+			if ((!Function || !Function->GetOwnerClass()) && !bRetiredFunction)
+				return Refuse(TEXT("ordinary calls require a resolvable function or the selected retired-function proof"));
+			if (Function && (Function->HasMetaData(TEXT("Latent"))
+				|| Function->HasAnyFunctionFlags(FUNC_Delegate | FUNC_MulticastDelegate)
+				|| !Function->HasAnyFunctionFlags(FUNC_BlueprintCallable | FUNC_BlueprintPure)))
+				return Refuse(TEXT("ordinary call function metadata is unsupported"));
+			Reason = FString::Printf(
+				TEXT("exact ordinary call function=%s member=%s flags=%u pure=%d; %s; no latent metadata or bound graph, compiled statements are rebuilt by required compile"),
+				Function ? *Function->GetPathName() : TEXT("selected retired generated function"),
+				*Call->FunctionReference.GetMemberName().ToString(), Function ? static_cast<uint32>(Function->FunctionFlags) : 0,
+				Call->IsNodePure() ? 1 : 0, bRetiredFunction
+					? TEXT("selected generated-function self-reference proved removable by final inventory")
+					: TEXT("resolved class-owned function reference"));
+		}
+		else
+		{
+			if (!AdditionalNodeClassReason(Node, Reason)
+				|| Node->GetClass()->GetPathName() == TEXT("/Script/UMGEditor.K2Node_PlayAnimation"))
+				return Refuse(TEXT("the exact node class has no admitted orphan removal semantics"));
+			if (const UK2Node_MacroInstance* Macro = Cast<UK2Node_MacroInstance>(Node))
+				if (!Macro->GetMacroGraph()) return Refuse(TEXT("macro reference cannot be resolved"));
+		}
+		FCortexGraphMigrationRetireAdditionalNode Proof;
+		Proof.NodeGuid = Guid.ToString();
+		Proof.ClassPath = Node->GetClass()->GetPathName();
+		Proof.Reason = MoveTemp(Reason);
+		Proofs.Add(MoveTemp(Proof));
+		bRequiresCompile |= AdditionalNodeRequiresCompile(Node);
+	}
+	// Scan every asset graph, including incoming links whose source is outside the inventory.
+	// Any category crossing the boundary refuses; delegate/data links are as binding as execution.
+	for (UEdGraph* AssetGraph : Graphs)
+	{
+		if (!AssetGraph) continue;
+		for (UEdGraphNode* Node : AssetGraph->Nodes)
+		{
+			if (!Node) continue;
+			const bool bInside = Requested.Contains(Node->NodeGuid);
+			for (UEdGraphPin* Pin : Node->Pins)
+			{
+				if (!Pin) { if (bInside) return Refuse(TEXT("requested node contains a null pin")); else continue; }
+				if (bInside && Pin->GetOwningNode() != Node) return Refuse(TEXT("pin ownership is inconsistent"));
+				for (UEdGraphPin* Linked : Pin->LinkedTo)
+				{
+					Scan.ExamineLink();
+					UEdGraphNode* Other = Linked ? Linked->GetOwningNode() : nullptr;
+					const bool bOtherInside = Other && Requested.Contains(Other->NodeGuid);
+					if (!bInside && !bOtherInside) continue;
+					if (!bInside || !bOtherInside) return Refuse(TEXT("execution, data or delegate link crosses the explicit inventory boundary"));
+					if (Pin->GetOwningNode() != Node || !Other || Nodes.FindRef(Other->NodeGuid) != Other || !Other->Pins.Contains(Linked)
+						|| !Linked->LinkedTo.Contains(Pin) || Linked->Direction == Pin->Direction
+						|| Pin->LinkedTo.Find(Linked) != Pin->LinkedTo.FindLast(Linked)
+						|| Linked->LinkedTo.Find(Pin) != Linked->LinkedTo.FindLast(Pin))
+						return Refuse(TEXT("physical pin link identities or reciprocity are incomplete"));
+				}
+			}
+		}
+	}
+	Proofs.Sort([](const FCortexGraphMigrationRetireAdditionalNode& A,
+		const FCortexGraphMigrationRetireAdditionalNode& B) { return A.NodeGuid < B.NodeGuid; });
+	return true;
+}
+
 FCortexGraphPruneNode MakePruneNode(const UEdGraphNode* Node, const FString& Reason)
 {
 	FCortexGraphPruneNode Entry;
@@ -6123,7 +6240,9 @@ void CollectGeneratedFunctionReferences(
 	UBlueprint* Blueprint,
 	const FName FunctionName,
 	const FGuid& ExcludedGuid,
-	TArray<FString>& OutReferences);
+	TArray<FString>& OutReferences,
+	UEdGraph* RemovableGraph = nullptr,
+	const TSet<FGuid>* RemovableGuids = nullptr);
 }
 
 bool FCortexGraphMigrationOps::VerifyRetirementAgainstNative(
@@ -6561,17 +6680,28 @@ void CollectGeneratedFunctionReferences(
 	UBlueprint* Blueprint,
 	const FName FunctionName,
 	const FGuid& ExcludedGuid,
-	TArray<FString>& OutReferences)
+	TArray<FString>& OutReferences,
+	UEdGraph* RemovableGraph,
+	const TSet<FGuid>* RemovableGuids)
 {
 	if (!Blueprint || FunctionName.IsNone()) return;
 	TArray<UEdGraph*> Graphs;
 	Blueprint->GetAllGraphs(Graphs);
+	TMap<FGuid, int32> Owners;
+	if (RemovableGuids)
+	{
+		for (UEdGraph* OwnedGraph : Graphs)
+			if (OwnedGraph) for (UEdGraphNode* Owned : OwnedGraph->Nodes)
+				if (Owned) ++Owners.FindOrAdd(Owned->NodeGuid);
+	}
 	for (UEdGraph* Graph : Graphs)
 	{
 		if (!Graph) continue;
 		for (UEdGraphNode* Node : Graph->Nodes)
 		{
-			if (!Node || Node->NodeGuid == ExcludedGuid) continue;
+			if (!Node || (ExcludedGuid.IsValid() && Node->NodeGuid == ExcludedGuid)) continue;
+			if (Graph == RemovableGraph && RemovableGuids && RemovableGuids->Contains(Node->NodeGuid)
+				&& Owners.FindRef(Node->NodeGuid) == 1) continue;
 			FString Role;
 			if (const UK2Node_CallFunction* const Call = Cast<UK2Node_CallFunction>(Node))
 			{
@@ -6895,16 +7025,6 @@ bool ClassifyRetireEntry(
 				return false;
 			}
 		}
-		{
-			TArray<FString> References;
-			CollectGeneratedFunctionReferences(Blueprint, Bound->CustomFunctionName, Bound->NodeGuid, References);
-			if (!References.IsEmpty())
-			{
-				OutReason = FString::Printf(TEXT("in-asset nodes still reference its generated binding function '%s': %s"),
-					*Bound->CustomFunctionName.ToString(), *FString::Join(References, TEXT(", ")));
-				return false;
-			}
-		}
 		OutKind = ERetireEntryKind::ComponentBoundEvent;
 		OutEntry.Kind = RetireEntryKindName(OutKind);
 		OutEntry.ComponentPropertyName = Bound->ComponentPropertyName.ToString();
@@ -6933,16 +7053,6 @@ bool ClassifyRetireEntry(
 			return false;
 		}
 		if (!HasRetirableEventShape(Custom, OutReason)) return false;
-		{
-			TArray<FString> References;
-			CollectGeneratedFunctionReferences(Blueprint, Custom->CustomFunctionName, Custom->NodeGuid, References);
-			if (!References.IsEmpty())
-			{
-				OutReason = FString::Printf(TEXT("custom event '%s' is still referenced in this asset by %s"),
-					*Custom->CustomFunctionName.ToString(), *FString::Join(References, TEXT(", ")));
-				return false;
-			}
-		}
 		if (!ExternalCallers.bComplete)
 		{
 			OutReason = FString::Printf(
@@ -7155,6 +7265,8 @@ TSharedPtr<FJsonObject> FCortexGraphMigrationRetirePlan::ToJson() const
 	Values.Reset(); AppendRetireStrings(RemovableGuids, Values); Json->SetArrayField(TEXT("removable_guids"), Values);
 	Values.Reset(); AppendRetireStrings(AdditionalNodeGuids, Values); Json->SetArrayField(TEXT("additional_guids"), Values);
 	Values.Reset(); WriteRetireAdditionalNodes(AdditionalNodes, Values); Json->SetArrayField(TEXT("additional_nodes"), Values);
+	Values.Reset(); AppendRetireStrings(OrphanComponentNodeGuids, Values); Json->SetArrayField(TEXT("orphan_component_guids"), Values);
+	Values.Reset(); WriteRetireAdditionalNodes(OrphanComponentNodes, Values); Json->SetArrayField(TEXT("orphan_component_nodes"), Values);
 	Values.Reset(); AppendRetireStrings(PreexistingDiagnostics, Values); Json->SetArrayField(TEXT("preexisting_diagnostics"), Values);
 	Values.Reset(); WriteRetirePartition(Shared, Values); Json->SetArrayField(TEXT("shared"), Values);
 	Values.Reset(); WriteRetirePartition(Blocked, Values); Json->SetArrayField(TEXT("blocked"), Values);
@@ -7197,6 +7309,8 @@ bool FCortexGraphMigrationRetirePlan::FromJson(
 		|| !ReadRetireStrings(Source, TEXT("removable_guids"), OutPlan.RemovableGuids)
 		|| !ReadRetireStrings(Source, TEXT("additional_guids"), OutPlan.AdditionalNodeGuids)
 		|| !ReadRetireAdditionalNodes(Source, TEXT("additional_nodes"), OutPlan.AdditionalNodes)
+		|| !ReadRetireStrings(Source, TEXT("orphan_component_guids"), OutPlan.OrphanComponentNodeGuids)
+		|| !ReadRetireAdditionalNodes(Source, TEXT("orphan_component_nodes"), OutPlan.OrphanComponentNodes)
 		|| !ReadRetireStrings(Source, TEXT("preexisting_diagnostics"), OutPlan.PreexistingDiagnostics)
 		|| !ReadRetirePartition(Source, TEXT("shared"), OutPlan.Shared)
 		|| !ReadRetirePartition(Source, TEXT("blocked"), OutPlan.Blocked)
@@ -7280,7 +7394,7 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 		return false;
 	}
 	if (!FCortexGraphPatchOps::HasOnlyFields(*SourcePtr,
-		{ TEXT("graph_ref"), TEXT("entry_node_guids"), TEXT("additional_node_guids") }, OutError, TEXT("migration.source"))) return false;
+		{ TEXT("graph_ref"), TEXT("entry_node_guids"), TEXT("additional_node_guids"), TEXT("orphan_component_node_guids") }, OutError, TEXT("migration.source"))) return false;
 	const TSharedPtr<FJsonObject>* GraphRefPtr = nullptr;
 	if (!(*SourcePtr)->TryGetObjectField(TEXT("graph_ref"), GraphRefPtr) || !GraphRefPtr || !GraphRefPtr->IsValid())
 	{
@@ -7380,6 +7494,33 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 			AdditionalGuids.Add(Guid);
 		}
 		AdditionalGuids.Sort([](const FGuid& A, const FGuid& B) { return A.ToString() < B.ToString(); });
+	}
+	TArray<FGuid> OrphanGuids;
+	TSet<FGuid> OrphanSet;
+	if ((*SourcePtr)->HasField(TEXT("orphan_component_node_guids")))
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+		if (!(*SourcePtr)->TryGetArrayField(TEXT("orphan_component_node_guids"), Values) || !Values)
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+				TEXT("orphan_component_node_guids must be an array"));
+			return false;
+		}
+		for (const TSharedPtr<FJsonValue>& Value : *Values)
+		{
+			FString Text;
+			FGuid Guid;
+			if (!Value.IsValid() || !Value->TryGetString(Text) || !FGuid::Parse(Text, Guid)
+				|| !Guid.IsValid() || OrphanSet.Contains(Guid) || SelectedSet.Contains(Guid) || AdditionalSet.Contains(Guid))
+			{
+				OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+					TEXT("orphan_component_node_guids must contain unique valid identities distinct from entries and additional nodes"));
+				return false;
+			}
+			OrphanSet.Add(Guid);
+			OrphanGuids.Add(Guid);
+		}
+		OrphanGuids.Sort([](const FGuid& A, const FGuid& B) { return A.ToString() < B.ToString(); });
 	}
 	const bool bHasApproval = Migration->HasField(TEXT("approved_node_guids"));
 	TArray<FGuid> Approved;
@@ -7508,6 +7649,19 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 			OutPlan.bComplete = true;
 			OutPlan.bAwaitingApproval = false;
 			OutPlan.bReused = true;
+			OutPlan.OrphanComponentNodeGuids = PruneGuidText(OrphanGuids);
+			for (const FGuid& Guid : OrphanGuids)
+			{
+				if (!Approved.Contains(Guid))
+				{
+					OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+						TEXT("approved_node_guids must include every orphan component identity"));
+					return false;
+				}
+				FCortexGraphMigrationRetireAdditionalNode Proof;
+				Proof.NodeGuid = Guid.ToString();
+				OutPlan.OrphanComponentNodes.Add(MoveTemp(Proof));
+			}
 			OutPlan.Preservation.Label = TEXT("graph");
 			OutPlan.Preservation.GraphGuid = GraphGuid.ToString();
 			OutPlan.Preservation.ExcludedGuids = OutPlan.ApprovedGuids;
@@ -7652,6 +7806,30 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 	FPrunePartition Partition;
 	if (!ComputeOwnedIslandPartition(Blueprint, Graph, SelectedNodes, true, Partition, OutError,
 		AdditionalSet.IsEmpty() ? nullptr : &AdditionalSet)) return false;
+	TArray<FCortexGraphMigrationRetireAdditionalNode> OrphanProofs;
+	if (!ProveClosedOrphanInventory(Blueprint, Graph, OrphanSet, SelectedEntries, Partition.Scan,
+		OrphanProofs, bRequiresCompile, OutError)) return false;
+	for (const FGuid& Guid : OrphanGuids) Partition.Removable.AddUnique(Guid);
+	const TSet<FGuid> FinalRemovable(Partition.Removable);
+	for (const FCortexGraphMigrationRetireEntry& Entry : SelectedEntries)
+	{
+		const FString FunctionName = !Entry.CustomFunctionName.IsEmpty()
+			? Entry.CustomFunctionName : Entry.BindingFunctionName;
+		if (FunctionName.IsEmpty()) continue;
+		TArray<FString> References;
+		CollectGeneratedFunctionReferences(Blueprint, FName(*FunctionName), FGuid(), References, Graph, &FinalRemovable);
+		if (!References.IsEmpty())
+		{
+			const FString Reason = Entry.CustomFunctionName.IsEmpty()
+				? FString::Printf(TEXT("in-asset nodes still reference its generated binding function '%s' outside the final removable inventory: %s"),
+					*FunctionName, *FString::Join(References, TEXT(", ")))
+				: FString::Printf(TEXT("custom event '%s' is still referenced in this asset outside the final removable inventory by %s"),
+					*FunctionName, *FString::Join(References, TEXT(", ")));
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				Reason);
+			return false;
+		}
+	}
 	OutPlan.Op = Op;
 	OutPlan.GraphGuid = GraphGuid.ToString();
 	for (const FGuid& Guid : SelectedGuids) OutPlan.SelectedEntryGuids.Add(Guid.ToString());
@@ -7676,6 +7854,8 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 		const FCortexGraphMigrationRetireAdditionalNode& B) { return A.NodeGuid < B.NodeGuid; });
 	OutPlan.AdditionalNodeGuids = PruneGuidText(AdditionalGuids);
 	OutPlan.AdditionalNodes = AdditionalEntries;
+	OutPlan.OrphanComponentNodeGuids = PruneGuidText(OrphanGuids);
+	OutPlan.OrphanComponentNodes = OrphanProofs;
 	for (const FString& GuidText : OutPlan.AdditionalNodeGuids)
 	{
 		if (OutPlan.RemovableGuids.Contains(GuidText)) continue;
@@ -7800,6 +7980,12 @@ TSharedPtr<FJsonObject> FCortexGraphMigrationOps::MakeRetirementInventory(const 
 			Additional.Reason.IsEmpty() ? TEXT("already removed: class proof was reviewed by the approved plan") : *Additional.Reason));
 	}
 	Inventory->SetArrayField(TEXT("additional_nodes"), ToValues(AdditionalLines));
+	Inventory->SetArrayField(TEXT("orphan_component_guids"), ToValues(Plan.OrphanComponentNodeGuids));
+	TArray<FString> OrphanLines;
+	for (const FCortexGraphMigrationRetireAdditionalNode& Proof : Plan.OrphanComponentNodes)
+		OrphanLines.Add(FString::Printf(TEXT("%s %s (%s)"), *Proof.NodeGuid, *Proof.ClassPath,
+			Proof.Reason.IsEmpty() ? TEXT("already removed: proof was reviewed by the approved plan") : *Proof.Reason));
+	Inventory->SetArrayField(TEXT("orphan_component_nodes"), ToValues(OrphanLines));
 	Inventory->SetStringField(TEXT("blueprint_status_before"), Plan.BlueprintStatusBefore);
 	Inventory->SetArrayField(TEXT("preexisting_diagnostics"), ToValues(Plan.PreexistingDiagnostics));
 	Inventory->SetBoolField(TEXT("preexisting_diagnostics_truncated"), Plan.bPreexistingDiagnosticsTruncated);
@@ -7834,7 +8020,8 @@ bool FCortexGraphMigrationOps::RequirePublishableRetirementInventory(
 	// The caller approves exactly the identity sets this inventory publishes, so a set the connected
 	// bridge could not carry whole is refused here - before approval and before any mutation - instead
 	// of being clipped on the way out while `complete: true` rides through unchanged.
-	const int32 ReviewedNodes = Plan.Shared.Num() + Plan.Blocked.Num() + Plan.AdditionalNodes.Num();
+	const int32 ReviewedNodes = Plan.Shared.Num() + Plan.Blocked.Num() + Plan.AdditionalNodes.Num()
+		+ Plan.OrphanComponentNodes.Num();
 	const FString Measurement = bMeasured
 		? FString::Printf(TEXT("encodes to %d character(s)"), InventoryChars)
 		: FString(TEXT("could not be encoded"));

@@ -10,12 +10,17 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "EdGraphSchema_K2.h"
+#include "K2Node_CallFunction.h"
+#include "K2Node_CustomEvent.h"
 #include "GameFramework/Actor.h"
 #include "Components/ActorComponent.h"
 #include "Components/SceneComponent.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Misc/Guid.h"
+#include "Misc/FileHelper.h"
+#include "Misc/PackageName.h"
+#include "HAL/FileManager.h"
 #include "UObject/UnrealType.h"
 
 namespace
@@ -27,6 +32,151 @@ namespace
 			Name,
 			*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8)));
 	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexBPCleanupSaveContractTest,
+	"Cortex.Blueprint.Cleanup.Migration.SaveContract",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexBPCleanupSaveContractTest::RunTest(const FString& Parameters)
+{
+	UBlueprint* Blueprint = FKismetEditorUtilities::CreateBlueprint(AActor::StaticClass(),
+		CreateWritableCleanupTestPackage(TEXT("BP_CleanupSaveContract")), TEXT("BP_CleanupSaveContract"),
+		BPTYPE_Normal, UBlueprint::StaticClass(), UBlueprintGeneratedClass::StaticClass());
+	if (!TestNotNull(TEXT("Blueprint created"), Blueprint)) return false;
+	FEdGraphPinType Type;
+	Type.PinCategory = UEdGraphSchema_K2::PC_Float;
+	FBlueprintEditorUtils::AddMemberVariable(Blueprint, TEXT("OldVariable"), Type);
+	FBlueprintEditorUtils::AddMemberVariable(Blueprint, TEXT("OldUncompiledVariable"), Type);
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("asset_path"), Blueprint->GetPathName());
+	FCortexCommandResult Initial = FCortexBPCleanupOps::CleanupMigration(Params);
+	if (!TestTrue(TEXT("Default compile and save succeed"), Initial.bSuccess)) return false;
+	TestTrue(TEXT("Default saves"), Initial.Data->GetBoolField(TEXT("saved")));
+	TestFalse(TEXT("Saved package clean"), Initial.Data->GetBoolField(TEXT("is_dirty")));
+	const FString Filename = FPackageName::LongPackageNameToFilename(
+		Blueprint->GetOutermost()->GetName(), FPackageName::GetAssetPackageExtension());
+	TArray<uint8> Before;
+	TestTrue(TEXT("Initial package exists on disk"), FFileHelper::LoadFileToArray(Before, *Filename));
+	Params->SetArrayField(TEXT("remove_variables"), {MakeShared<FJsonValueString>(TEXT("OldVariable"))});
+	Params->SetBoolField(TEXT("save"), false);
+	FCortexCommandResult Staged = FCortexBPCleanupOps::CleanupMigration(Params);
+	TestTrue(TEXT("Staging succeeds"), Staged.bSuccess);
+	if (Staged.bSuccess)
+	{
+		TestFalse(TEXT("Staging does not save"), Staged.Data->GetBoolField(TEXT("saved")));
+		TestTrue(TEXT("Staging keeps package dirty"), Staged.Data->GetBoolField(TEXT("is_dirty")));
+		TestTrue(TEXT("Staging compiles independently"), Staged.Data->GetBoolField(TEXT("compiled")));
+	}
+	TArray<uint8> After;
+	FFileHelper::LoadFileToArray(After, *Filename);
+	TestTrue(TEXT("Staging leaves disk bytes unchanged"), Before == After);
+	TestFalse(TEXT("Variable removed in memory"), Blueprint->NewVariables.ContainsByPredicate(
+		[](const FBPVariableDescription& Variable) { return Variable.VarName == TEXT("OldVariable"); }));
+	TestTrue(TEXT("Independent uncompiled variable exists before staging"), Blueprint->NewVariables.ContainsByPredicate(
+		[](const FBPVariableDescription& Variable) { return Variable.VarName == TEXT("OldUncompiledVariable"); }));
+	Params->SetArrayField(TEXT("remove_variables"), {MakeShared<FJsonValueString>(TEXT("OldUncompiledVariable"))});
+	Params->SetBoolField(TEXT("compile"), false);
+	FCortexCommandResult Uncompiled = FCortexBPCleanupOps::CleanupMigration(Params);
+	TestTrue(TEXT("Uncompiled unsaved mutation succeeds"), Uncompiled.bSuccess);
+	if (Uncompiled.bSuccess)
+	{
+		TestFalse(TEXT("Uncompiled staging reports no compilation"), Uncompiled.Data->GetBoolField(TEXT("compiled")));
+		TestEqual(TEXT("Uncompiled staging reports skipped status"), Uncompiled.Data->GetStringField(TEXT("compile_status")), FString(TEXT("NotCompiled")));
+		TestFalse(TEXT("Uncompiled staging does not save"), Uncompiled.Data->GetBoolField(TEXT("saved")));
+		TestTrue(TEXT("Uncompiled staging keeps dirty state"), Uncompiled.Data->GetBoolField(TEXT("is_dirty")));
+	}
+	TestFalse(TEXT("Independent variable removed without compilation"), Blueprint->NewVariables.ContainsByPredicate(
+		[](const FBPVariableDescription& Variable) { return Variable.VarName == TEXT("OldUncompiledVariable"); }));
+	FFileHelper::LoadFileToArray(After, *Filename);
+	TestTrue(TEXT("Uncompiled unsaved mutation preserves disk bytes"), Before == After);
+	Params->RemoveField(TEXT("remove_variables"));
+	Params->SetStringField(TEXT("save"), TEXT("false"));
+	FCortexCommandResult Invalid = FCortexBPCleanupOps::CleanupMigration(Params);
+	TestFalse(TEXT("Nonboolean save refused"), Invalid.bSuccess);
+	TestEqual(TEXT("Invalid flag error"), Invalid.ErrorCode, CortexErrorCodes::InvalidField);
+	TestTrue(TEXT("Invalid request preserves dirty state"), Blueprint->GetOutermost()->IsDirty());
+	Params->SetBoolField(TEXT("save"), false);
+	Params->SetNumberField(TEXT("compile"), 1);
+	Invalid = FCortexBPCleanupOps::CleanupMigration(Params);
+	TestFalse(TEXT("Numeric compile refused"), Invalid.bSuccess);
+	TestEqual(TEXT("Invalid compile flag error"), Invalid.ErrorCode, CortexErrorCodes::InvalidField);
+	FFileHelper::LoadFileToArray(After, *Filename);
+	TestTrue(TEXT("Invalid flags leave disk unchanged"), Before == After);
+	Params->SetBoolField(TEXT("save"), true);
+	Params->SetBoolField(TEXT("compile"), false);
+	Blueprint->Status = BS_Error;
+	FCortexCommandResult Failed = FCortexBPCleanupOps::CleanupMigration(Params);
+	TestFalse(TEXT("Compiler-error Blueprint cannot be saved"), Failed.bSuccess);
+	TestEqual(TEXT("Compiler failure reported"), Failed.ErrorCode, CortexErrorCodes::CompileFailed);
+	FFileHelper::LoadFileToArray(After, *Filename);
+	TestTrue(TEXT("Compiler failure leaves disk unchanged"), Before == After);
+	// A reachable missing call exercises a real requested compile failure, independently of the
+	// pre-existing BS_Error guard above. Allocate a real impure actor call first, then invalidate
+	// only its member reference: this models a stale call while preserving its execution pins.
+	UEdGraph* EventGraph = Blueprint->UbergraphPages.IsEmpty() ? nullptr : Blueprint->UbergraphPages[0];
+	if (!TestNotNull(TEXT("Error fixture has an event graph"), EventGraph))
+	{
+		IFileManager::Get().Delete(*Filename);
+		Blueprint->MarkAsGarbage();
+		return false;
+	}
+	UK2Node_CustomEvent* Trigger = NewObject<UK2Node_CustomEvent>(EventGraph);
+	Trigger->CustomFunctionName = TEXT("RunCleanupSaveContractBrokenCall");
+	Trigger->CreateNewGuid();
+	EventGraph->AddNode(Trigger, false, false);
+	Trigger->AllocateDefaultPins();
+	UK2Node_CallFunction* BrokenCall = NewObject<UK2Node_CallFunction>(EventGraph);
+	BrokenCall->FunctionReference.SetExternalMember(TEXT("K2_DestroyActor"), AActor::StaticClass());
+	BrokenCall->CreateNewGuid();
+	EventGraph->AddNode(BrokenCall, false, false);
+	BrokenCall->AllocateDefaultPins();
+	BrokenCall->FunctionReference.SetSelfMember(TEXT("MissingCleanupSaveContractFunction"));
+	UEdGraphPin* Then = Trigger->FindPin(UEdGraphSchema_K2::PN_Then);
+	UEdGraphPin* Execute = BrokenCall->FindPin(UEdGraphSchema_K2::PN_Execute);
+	if (!TestNotNull(TEXT("Error trigger exposes execution"), Then)
+		|| !TestNotNull(TEXT("Missing call exposes execution"), Execute))
+	{
+		IFileManager::Get().Delete(*Filename);
+		Blueprint->MarkAsGarbage();
+		return false;
+	}
+	Then->MakeLinkTo(Execute);
+	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+	Params->SetBoolField(TEXT("compile"), true);
+	AddExpectedError(TEXT("Could not find a function named \"MissingCleanupSaveContractFunction\""),
+		EAutomationExpectedErrorFlags::Contains, 1);
+	FCortexCommandResult RequestedFailure = FCortexBPCleanupOps::CleanupMigration(Params);
+	TestFalse(TEXT("Actual requested compile fails"), RequestedFailure.bSuccess);
+	TestEqual(TEXT("Actual compile failure code"), RequestedFailure.ErrorCode, CortexErrorCodes::CompileFailed);
+	TestTrue(TEXT("Actual compiler leaves BS_Error"), Blueprint->Status == BS_Error);
+	if (TestTrue(TEXT("Compile failure carries outcome details"), RequestedFailure.ErrorDetails.IsValid()))
+	{
+		TestTrue(TEXT("Failed requested compile was attempted"), RequestedFailure.ErrorDetails->GetBoolField(TEXT("compiled")));
+		TestEqual(TEXT("Failed compile status reported"), RequestedFailure.ErrorDetails->GetStringField(TEXT("compile_status")), FString(TEXT("Error")));
+		TestFalse(TEXT("Failed requested compile never saved"), RequestedFailure.ErrorDetails->GetBoolField(TEXT("saved")));
+		TestTrue(TEXT("Failed requested compile remains dirty"), RequestedFailure.ErrorDetails->GetBoolField(TEXT("is_dirty")));
+	}
+	TestTrue(TEXT("Failure preserves broken graph for inspection"), EventGraph->Nodes.Contains(BrokenCall)
+		&& EventGraph->Nodes.Contains(Trigger) && Then->LinkedTo.Contains(Execute));
+	FFileHelper::LoadFileToArray(After, *Filename);
+	TestTrue(TEXT("Actual requested compile failure preserves disk bytes"), Before == After);
+	FBlueprintEditorUtils::RemoveNode(Blueprint, BrokenCall, true);
+	FBlueprintEditorUtils::RemoveNode(Blueprint, Trigger, true);
+	FCortexCommandResult Final = FCortexBPCleanupOps::CleanupMigration(Params);
+	TestTrue(TEXT("Successful final compile and save"), Final.bSuccess);
+	if (Final.bSuccess)
+	{
+		TestTrue(TEXT("Final save reported"), Final.Data->GetBoolField(TEXT("saved")));
+		TestFalse(TEXT("Repaired saved package is clean"), Final.Data->GetBoolField(TEXT("is_dirty")));
+		TestEqual(TEXT("Repaired compile status valid"), Final.Data->GetStringField(TEXT("compile_status")), FString(TEXT("UpToDate")));
+		TestTrue(TEXT("Repaired package exists on disk"), FFileHelper::LoadFileToArray(After, *Filename));
+		TestTrue(TEXT("Successful final save persists staged variable removals"), Before != After);
+	}
+	IFileManager::Get().Delete(*Filename);
+	Blueprint->MarkAsGarbage();
+	return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
