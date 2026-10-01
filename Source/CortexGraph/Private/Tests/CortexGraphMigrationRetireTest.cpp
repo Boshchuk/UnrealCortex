@@ -6338,7 +6338,17 @@ bool FCortexGraphMigrationRetireClosedOrphanTest::RunTest(const FString& Paramet
 {
 	using namespace CortexGraphMigrationRetireTest;
 	FFixture Fixture;
-	if (!TestTrue(TEXT("fixture built"), Fixture.Build(TEXT("BP_RetireClosedOrphan"), true))) return false;
+	const FString FixtureName = FString::Printf(TEXT("BP_RetireClosedOrphan_%s"),
+		*FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	if (!TestTrue(TEXT("fixture built"), Fixture.Build(*FixtureName, true))) return false;
+	const FString SavedFilename = Fixture.Filename();
+	ON_SCOPE_EXIT
+	{
+		if (!SavedFilename.IsEmpty() && IFileManager::Get().FileExists(*SavedFilename))
+		{
+			IFileManager::Get().Delete(*SavedFilename, false, true, true);
+		}
+	};
 	UK2Node_CustomEvent* OldUpdate = NewObject<UK2Node_CustomEvent>(Fixture.Graph);
 	OldUpdate->CustomFunctionName = TEXT("OldOrphanUpdate");
 	OldUpdate->CreateNewGuid();
