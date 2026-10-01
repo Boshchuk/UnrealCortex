@@ -1,8 +1,12 @@
 #include "Misc/AutomationTest.h"
 #include "CortexCommandRouter.h"
 #include "CortexLevelCommandHandler.h"
+#include "Editor.h"
+#include "Engine/World.h"
+#include "FileHelpers.h"
 #include "HAL/PlatformFileManager.h"
 #include "Misc/PackageName.h"
+#include "UObject/Package.h"
 
 namespace
 {
@@ -95,6 +99,18 @@ bool FCortexLevelSaveLevelTest::RunTest(const FString& Parameters)
 {
     FCortexCommandRouter Router = CreateLevelRouterStreaming();
 
+    // A host project without a startup map opens on an Untitled level, which save_level must refuse
+    // (see Cortex.Level.Streaming.SaveLevelRefusesUntitled); assert that instead of a save.
+    UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+    if (World && FEditorFileUtils::GetFilename(World).IsEmpty())
+    {
+        AddInfo(FString::Printf(TEXT("Current level %s has no file name; expecting save_level to refuse"), *World->GetOutermost()->GetName()));
+        const FCortexCommandResult Refused = Router.Execute(TEXT("level.save_level"), MakeShared<FJsonObject>());
+        TestFalse(TEXT("save_level should refuse a level that has never been saved"), Refused.bSuccess);
+        TestEqual(TEXT("Error code should be INVALID_OPERATION"), Refused.ErrorCode, CortexErrorCodes::InvalidOperation);
+        return true;
+    }
+
     FString LevelFilename;
     if (TryGetCurrentLevelFilename(Router, LevelFilename) && !CanOpenForExclusiveWrite(LevelFilename))
     {
@@ -110,6 +126,58 @@ bool FCortexLevelSaveLevelTest::RunTest(const FString& Parameters)
         bool bSaved = false;
         Result.Data->TryGetBoolField(TEXT("saved"), bSaved);
         TestTrue(TEXT("saved should be true"), bSaved);
+    }
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexLevelSaveLevelRefusesUntitledTest,
+    "Cortex.Level.Streaming.SaveLevelRefusesUntitled",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexLevelSaveLevelRefusesUntitledTest::RunTest(const FString& Parameters)
+{
+    if (!TestNotNull(TEXT("GEditor"), GEditor))
+    {
+        return false;
+    }
+
+    FCortexCommandRouter Router = CreateLevelRouterStreaming();
+
+    // Remember a saved level to come back to, so later tests still see it.
+    UWorld* WorldBefore = GEditor->GetEditorWorldContext().World();
+    const bool bRestore = WorldBefore && !FEditorFileUtils::GetFilename(WorldBefore).IsEmpty();
+    const FString LevelBefore = WorldBefore ? WorldBefore->GetOutermost()->GetName() : FString();
+
+    UWorld* Untitled = UEditorLoadingAndSavingUtils::NewBlankMap(/*bSaveExistingMap*/false);
+    if (!TestNotNull(TEXT("NewBlankMap should create an Untitled level"), Untitled))
+    {
+        return false;
+    }
+
+    // Premise: this is exactly the state in which FEditorFileUtils::SaveLevel opens Save As.
+    if (!TestTrue(TEXT("Untitled level should have no file name"), FEditorFileUtils::GetFilename(Untitled).IsEmpty()))
+    {
+        return false;
+    }
+
+    // Without the guard this call never returns: the editor waits on a modal Save As dialog.
+    const FCortexCommandResult Result = Router.Execute(TEXT("level.save_level"), MakeShared<FJsonObject>());
+    TestFalse(TEXT("save_level should refuse a level that has never been saved"), Result.bSuccess);
+    TestEqual(TEXT("Error code should be INVALID_OPERATION"), Result.ErrorCode, CortexErrorCodes::InvalidOperation);
+    TestTrue(TEXT("Error message should say the level was never saved"), Result.ErrorMessage.Contains(TEXT("never been saved")));
+    TestTrue(TEXT("Untitled level should still have no file name"), FEditorFileUtils::GetFilename(Untitled).IsEmpty());
+
+    if (bRestore)
+    {
+        AddInfo(FString::Printf(TEXT("Reopening %s"), *LevelBefore));
+        TSharedPtr<FJsonObject> OpenParams = MakeShared<FJsonObject>();
+        OpenParams->SetStringField(TEXT("path"), LevelBefore);
+        OpenParams->SetBoolField(TEXT("force"), true);
+        const FCortexCommandResult Reopened = Router.Execute(TEXT("level.open_level"), OpenParams);
+        TestTrue(FString::Printf(TEXT("Should reopen %s"), *LevelBefore), Reopened.bSuccess);
     }
 
     return true;

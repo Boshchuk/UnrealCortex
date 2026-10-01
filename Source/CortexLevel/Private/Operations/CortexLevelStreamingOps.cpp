@@ -363,6 +363,18 @@ FCortexCommandResult FCortexLevelStreamingOps::SaveLevel(const TSharedPtr<FJsonO
         return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation, TEXT("Persistent level unavailable"));
     }
 
+    // FEditorFileUtils::SaveLevel opens a modal Save As dialog when the level has no file name yet
+    // (an Untitled map). Over MCP nobody can answer it and the game thread blocks for good, so
+    // refuse here, using the same check SaveLevel makes.
+    if (FEditorFileUtils::GetFilename(PersistentLevel->OwningWorld).IsEmpty())
+    {
+        TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+        Details->SetStringField(TEXT("level"), World->GetOutermost()->GetName());
+        return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+            TEXT("Current level has never been saved and has no file name; saving it would open a Save As dialog. Create the level with create_level and a path instead."),
+            Details);
+    }
+
     const bool bSaved = FEditorFileUtils::SaveLevel(PersistentLevel);
     if (!bSaved)
     {
