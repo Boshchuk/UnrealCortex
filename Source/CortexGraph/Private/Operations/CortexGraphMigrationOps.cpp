@@ -1,6 +1,12 @@
 #include "Operations/CortexGraphMigrationOps.h"
 
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/IAssetRegistry.h"
 #include "CortexEngineCompat.h"
+#include "WidgetBlueprint.h"
+#include "Blueprint/UserWidget.h"
+#include "Blueprint/WidgetTree.h"
+#include "Components/Widget.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "EdGraph/EdGraph.h"
@@ -11,11 +17,19 @@
 #include "EdGraphUtilities.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/ComponentDelegateBinding.h"
 #include "K2Node.h"
+#include "K2Node_AssignDelegate.h"
+#include "K2Node_BaseAsyncTask.h"
+#include "K2Node_AddDelegate.h"
+#include "K2Node_CallDelegate.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_CallParentFunction.h"
+#include "K2Node_ComponentBoundEvent.h"
 #include "K2Node_Composite.h"
 #include "K2Node_CreateDelegate.h"
+#include "K2Node_Knot.h"
+#include "K2Node_MacroInstance.h"
 #include "K2Node_CustomEvent.h"
 #include "K2Node_DynamicCast.h"
 #include "K2Node_Event.h"
@@ -28,8 +42,10 @@
 #include "Operations/CortexGraphImplementationOps.h"
 #include "Operations/CortexGraphPatchOps.h"
 #include "Operations/CortexGraphSymbolResolver.h"
+#include "Policies/PrettyJsonPrintPolicy.h"
 #include "Serialization/JsonSerializer.h"
 #include "UObject/UnrealType.h"
+#include "UObject/UObjectGlobals.h"
 #include "UObject/UObjectHash.h"
 
 namespace
@@ -91,13 +107,20 @@ bool IsObjectCategory(const FName Category)
 /**
  * Pin-level compatibility of one mapped pair. The first differing canonical dimension is reported,
  * so the refusal always names both the pin and the dimension that made the mapping unsafe.
+ *
+ * BCompareReferenceFlag is false for the call-output repair, where the stale pin is an out/reference
+ * parameter pin while the current output is a plain return value: the reference storage flag differs
+ * by construction and carries no information about the value the consumers receive. Every other
+ * dimension (direction, category, subcategory, subcategory object, container and map terminal) is
+ * still compared, and each reviewed consumer's real acceptance is proven separately by the schema.
  */
 bool CompareMappedPins(
 	const UEdGraphPin& Stale,
 	const UEdGraphPin& Replacement,
 	const FString& DeclaredEntry,
 	FString& OutDimension,
-	FString& OutDetail)
+	FString& OutDetail,
+	const bool bCompareReferenceFlag = true)
 {
 	// Direction: the declared direction, the replacement pin's real direction and the stale pin's
 	// direction must all agree, otherwise the link would be re-created between incomparable ends.
@@ -207,7 +230,7 @@ bool CompareMappedPins(
 			return false;
 		}
 	}
-	if (Stale.PinType.bIsReference != Replacement.PinType.bIsReference)
+	if (bCompareReferenceFlag && Stale.PinType.bIsReference != Replacement.PinType.bIsReference)
 	{
 		OutDimension = TEXT("reference");
 		OutDetail = FString::Printf(TEXT("stale is_reference=%d vs replacement is_reference=%d"),
@@ -2181,7 +2204,18 @@ void AppendNodeCapture(UEdGraphNode* Node, const TSet<FGuid>& InSet, FString& Ou
 	}
 	else if (const UK2Node_CustomEvent* const CustomEvent = Cast<UK2Node_CustomEvent>(Node))
 	{
-		Out += FString::Printf(TEXT("   CustomEvent: Name=%s\n"), *CustomEvent->CustomFunctionName.ToString());
+		Out += FString::Printf(TEXT("   CustomEvent: Name=%s CallInEditor=%d\n"),
+			*CustomEvent->CustomFunctionName.ToString(), CustomEvent->bCallInEditor ? 1 : 0);
+	}
+	else if (const UK2Node_ComponentBoundEvent* const BoundEvent = Cast<UK2Node_ComponentBoundEvent>(Node))
+	{
+		// The authoring fingerprint of a component-bound node only sees its class and override flag, so
+		// the binding identity a retention has to preserve is captured here explicitly.
+		Out += FString::Printf(TEXT("   ComponentBoundEvent: Component=%s Delegate=%s Owner=%s Function=%s\n"),
+			*BoundEvent->ComponentPropertyName.ToString(),
+			*BoundEvent->DelegatePropertyName.ToString(),
+			BoundEvent->DelegateOwnerClass ? *BoundEvent->DelegateOwnerClass->GetPathName() : TEXT("None"),
+			*BoundEvent->CustomFunctionName.ToString());
 	}
 	else if (const UK2Node_Event* const Event = Cast<UK2Node_Event>(Node))
 	{
@@ -2269,6 +2303,27 @@ FString FCortexGraphMigrationOps::CapturePreservation(
 	for (UEdGraphNode* Node : Nodes)
 	{
 		AppendNodeCapture(Node, InSet, Capture);
+	}
+	// A graph repair never touches the designer tree, but the graph capture cannot see it: a Widget
+	// Blueprint therefore also binds the canonical source-widget digest to the contract, so a
+	// retention or a rollback proves the widget tree is unchanged instead of assuming it.
+	if (UWidgetBlueprint* const WidgetBlueprint = Cast<UWidgetBlueprint>(Blueprint))
+	{
+		TArray<FString> WidgetRecords;
+		UWidgetTree* const WidgetTree = WidgetBlueprint->WidgetTree;
+		if (WidgetTree)
+		{
+			TArray<UWidget*> Widgets;
+			WidgetTree->GetAllWidgets(Widgets);
+			for (const UWidget* const Widget : Widgets)
+			{
+				if (!Widget) continue;
+				WidgetRecords.Add(FString::Printf(TEXT("%s|%s|%d"), *Widget->GetName(),
+					*Widget->GetClass()->GetPathName(), Widget->bIsVariable ? 1 : 0));
+			}
+		}
+		WidgetRecords.Sort();
+		Capture += FString::Printf(TEXT("Widgets: %d\n%s\n"), WidgetRecords.Num(), *FString::Join(WidgetRecords, TEXT("\n")));
 	}
 	return Capture;
 }
@@ -4880,8 +4935,12 @@ bool IsPruneEntryNode(const UEdGraphNode* Node, FString& OutReason)
 	return false;
 }
 
-/** True when the ownership proof fails for the node; the reason names why it is never removable. */
-bool PruneBlockedReason(UEdGraphNode* Node, FString& OutReason)
+/**
+ * True when the ownership proof fails for a structural reason every node class shares: an unusable
+ * identity, a bound subgraph a removal would orphan, or a graph node that is not a K2 node. None of
+ * these is ever lifted by the reviewed additional-node exception.
+ */
+bool PruneStructuralBlockedReason(UEdGraphNode* Node, FString& OutReason)
 {
 	OutReason.Reset();
 	if (!Node || !Node->GetClass() || !Node->NodeGuid.IsValid())
@@ -4894,6 +4953,28 @@ bool PruneBlockedReason(UEdGraphNode* Node, FString& OutReason)
 		OutReason = TEXT("the node owns a bound subgraph, which a removal would orphan");
 		return true;
 	}
+	if (!Node->IsA<UK2Node>() && !Node->IsA<UEdGraphNode_Comment>())
+	{
+		OutReason = FString::Printf(TEXT("non-K2 graph node class '%s'"), *Node->GetClass()->GetName());
+		return true;
+	}
+	return false;
+}
+
+/**
+ * True when the ownership proof fails because of what the node's class owns outside the named graph:
+ * a latent call whose action outlives the node, or a class in the engine block list (tunnel pins
+ * owned by their bound graph, timelines with their own bound state, editable-pin terminators,
+ * delegate sets and async task proxies).
+ *
+ * A reviewed additional-node request may lift exactly this reason, and only for a class whose removal
+ * semantics are proven - the engine block list is deliberately broader than the proven set, so the
+ * exception is decided per node by `AdditionalNodeClassReason`, never by the block list alone.
+ */
+bool PruneClassBlockedReason(UEdGraphNode* Node, FString& OutReason)
+{
+	OutReason.Reset();
+	if (!Node || !Node->GetClass()) return false;
 	if (const UK2Node_CallFunction* const Call = Cast<UK2Node_CallFunction>(Node))
 	{
 		if (Call->IsLatentFunction())
@@ -4916,12 +4997,100 @@ bool PruneBlockedReason(UEdGraphNode* Node, FString& OutReason)
 			return true;
 		}
 	}
-	if (!Node->IsA<UK2Node>() && !Node->IsA<UEdGraphNode_Comment>())
+	return false;
+}
+
+/** True when the ownership proof fails for the node; the reason names why it is never removable. */
+bool PruneBlockedReason(UEdGraphNode* Node, FString& OutReason)
+{
+	OutReason.Reset();
+	if (PruneStructuralBlockedReason(Node, OutReason)) return true;
+	return PruneClassBlockedReason(Node, OutReason);
+}
+
+/**
+ * Class-specific removal semantics a reviewed `migration.source.additional_node_guids` request may
+ * admit, with the proof the plan publishes for the node.
+ *
+ * Only the engine's exact class qualifies, and only where removal is proven to stay inside the named
+ * graph: the engine's own `FBlueprintEditorUtils::RemoveNode` path breaks the node's links and calls
+ * `DestroyNode`, which none of these classes override in a way that reaches outside the node.
+ *
+ * - `UK2Node_Knot`: `IsCompilerRelevant()` is false, it declares no serialized state and only infers
+ *   its pins from its links, so removal needs no recompilation and leaves no trace.
+ * - `UK2Node_MacroInstance`: `MacroGraphReference` is a shared reference to a graph the instance does
+ *   not own (`GetSubGraphs()` is `UEdGraphNode`'s empty override; only `UK2Node_Composite` returns a
+ *   bound graph) and the `UK2Node_Tunnel::DestroyNode` twin unlink does not apply, because
+ *   `InputSinkNode`/`OutputSourceNode` are assigned for composite boundary nodes only. Removal
+ *   detaches the instance and breaks its own links; the referenced macro graph stays in its asset.
+ * - `UK2Node_CallFunction` that is latent: the latent action lives in the running world's
+ *   `FLatentActionManager`, and the asset-side trace is the compiled latent statement plus the
+ *   generated class's debug UUID association, both rebuilt by the required compile.
+ * - `UK2Node_CreateDelegate`, `UK2Node_AddDelegate`, `UK2Node_CallDelegate` and
+ *   `UK2Node_AssignDelegate`: the delegate declaration lives on the owning class. AssignDelegate
+ *   creates a separate custom event only when placed; removing the node does not destroy the event.
+ *   The partition protects the event and any retained consumer independently.
+ * - UMGEditor `UK2Node_PlayAnimation` (only this exact class): it adds proxy factory configuration
+ *   to `UK2Node_BaseAsyncTask`, has no bound graph or node deletion override, and expands into
+ *   intermediate calls and bindings rebuilt by the required compile. Other async proxy classes
+ *   remain blocked.
+ *
+ * Bound-graph owners (`UK2Node_Composite`), timelines, bare tunnels and editable-pin terminators,
+ * `UK2Node_DelegateSet` and other async task/latent action proxy classes stay unadmitted.
+ */
+bool AdditionalNodeClassReason(const UEdGraphNode* Node, FString& OutReason)
+{
+	OutReason.Reset();
+	if (!Node || !Node->GetClass()) return false;
+	UClass* const Class = Node->GetClass();
+	if (Class == UK2Node_Knot::StaticClass())
 	{
-		OutReason = FString::Printf(TEXT("non-K2 graph node class '%s'"), *Node->GetClass()->GetName());
+		OutReason = TEXT("compiler-irrelevant reroute: it declares no state, owns no graph and infers its pins from its links, so removing it needs no recompilation");
+		return true;
+	}
+	if (Class == UK2Node_MacroInstance::StaticClass())
+	{
+		OutReason = TEXT("macro instance referencing a shared macro graph it does not own: its pins and wildcard resolution are node-local and no generated artefact is registered");
+		return true;
+	}
+	if (Class == UK2Node_CallFunction::StaticClass())
+	{
+		const UK2Node_CallFunction* const Call = static_cast<const UK2Node_CallFunction*>(Node);
+		if (Call->IsLatentFunction())
+		{
+			OutReason = TEXT("latent call whose action lives in the running world's latent action manager; the asset-side trace is rebuilt by the required compile");
+			return true;
+		}
+		return false;
+	}
+	if (Class == UK2Node_CreateDelegate::StaticClass()
+		|| Class == UK2Node_AddDelegate::StaticClass()
+		|| Class == UK2Node_CallDelegate::StaticClass())
+	{
+		OutReason = TEXT("delegate node whose declaration lives on its owning class: it owns no graph, overrides no DestroyNode and registers no generated binding object");
+		return true;
+	}
+	if (Class == UK2Node_AssignDelegate::StaticClass())
+	{
+		OutReason = TEXT("delegate assignment node whose separate placement-created event remains independently owned: removing the assignment breaks its own links but does not delete the event");
+		return true;
+	}
+	if (Class->GetPathName() == TEXT("/Script/UMGEditor.K2Node_PlayAnimation")
+		&& Node->IsA<UK2Node_BaseAsyncTask>())
+	{
+		OutReason = TEXT("exact widget animation proxy node with no bound graph or deletion override: its intermediate calls and bindings are rebuilt by the required compile");
 		return true;
 	}
 	return false;
+}
+
+/**
+ * True when an admitted additional node only stops compiling once the graph is rebuilt. A
+ * compiler-irrelevant reroute is the one admitted class whose removal leaves no compiled trace.
+ */
+bool AdditionalNodeRequiresCompile(const UEdGraphNode* Node)
+{
+	return Node != nullptr && Node->IsCompilerRelevant();
 }
 
 FCortexGraphPruneNode MakePruneNode(const UEdGraphNode* Node, const FString& Reason)
@@ -4953,18 +5122,62 @@ struct FPrunePartition
 	FPruneScan Scan;
 };
 
+/** Only an explicitly named, impure call may join the island as a disconnected dead-end consumer.
+ * It cannot execute, cannot feed a retained consumer, and every linked input belongs to the island. */
+bool IsDisconnectedCallConsumer(const UEdGraphNode* Node, const UEdGraph* Graph, const TSet<FGuid>& Island)
+{
+	const UK2Node_CallFunction* const Call = Cast<UK2Node_CallFunction>(Node);
+	if (!Call || Call->GetClass() != UK2Node_CallFunction::StaticClass()
+		|| Call->IsNodePure() || Call->IsLatentFunction()) return false;
+	bool bHasExecInput = false;
+	bool bConsumesIsland = false;
+	for (const UEdGraphPin* Pin : Call->Pins)
+	{
+		if (!Pin) return false;
+		if (Pin->Direction == EGPD_Output)
+		{
+			if (!Pin->LinkedTo.IsEmpty()) return false;
+			continue;
+		}
+		if (Pin->Direction != EGPD_Input) return false;
+		if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
+		{
+			bHasExecInput = true;
+			if (!Pin->LinkedTo.IsEmpty()) return false;
+			continue;
+		}
+		for (const UEdGraphPin* Linked : Pin->LinkedTo)
+		{
+			const UEdGraphNode* const Producer = Linked ? Linked->GetOwningNode() : nullptr;
+			if (!Producer || Producer->GetGraph() != Graph || !Island.Contains(Producer->NodeGuid)) return false;
+			bConsumesIsland = true;
+		}
+	}
+	return bHasExecInput && bConsumesIsland;
+}
+
 /**
  * Computes the partition of the island of Entry inside Graph, with a bounded scan over the whole
  * asset and the island.
  *
  * The island is the execution-reachable set of the entry (exec outputs only, so branch, sequence and
  * loop bodies follow their own exec pins exactly as the trace helpers model them) plus the reverse
- * data-producer closure feeding it. A visited set bounds every traversal, so a data cycle inside the
- * island terminates instead of being refused. The entry and every graph terminator are retained by
- * kind, a node whose ownership cannot be proven is blocked, and a candidate is retained as shared as
- * soon as one of its consumers is not itself removable. That rule is also what makes a removal
- * unable to orphan a retained consumer's link: a consumer outside the removable set is exactly what
- * makes its producer shared, and the readback proves the retained link sets afterwards.
+ * data-producer closure feeding it. An explicitly requested, disconnected impure call may join
+ * only as a dead-end data consumer with all linked inputs from the island and no executable entry
+ * or linked output. A visited set bounds every traversal, so a data cycle terminates. The entry
+ * and every graph terminator are retained by kind. A node whose ownership cannot be proven is
+ * blocked, and a candidate is retained as shared as soon as one of its consumers is not removable.
+ * That rule also prevents a removal from orphaning a retained consumer's link: a consumer
+ * outside the removable set makes its producer shared; readback proves retained links afterward.
+ *
+ * The cut is the least fixed point of those constraints, not a single sweep: whenever a node becomes
+ * retained - by kind, by an unprovable identity, or because a retained consumer uses it - its input
+ * producers are re-checked, and in a retirement the execution consumers it drives are re-checked too,
+ * so a node retained late in the walk can no longer leave a candidate that an approval would remove
+ * while its own incoming execution edge from the retained node is severed. A prune is the deliberate
+ * exception: it removes the island body of an entry the caller keeps and journals every boundary link
+ * it severs, so the execution-consumer rule only applies when the selected entries themselves are the
+ * removable ones.
  */
 bool ComputeOwnedIslandPartition(
 	UBlueprint* Blueprint,
@@ -4972,7 +5185,8 @@ bool ComputeOwnedIslandPartition(
 	const TArray<UEdGraphNode*>& SeedEntries,
 	const bool bSelectedEntriesRemovable,
 	FPrunePartition& OutPartition,
-	FCortexCommandResult& OutError)
+	FCortexCommandResult& OutError,
+	const TSet<FGuid>* RequestedAdditionalGuids = nullptr)
 {
 	OutPartition = FPrunePartition();
 	OutError = FCortexCommandResult();
@@ -5066,6 +5280,24 @@ bool ComputeOwnedIslandPartition(
 			}
 		}
 	}
+	// Never chase arbitrary forward data edges: the caller must name a dead-end consumer of the
+	// complete original island. Its input producers already belong to that island.
+	if (bSelectedEntriesRemovable && RequestedAdditionalGuids)
+	{
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (!Node || Island.Contains(Node->NodeGuid)
+				|| !RequestedAdditionalGuids->Contains(Node->NodeGuid)
+				|| !IsDisconnectedCallConsumer(Node, Graph, Island)) continue;
+			Island.Add(Node->NodeGuid);
+			OutPartition.Scan.Visit(Node->NodeGuid);
+			if (OutPartition.Scan.bExhausted)
+			{
+				OutError = MakePruneScanRefusal(OutPartition.Scan);
+				return false;
+			}
+		}
+	}
 
 	TArray<UEdGraphNode*> IslandNodes;
 	for (UEdGraphNode* Node : Graph->Nodes)
@@ -5102,7 +5334,13 @@ bool ComputeOwnedIslandPartition(
 			RetainedReasons.Add(Node->NodeGuid, Reason);
 			continue;
 		}
-		if (!bSelectedEntry && PruneBlockedReason(Node, Reason))
+		if (!bSelectedEntry && PruneStructuralBlockedReason(Node, Reason))
+		{
+			BlockedReasons.Add(Node->NodeGuid, Reason);
+			continue;
+		}
+		if (!bSelectedEntry && PruneClassBlockedReason(Node, Reason)
+			&& !(RequestedAdditionalGuids && RequestedAdditionalGuids->Contains(Node->NodeGuid)))
 		{
 			BlockedReasons.Add(Node->NodeGuid, Reason);
 			continue;
@@ -5116,6 +5354,11 @@ bool ComputeOwnedIslandPartition(
 		if (!Candidates.Contains(Node->NodeGuid)) RetainedWorklist.Add(Node);
 	}
 
+	// The two sweeps below seed the fixed point with the constraints the initial candidates already
+	// break, against the candidate set as it stands here; the worklist after them re-checks the same
+	// constraints for every node that becomes retained afterwards, so the published cut cannot depend on
+	// the order in which the island happens to be walked.
+	//
 	// A candidate body with an execution input from a retained entry cannot be safely removed:
 	// preservation capture intentionally excludes links crossing the approved removal set.
 	for (UEdGraphNode* Node : IslandNodes)
@@ -5178,6 +5421,9 @@ bool ComputeOwnedIslandPartition(
 			.Add(Node->NodeGuid, ConsumingReason);
 		RetainedWorklist.Add(Node);
 	}
+	// Fixed-point worklist: every retained node re-checks the constraints its own retention created. The
+	// loop above swept once, so a node retained late - a producer a retained consumer uses, or a consumer
+	// of a node retained that way - never had its own producers and execution consumers re-checked.
 	for (int32 Index = 0; Index < RetainedWorklist.Num(); ++Index)
 	{
 		UEdGraphNode* RetainedNode = RetainedWorklist[Index];
@@ -5196,6 +5442,25 @@ bool ComputeOwnedIslandPartition(
 				(bSelectedEntriesRemovable && Selected.Contains(Producer->NodeGuid) ? BlockedReasons : RetainedReasons)
 					.Add(Producer->NodeGuid, Reason);
 				RetainedWorklist.Add(Producer);
+			}
+		}
+		// A retirement may never sever an execution edge it retains, so a candidate execution consumer of
+		// a retained node is retained as well instead of being approved with its incoming retained edge.
+		// A prune is the deliberate exception: it removes the island body and journals the boundary links
+		// it severs, which the execution-input sweep above already exempts for the entry it retains.
+		if (!bSelectedEntriesRemovable) continue;
+		for (UEdGraphPin* Pin : RetainedNode->Pins)
+		{
+			if (!Pin || Pin->Direction != EGPD_Output || Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Exec) continue;
+			for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
+			{
+				OutPartition.Scan.ExamineLink();
+				UEdGraphNode* Consumer = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
+				if (!Consumer || !Candidates.Contains(Consumer->NodeGuid)) continue;
+				Candidates.Remove(Consumer->NodeGuid);
+				BlockedReasons.Add(Consumer->NodeGuid, FString::Printf(
+					TEXT("execution input is also linked from retained node '%s'"), *RetainedNode->NodeGuid.ToString()));
+				RetainedWorklist.Add(Consumer);
 			}
 		}
 	}
@@ -5851,9 +6116,20 @@ bool FCortexGraphMigrationOps::VerifyPruneAgainstNative(
 	return true;
 }
 
+namespace
+{
+/** The in-asset generated-function reference scan the retirement readback repeats after a removal. */
+void CollectGeneratedFunctionReferences(
+	UBlueprint* Blueprint,
+	const FName FunctionName,
+	const FGuid& ExcludedGuid,
+	TArray<FString>& OutReferences);
+}
+
 bool FCortexGraphMigrationOps::VerifyRetirementAgainstNative(
 	UBlueprint* Blueprint,
 	const FCortexGraphMigrationRetirePlan& Plan,
+	bool bCompiled,
 	FString& OutFailure)
 {
 	OutFailure.Reset();
@@ -5939,6 +6215,72 @@ bool FCortexGraphMigrationOps::VerifyRetirementAgainstNative(
 	if (ShouldInjectRetirementReadbackFault(TEXT("retire_after_removal")))
 	{
 		OutFailure = TEXT("retirement readback failed by test injection after the removal comparison");
+		return false;
+	}
+
+	// The class-specific compiled proof. Removing a component-bound event node or a custom event does
+	// not by itself clear the generated artefact the previous compile produced: the binding array and
+	// the generated functions are rebuilt from the surviving nodes only on the next successful
+	// compile. So this half of the readback runs exactly when the run really compiled, and it proves
+	// the retired binding and generated function are gone instead of inferring it from the removal.
+	if (bCompiled && Plan.bRequiresCompile)
+	{
+		UBlueprintGeneratedClass* const GeneratedClass = Cast<UBlueprintGeneratedClass>(Blueprint->GeneratedClass);
+		if (!GeneratedClass)
+		{
+			OutFailure = TEXT("a compiled class-specific retirement requires the generated class to re-resolve");
+			return false;
+		}
+		for (const FCortexGraphMigrationRetireEntry& Entry : Plan.Entries)
+		{
+			if (!Entry.BindingFunctionName.IsEmpty())
+			{
+				const FName BindingFunctionName(*Entry.BindingFunctionName);
+				if (DeclarationCompiledIntoClass(Blueprint, BindingFunctionName))
+				{
+					OutFailure = FString::Printf(TEXT("the compiled generated class still declares the retired component binding function '%s'"),
+						*Entry.BindingFunctionName);
+					return false;
+				}
+				for (const UDynamicBlueprintBinding* const Binding : GeneratedClass->DynamicBindingObjects)
+				{
+					const UComponentDelegateBinding* const ComponentBinding = Cast<UComponentDelegateBinding>(Binding);
+					if (!ComponentBinding) continue;
+					for (const FBlueprintComponentDelegateBinding& Bound : ComponentBinding->ComponentDelegateBindings)
+					{
+						if (Bound.FunctionNameToBind == BindingFunctionName)
+						{
+							OutFailure = FString::Printf(
+								TEXT("the compiled generated class still registers the retired component delegate binding '%s.%s' -> '%s'"),
+								*Bound.ComponentPropertyName.ToString(), *Bound.DelegatePropertyName.ToString(),
+								*Bound.FunctionNameToBind.ToString());
+							return false;
+						}
+					}
+				}
+			}
+			if (!Entry.CustomFunctionName.IsEmpty())
+			{
+				if (DeclarationCompiledIntoClass(Blueprint, FName(*Entry.CustomFunctionName)))
+				{
+					OutFailure = FString::Printf(TEXT("the compiled generated class still declares the retired custom event function '%s'"),
+						*Entry.CustomFunctionName);
+					return false;
+				}
+				TArray<FString> References;
+				CollectGeneratedFunctionReferences(Blueprint, FName(*Entry.CustomFunctionName), FGuid(), References);
+				if (!References.IsEmpty())
+				{
+					OutFailure = FString::Printf(TEXT("in-asset nodes still reference the retired generated function '%s': %s"),
+						*Entry.CustomFunctionName, *FString::Join(References, TEXT(", ")));
+					return false;
+				}
+			}
+		}
+	}
+	if (ShouldInjectRetirementReadbackFault(TEXT("retire_after_binding")))
+	{
+		OutFailure = TEXT("retirement readback failed by test injection after the class-specific generated-artefact comparison");
 		return false;
 	}
 
@@ -6105,6 +6447,734 @@ bool ReadRetirePartition(const TSharedPtr<FJsonObject>& Source, const TCHAR* Fie
 }
 }
 
+namespace
+{
+/** Event entries and exact disconnected setter roots supported by the reviewed retirement cut. */
+enum class ERetireEntryKind : uint8
+{
+	OverrideEvent,
+	LifecycleEvent,
+	ComponentBoundEvent,
+	CustomEvent,
+	DisconnectedSetterRoot,
+};
+
+const TCHAR* RetireEntryKindName(const ERetireEntryKind Kind)
+{
+	switch (Kind)
+	{
+	case ERetireEntryKind::OverrideEvent:
+		return TEXT("override_event");
+	case ERetireEntryKind::LifecycleEvent:
+		return TEXT("lifecycle_event");
+	case ERetireEntryKind::ComponentBoundEvent:
+		return TEXT("component_bound_event");
+	case ERetireEntryKind::CustomEvent:
+		return TEXT("custom_event");
+	case ERetireEntryKind::DisconnectedSetterRoot:
+		return TEXT("disconnected_setter_root");
+	}
+	return TEXT("unsupported");
+}
+
+/** The widget lifecycle members whose Blueprint override body a native reparent can obsolete. */
+bool IsWidgetLifecycleMember(const FName Member)
+{
+	return Member == FName(TEXT("Construct")) || Member == FName(TEXT("PreConstruct"))
+		|| Member == FName(TEXT("Destruct")) || Member == FName(TEXT("OnInitialized"));
+}
+
+/** The component property a component-bound event binds, resolved on the live generated class chain. */
+FObjectProperty* ResolveComponentBoundProperty(UBlueprint* Blueprint, const FName ComponentPropertyName)
+{
+	if (!Blueprint || ComponentPropertyName.IsNone()) return nullptr;
+	if (UClass* const SkeletonClass = Blueprint->SkeletonGeneratedClass)
+	{
+		if (FObjectProperty* const Property = FindFProperty<FObjectProperty>(SkeletonClass, ComponentPropertyName))
+		{
+			return Property;
+		}
+	}
+	if (UClass* const GeneratedClass = Blueprint->GeneratedClass)
+	{
+		return FindFProperty<FObjectProperty>(GeneratedClass, ComponentPropertyName);
+	}
+	return nullptr;
+}
+
+/**
+ * True when the compiled component property class can actually host the delegate the node binds.
+ *
+ * `UComponentDelegateBinding` resolves the delegate on the component instance class at bind time, so
+ * the property class must derive from the declared delegate owner (and therefore inherit the
+ * delegate the owner resolves) or declare the matching multicast delegate itself. A property whose
+ * class can do neither is not a live binding, and the name pair alone must not authorize a removal.
+ */
+bool ComponentPropertyHostsDelegate(
+	const FObjectProperty* ComponentProperty,
+	const UK2Node_ComponentBoundEvent* Bound)
+{
+	if (!ComponentProperty || !Bound || Bound->DelegatePropertyName.IsNone()) return false;
+	UClass* const ComponentClass = ComponentProperty->PropertyClass;
+	if (!ComponentClass) return false;
+	if (Bound->DelegateOwnerClass && ComponentClass->IsChildOf(Bound->DelegateOwnerClass)) return true;
+	return FindFProperty<FMulticastDelegateProperty>(ComponentClass, Bound->DelegatePropertyName) != nullptr;
+}
+
+/** True when the event node owns an executable body this retirement may detach. */
+bool HasRetirableEventShape(const UK2Node_Event* Event, FString& OutReason)
+{
+	if (Event->GetSubGraphs().Num() > 0)
+	{
+		OutReason = TEXT("it owns a bound subgraph, which a removal would orphan");
+		return false;
+	}
+	// FindPin, never GetDelegatePin: the latter is a checked lookup, so a node that lost the pin
+	// would assert instead of being refused.
+	const UEdGraphPin* const DelegatePin = Event->FindPin(UK2Node_Event::DelegateOutputName);
+	if (DelegatePin && DelegatePin->LinkedTo.Num() > 0)
+	{
+		OutReason = TEXT("its delegate output is linked, so removing it would sever a delegate consumer");
+		return false;
+	}
+	if (!Event->Pins.ContainsByPredicate([](const UEdGraphPin* Pin)
+		{
+			return Pin && Pin->Direction == EGPD_Output && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec;
+		}))
+	{
+		OutReason = TEXT("it has no execution output pin");
+		return false;
+	}
+	return true;
+}
+
+/**
+ * Every in-asset node that references one generated function name, excluding one node identity.
+ *
+ * The scan covers the durable reference kinds the graph can express: a function call, a delegate
+ * creation binding, an event that names the function, and a function-graph entry of the same name.
+ * It is deliberately asset-local: a caller in another package is investigated separately by
+ * InvestigateExternalGeneratedFunctionCallers, and the caller's reviewed approval authorizes only
+ * the residual semantic question of whether an unreferenced island is still needed.
+ */
+void CollectGeneratedFunctionReferences(
+	UBlueprint* Blueprint,
+	const FName FunctionName,
+	const FGuid& ExcludedGuid,
+	TArray<FString>& OutReferences)
+{
+	if (!Blueprint || FunctionName.IsNone()) return;
+	TArray<UEdGraph*> Graphs;
+	Blueprint->GetAllGraphs(Graphs);
+	for (UEdGraph* Graph : Graphs)
+	{
+		if (!Graph) continue;
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (!Node || Node->NodeGuid == ExcludedGuid) continue;
+			FString Role;
+			if (const UK2Node_CallFunction* const Call = Cast<UK2Node_CallFunction>(Node))
+			{
+				if (Call->FunctionReference.GetMemberName() == FunctionName) Role = TEXT("call");
+			}
+			else if (const UK2Node_CreateDelegate* const CreateDelegate = Cast<UK2Node_CreateDelegate>(Node))
+			{
+				if (CreateDelegate->GetFunctionName() == FunctionName) Role = TEXT("create_delegate");
+			}
+			else if (const UK2Node_Event* const Event = Cast<UK2Node_Event>(Node))
+			{
+				if (Event->CustomFunctionName == FunctionName) Role = TEXT("same_name_event");
+				else if (Event->EventReference.GetMemberName() == FunctionName) Role = TEXT("event_reference");
+			}
+			else if (const UK2Node_FunctionEntry* const FunctionEntry = Cast<UK2Node_FunctionEntry>(Node))
+			{
+				if (FunctionEntry->FunctionReference.GetMemberName() == FunctionName) Role = TEXT("function_entry");
+			}
+			if (!Role.IsEmpty())
+			{
+				OutReferences.Add(FString::Printf(TEXT("%s (%s %s)"),
+					*Node->NodeGuid.ToString(), *Role, *Node->GetClass()->GetName()));
+			}
+		}
+	}
+	OutReferences.Sort();
+}
+
+/**
+ * Evidence about foreign call sites of this asset's generated functions.
+ *
+ * A `UK2Node_CustomEvent` compiles into a `BlueprintCallable`/`Public` generated function, so an
+ * asset outside the one being repaired can genuinely call it. The investigation opens with the
+ * Asset Registry, whose referencer list covers the packages on disk; it then scans the loaded
+ * Blueprint graphs, so a caller the registry has not indexed yet in this session is still caught.
+ * An incomplete registry or a referencer that cannot be inspected leaves the question unanswered
+ * and refuses instead of guessing, while a mere package dependency with no call site does not.
+ */
+struct FExternalCallerEvidence
+{
+	/** False when absence of foreign callers could not be established, so nothing may be retired. */
+	bool bComplete = true;
+	/** Why the investigation is incomplete, when it could not be completed. */
+	FString BlockingReason;
+	/** Proven foreign call sites of one generated function name, ordered by identity. */
+	TMap<FName, TArray<FString>> Callers;
+};
+
+/**
+ * True when one node of a foreign Blueprint actually references a generated function of the target.
+ * Sets OutbUnresolved when the node names a matching function but ownership cannot be established;
+ * the caller must then mark its investigation incomplete rather than treating the node as a non-caller.
+ *
+ * A function call and a delegate binding are the two node kinds whose reference resolves to a
+ * function on the target's generated or skeleton class chain, so both are real call sites.
+ */
+bool NodeCallsTargetGeneratedFunction(
+	UBlueprint* Target,
+	UBlueprint* Other,
+	UEdGraphNode* Node,
+	const TSet<FName>& FunctionNames,
+	FName& OutFunctionName,
+	bool& OutbUnresolved)
+{
+	OutFunctionName = NAME_None;
+	OutbUnresolved = false;
+	if (const UK2Node_CallFunction* const Call = Cast<UK2Node_CallFunction>(Node))
+	{
+		const FName Member = Call->FunctionReference.GetMemberName();
+		if (Member.IsNone() || !FunctionNames.Contains(Member)) return false;
+		const UClass* Owner = nullptr;
+		if (Call->FunctionReference.IsSelfContext())
+		{
+			// A self-context call in another asset resolves to the inherited function only when that
+			// asset derives from the asset being repaired.
+			Owner = Other && Other->GeneratedClass
+				? Other->GeneratedClass : (Other ? Other->SkeletonGeneratedClass : nullptr);
+		}
+		else
+		{
+			Owner = Call->FunctionReference.GetMemberParentClass();
+		}
+		if (!Owner)
+		{
+			OutbUnresolved = true;
+			return false;
+		}
+		if (!ReferenceOwnerMatchesAsset(Target, Owner)) return false;
+		OutFunctionName = Member;
+		return true;
+	}
+	if (const UK2Node_CreateDelegate* const CreateDelegate = Cast<UK2Node_CreateDelegate>(Node))
+	{
+		const FName Member = CreateDelegate->GetFunctionName();
+		if (Member.IsNone() || !FunctionNames.Contains(Member)) return false;
+		// The self pin is validated directly so the engine accessor's ensure cannot fire on the
+		// node shapes a project-wide scan has to tolerate.
+		const UEdGraphPin* const SelfPin = Node->FindPin(UEdGraphSchema_K2::PN_Self);
+		if (!SelfPin || SelfPin->LinkedTo.Num() > 1)
+		{
+			OutbUnresolved = true;
+			return false;
+		}
+		if (SelfPin->LinkedTo.Num() == 1)
+		{
+			const UEdGraphPin* const ScopePin = SelfPin->LinkedTo[0];
+			if (!ScopePin || ScopePin->PinType.PinCategory != UEdGraphSchema_K2::PC_Object)
+			{
+				OutbUnresolved = true;
+				return false;
+			}
+		}
+		// GetScopeClass() can return nullptr when the delegate's target class is no longer loaded or
+		// was renamed; the matching function name makes this node a candidate caller whose ownership
+		// is unresolvable, not a confirmed non-caller.  Signal that to the caller so it can refuse
+		// instead of silently treating an unresolvable reference as safe to retire past.
+		const UClass* const ScopeClass = CreateDelegate->GetScopeClass();
+		if (!ScopeClass)
+		{
+			OutbUnresolved = true;
+			return false;
+		}
+		if (!ReferenceOwnerMatchesAsset(Target, ScopeClass)) return false;
+		OutFunctionName = Member;
+		return true;
+	}
+	return false;
+}
+
+/**
+ * True when one referencer package can be inspected for foreign call sites from memory alone.
+ *
+ * A dry run must not load a package to answer the caller question: UE 5.8 can compile a Blueprint as
+ * part of its load, and a preview may not mutate anything. So the referencer's package has to be
+ * resident already and every asset the Asset Registry attributes to it has to be loaded, exactly the
+ * state in which the loaded-Blueprint scan sees every graph the package holds. A resident UPackage
+ * on its own is not enough: an unloaded Blueprint asset inside it is invisible to that scan, and
+ * reading that as "no caller" would authorize severing a cross-asset call.
+ */
+bool ReferencerIsInspectableInMemory(
+	const IAssetRegistry& AssetRegistry,
+	const FName ReferencerPackageName,
+	FString& OutReason)
+{
+	OutReason.Reset();
+	const FString ReferencerName = ReferencerPackageName.ToString();
+	if (!FindPackage(nullptr, *ReferencerName))
+	{
+		OutReason = TEXT("its package is not loaded");
+		return false;
+	}
+
+	TArray<FAssetData> ReferencerAssets;
+	AssetRegistry.GetAssetsByPackageName(ReferencerPackageName, ReferencerAssets,
+		/*bIncludeOnlyOnDiskAssets=*/false, /*bSkipARFilteredAssets=*/false);
+	for (const FAssetData& Asset : ReferencerAssets)
+	{
+		if (!Asset.IsValid()) continue;
+		const FString AssetPath = Asset.GetSoftObjectPath().ToString();
+		if (!FindObject<UObject>(nullptr, *AssetPath))
+		{
+			OutReason = FString::Printf(TEXT("its asset '%s' is not loaded"), *AssetPath);
+			return false;
+		}
+	}
+	return true;
+}
+
+/**
+ * Read-only project investigation of foreign call sites of the target's generated functions.
+ *
+ * The Asset Registry supplies the referencer packages of the asset. Every referencer has to be
+ * inspectable in memory exactly as it stands, because the dry run never loads one: loading can
+ * compile a Blueprint, so an uninspectable referencer leaves the caller question unanswered and the
+ * investigation refuses instead of guessing. Every loaded Blueprint graph is then scanned for a
+ * genuine call of one of the named functions, which is also how a caller created earlier in this
+ * session and not yet saved is caught. Nothing is mutated and nothing is saved.
+ */
+void InvestigateExternalGeneratedFunctionCallers(
+	UBlueprint* Target,
+	const TSet<FName>& FunctionNames,
+	FExternalCallerEvidence& Out)
+{
+	Out = FExternalCallerEvidence();
+	if (!Target || FunctionNames.IsEmpty()) return;
+
+	const UPackage* const TargetPackage = Target->GetOutermost();
+	const FName TargetPackageName = TargetPackage ? TargetPackage->GetFName() : NAME_None;
+	if (TargetPackageName.IsNone())
+	{
+		Out.bComplete = false;
+		Out.BlockingReason = TEXT("its package identity does not resolve, so foreign callers of its generated functions cannot be ruled out");
+		return;
+	}
+
+	IAssetRegistry* const AssetRegistry = IAssetRegistry::Get();
+	if (!AssetRegistry)
+	{
+		Out.bComplete = false;
+		Out.BlockingReason = TEXT("the Asset Registry is unavailable, so foreign callers of its generated functions cannot be ruled out");
+		return;
+	}
+	if (AssetRegistry->IsLoadingAssets())
+	{
+		Out.bComplete = false;
+		Out.BlockingReason = TEXT("the Asset Registry is still loading assets, so foreign callers of its generated functions cannot be ruled out");
+		return;
+	}
+
+	TArray<FName> Referencers;
+	AssetRegistry->GetReferencers(TargetPackageName, Referencers, UE::AssetRegistry::EDependencyCategory::Package);
+	Referencers.Sort([](const FName& Left, const FName& Right) { return Left.LexicalLess(Right); });
+	for (const FName& Referencer : Referencers)
+	{
+		if (Referencer.IsNone() || Referencer == TargetPackageName) continue;
+		const FString ReferencerName = Referencer.ToString();
+		FString UninspectableReason;
+		if (ReferencerIsInspectableInMemory(*AssetRegistry, Referencer, UninspectableReason)) continue;
+		Out.bComplete = false;
+		Out.BlockingReason = FString::Printf(
+			TEXT("referencer package '%s' cannot be inspected in memory, so a call of a retired generated function from it cannot be ruled out: %s"),
+			*ReferencerName, *UninspectableReason);
+		return;
+	}
+
+	for (TObjectIterator<UBlueprint> It; It; ++It)
+	{
+		UBlueprint* const Other = *It;
+		if (!Other || Other == Target || !IsValid(Other)) continue;
+		TArray<UEdGraph*> Graphs;
+		Other->GetAllGraphs(Graphs);
+		for (UEdGraph* Graph : Graphs)
+		{
+			if (!Graph) continue;
+			for (UEdGraphNode* Node : Graph->Nodes)
+			{
+				if (!Node) continue;
+				FName CalledFunction;
+				bool bUnresolved = false;
+				if (!NodeCallsTargetGeneratedFunction(Target, Other, Node, FunctionNames, CalledFunction, bUnresolved))
+				{
+					if (bUnresolved)
+					{
+						// A matching function name with unproved ownership is incomplete caller evidence.
+						Out.bComplete = false;
+						Out.BlockingReason = FString::Printf(
+							TEXT("asset '%s' in package '%s' has a matching call or delegate binding whose owner or scope cannot be resolved, so a call of a retired generated function from it cannot be ruled out"),
+							*Other->GetName(), *Other->GetOutermost()->GetName());
+						return;
+					}
+					continue;
+				}
+				Out.Callers.FindOrAdd(CalledFunction).Add(FString::Printf(
+					TEXT("package '%s' asset '%s' graph '%s' node '%s' (GUID %s)"),
+					*Other->GetOutermost()->GetName(), *Other->GetName(), *Graph->GetName(),
+					*Node->GetName(), *Node->NodeGuid.ToString()));
+			}
+		}
+	}
+	TArray<FName> CallerFunctions;
+	Out.Callers.GetKeys(CallerFunctions);
+	for (const FName& CallerFunction : CallerFunctions) Out.Callers.FindChecked(CallerFunction).Sort();
+}
+
+/**
+ * Classifies one selected retirement entry and validates it against its own class contract.
+ *
+ * Only the class-specific facts tell two entries with the same node class and shape apart, so each
+ * class is guarded separately and every unresolved fact is a refusal instead of an inference:
+ * an inherited override keeps its original structural predicate, a widget lifecycle override
+ * additionally requires a native Widget Blueprint parent as a structural prerequisite (the
+ * reflected Blueprint path cannot prove that a native virtual hook replaced the retired body, so
+ * that semantic decision stays with the caller's explicit entry and island approval), a
+ * component-bound delegate event must resolve a component property whose compiled class can host
+ * the declared delegate plus its binding function, with no ambiguous duplicate and no in-asset
+ * reference; a custom event must have no in-asset reference and no foreign caller; and an exact
+ * setter root must have no execution input link or bound subgraph.
+ */
+bool ClassifyRetireEntry(
+	UBlueprint* Blueprint,
+	UEdGraphNode* Node,
+	const FExternalCallerEvidence& ExternalCallers,
+	ERetireEntryKind& OutKind,
+	FCortexGraphMigrationRetireEntry& OutEntry,
+	FString& OutReason)
+{
+	OutReason.Reset();
+	OutEntry = FCortexGraphMigrationRetireEntry();
+	OutEntry.NodeGuid = Node->NodeGuid.ToString();
+	OutEntry.ClassPath = Node->GetClass()->GetPathName();
+
+	if (const UK2Node_ComponentBoundEvent* const Bound = Cast<UK2Node_ComponentBoundEvent>(Node))
+	{
+		if (Bound->bOverrideFunction)
+		{
+			OutReason = TEXT("it declares itself an unbound override in addition to its component binding");
+			return false;
+		}
+		if (Bound->ComponentPropertyName.IsNone() || Bound->DelegatePropertyName.IsNone() || !Bound->DelegateOwnerClass)
+		{
+			OutReason = TEXT("it does not name its component property, delegate property and delegate owner class");
+			return false;
+		}
+		if (Bound->CustomFunctionName.IsNone())
+		{
+			OutReason = TEXT("it has no generated binding function to prove cleaned up");
+			return false;
+		}
+		FObjectProperty* const ComponentProperty = ResolveComponentBoundProperty(Blueprint, Bound->ComponentPropertyName);
+		if (!ComponentProperty)
+		{
+			OutReason = FString::Printf(
+				TEXT("component property '%s' does not resolve to an object property of the generated class chain"),
+				*Bound->ComponentPropertyName.ToString());
+			return false;
+		}
+		if (!Bound->GetTargetDelegateProperty())
+		{
+			OutReason = FString::Printf(TEXT("delegate '%s.%s' does not resolve to a multicast delegate property"),
+				*Bound->DelegateOwnerClass->GetName(), *Bound->DelegatePropertyName.ToString());
+			return false;
+		}
+		if (!ComponentPropertyHostsDelegate(ComponentProperty, Bound))
+		{
+			UClass* const ComponentClass = ComponentProperty->PropertyClass;
+			OutReason = FString::Printf(
+				TEXT("component property '%s' is typed '%s', which neither derives from the bound delegate owner '%s' nor declares delegate '%s', so the pair is not a live binding"),
+				*Bound->ComponentPropertyName.ToString(),
+				ComponentClass ? *ComponentClass->GetName() : TEXT("None"),
+				*Bound->DelegateOwnerClass->GetName(), *Bound->DelegatePropertyName.ToString());
+			return false;
+		}
+		if (!HasRetirableEventShape(Bound, OutReason)) return false;
+		{
+			// One component delegate can only be bound by one event node: the engine refuses a second
+			// one when the component is renamed, and two bindings would make the removal ambiguous.
+			TArray<FString> Duplicates;
+			TArray<UEdGraph*> Graphs;
+			Blueprint->GetAllGraphs(Graphs);
+			for (UEdGraph* Graph : Graphs)
+			{
+				if (!Graph) continue;
+				for (UEdGraphNode* Other : Graph->Nodes)
+				{
+					const UK2Node_ComponentBoundEvent* const OtherBound = Cast<UK2Node_ComponentBoundEvent>(Other);
+					if (!OtherBound || OtherBound == Bound) continue;
+					if (OtherBound->ComponentPropertyName == Bound->ComponentPropertyName
+						&& OtherBound->DelegatePropertyName == Bound->DelegatePropertyName)
+					{
+						Duplicates.Add(OtherBound->NodeGuid.ToString());
+					}
+				}
+			}
+			if (!Duplicates.IsEmpty())
+			{
+				Duplicates.Sort();
+				OutReason = FString::Printf(
+					TEXT("component '%s.%s' is bound by %d component-bound event nodes [%s]; an ambiguous duplicate binding is refused instead of deleting one of them"),
+					*Bound->ComponentPropertyName.ToString(), *Bound->DelegatePropertyName.ToString(),
+					Duplicates.Num() + 1, *FString::Join(Duplicates, TEXT(", ")));
+				return false;
+			}
+		}
+		{
+			TArray<FString> References;
+			CollectGeneratedFunctionReferences(Blueprint, Bound->CustomFunctionName, Bound->NodeGuid, References);
+			if (!References.IsEmpty())
+			{
+				OutReason = FString::Printf(TEXT("in-asset nodes still reference its generated binding function '%s': %s"),
+					*Bound->CustomFunctionName.ToString(), *FString::Join(References, TEXT(", ")));
+				return false;
+			}
+		}
+		OutKind = ERetireEntryKind::ComponentBoundEvent;
+		OutEntry.Kind = RetireEntryKindName(OutKind);
+		OutEntry.ComponentPropertyName = Bound->ComponentPropertyName.ToString();
+		OutEntry.DelegatePropertyName = Bound->DelegatePropertyName.ToString();
+		OutEntry.DelegateOwnerClass = Bound->DelegateOwnerClass->GetPathName();
+		OutEntry.BindingFunctionName = Bound->CustomFunctionName.ToString();
+		return true;
+	}
+
+	if (const UK2Node_CustomEvent* const Custom = Cast<UK2Node_CustomEvent>(Node))
+	{
+		if (Custom->bOverrideFunction || Custom->bInternalEvent)
+		{
+			OutReason = TEXT("it declares itself an internal or override event in addition to being a custom event");
+			return false;
+		}
+		if (Custom->CustomFunctionName.IsNone())
+		{
+			OutReason = TEXT("it has no custom function name, so there is no generated function to prove cleaned up");
+			return false;
+		}
+		if (Custom->bCallInEditor)
+		{
+			OutReason = FString::Printf(TEXT("custom event '%s' is callable in the editor, so it can be invoked outside the graph"),
+				*Custom->CustomFunctionName.ToString());
+			return false;
+		}
+		if (!HasRetirableEventShape(Custom, OutReason)) return false;
+		{
+			TArray<FString> References;
+			CollectGeneratedFunctionReferences(Blueprint, Custom->CustomFunctionName, Custom->NodeGuid, References);
+			if (!References.IsEmpty())
+			{
+				OutReason = FString::Printf(TEXT("custom event '%s' is still referenced in this asset by %s"),
+					*Custom->CustomFunctionName.ToString(), *FString::Join(References, TEXT(", ")));
+				return false;
+			}
+		}
+		if (!ExternalCallers.bComplete)
+		{
+			OutReason = FString::Printf(
+				TEXT("custom event '%s' cannot be retired because foreign callers cannot be ruled out: %s"),
+				*Custom->CustomFunctionName.ToString(), *ExternalCallers.BlockingReason);
+			return false;
+		}
+		if (const TArray<FString>* const Callers = ExternalCallers.Callers.Find(Custom->CustomFunctionName))
+		{
+			OutReason = FString::Printf(
+				TEXT("custom event '%s' is called from another package by %s, so retiring it would sever that cross-asset call"),
+				*Custom->CustomFunctionName.ToString(), *FString::Join(*Callers, TEXT(", ")));
+			return false;
+		}
+		OutKind = ERetireEntryKind::CustomEvent;
+		OutEntry.Kind = RetireEntryKindName(OutKind);
+		OutEntry.CustomFunctionName = Custom->CustomFunctionName.ToString();
+		return true;
+	}
+
+	if (const UK2Node_Event* const Event = Cast<UK2Node_Event>(Node))
+	{
+		UClass* const Parent = Event->EventReference.GetMemberParentClass();
+		const FName Member = Event->EventReference.GetMemberName();
+		UFunction* const Function = Parent && !Member.IsNone() ? Parent->FindFunctionByName(Member) : nullptr;
+		if (!Event->bOverrideFunction || Event->bInternalEvent || !Parent || Member.IsNone() || !Function
+			|| !Function->HasAnyFunctionFlags(FUNC_BlueprintEvent))
+		{
+			OutReason = TEXT("it is not an inherited unbound override event with a valid parent member and exec output");
+			return false;
+		}
+		if (!HasRetirableEventShape(Event, OutReason)) return false;
+		if (IsWidgetLifecycleMember(Member))
+		{
+			UClass* const BlueprintParent = Blueprint->ParentClass;
+			if (!BlueprintParent || BlueprintParent == UUserWidget::StaticClass()
+				|| !BlueprintParent->IsChildOf(UUserWidget::StaticClass())
+				|| !BlueprintParent->HasAnyClassFlags(CLASS_Native))
+			{
+				OutReason = FString::Printf(
+					TEXT("lifecycle event '%s' is refused: the Blueprint parent '%s' is not a native Widget class that owns the lifecycle hook, so a plain UUserWidget parent is no proof that native behaviour replaced the retired body"),
+					*Member.ToString(), BlueprintParent ? *BlueprintParent->GetName() : TEXT("None"));
+				return false;
+			}
+			OutKind = ERetireEntryKind::LifecycleEvent;
+			OutEntry.Kind = RetireEntryKindName(OutKind);
+			OutEntry.MemberName = Member.ToString();
+			OutEntry.MemberOwnerClass = Parent->GetPathName();
+			return true;
+		}
+		OutKind = ERetireEntryKind::OverrideEvent;
+		OutEntry.Kind = RetireEntryKindName(OutKind);
+		OutEntry.MemberName = Member.ToString();
+		OutEntry.MemberOwnerClass = Parent->GetPathName();
+		return true;
+	}
+
+	// Once a retained notification has been rewired, its old setter can be the first node of
+	// an unreachable execution tail. The caller must select that exact node and approve the
+	// partition's complete cut; a linked execution input is never an orphan.
+	if (Node->GetClass() == UK2Node_VariableSet::StaticClass())
+	{
+		bool bHasExecInput = false;
+		bool bHasLinkedExecOutput = false;
+		for (const UEdGraphPin* Pin : Node->Pins)
+		{
+			if (!Pin || Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Exec) continue;
+			if (Pin->Direction == EGPD_Input)
+			{
+				bHasExecInput = true;
+				if (!Pin->LinkedTo.IsEmpty())
+				{
+					OutReason = TEXT("its execution input is linked to a retained or unknown caller");
+					return false;
+				}
+			}
+			else if (Pin->Direction == EGPD_Output && !Pin->LinkedTo.IsEmpty())
+			{
+				bHasLinkedExecOutput = true;
+			}
+		}
+		if (!bHasExecInput || !bHasLinkedExecOutput || !Node->GetSubGraphs().IsEmpty())
+		{
+			OutReason = TEXT("it is not the disconnected setter root of an execution tail without subgraphs");
+			return false;
+		}
+		OutKind = ERetireEntryKind::DisconnectedSetterRoot;
+		OutEntry.Kind = RetireEntryKindName(OutKind);
+		return true;
+	}
+
+	OutReason = FString::Printf(
+		TEXT("node class '%s' is not an inherited unbound override event, a widget lifecycle override, a component-bound delegate event, an unreferenced custom event or a disconnected setter root"),
+		*Node->GetClass()->GetName());
+	return false;
+}
+
+void WriteRetireEntries(const TArray<FCortexGraphMigrationRetireEntry>& Entries, TArray<TSharedPtr<FJsonValue>>& Out)
+{
+	for (const FCortexGraphMigrationRetireEntry& Entry : Entries)
+	{
+		TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+		Json->SetStringField(TEXT("node_guid"), Entry.NodeGuid);
+		Json->SetStringField(TEXT("kind"), Entry.Kind);
+		Json->SetStringField(TEXT("class_path"), Entry.ClassPath);
+		Json->SetStringField(TEXT("member_name"), Entry.MemberName);
+		Json->SetStringField(TEXT("member_owner_class"), Entry.MemberOwnerClass);
+		Json->SetStringField(TEXT("component_property_name"), Entry.ComponentPropertyName);
+		Json->SetStringField(TEXT("delegate_property_name"), Entry.DelegatePropertyName);
+		Json->SetStringField(TEXT("delegate_owner_class"), Entry.DelegateOwnerClass);
+		Json->SetStringField(TEXT("binding_function_name"), Entry.BindingFunctionName);
+		Json->SetStringField(TEXT("custom_function_name"), Entry.CustomFunctionName);
+		Json->SetBoolField(TEXT("call_in_editor"), Entry.bCallInEditor);
+		Out.Add(MakeShared<FJsonValueObject>(Json));
+	}
+}
+
+bool ReadRetireEntries(
+	const TSharedPtr<FJsonObject>& Source,
+	const TCHAR* Field,
+	TArray<FCortexGraphMigrationRetireEntry>& Out)
+{
+	const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+	if (!Source->TryGetArrayField(Field, Values) || !Values) return false;
+	for (const TSharedPtr<FJsonValue>& Value : *Values)
+	{
+		const TSharedPtr<FJsonObject> Json = Value.IsValid() ? Value->AsObject() : nullptr;
+		FCortexGraphMigrationRetireEntry Entry;
+		if (!Json.IsValid()
+			|| !Json->TryGetStringField(TEXT("node_guid"), Entry.NodeGuid)
+			|| !Json->TryGetStringField(TEXT("kind"), Entry.Kind)
+			|| !Json->TryGetStringField(TEXT("class_path"), Entry.ClassPath)
+			|| Entry.NodeGuid.IsEmpty() || Entry.Kind.IsEmpty() || Entry.ClassPath.IsEmpty())
+		{
+			return false;
+		}
+		Json->TryGetStringField(TEXT("member_name"), Entry.MemberName);
+		Json->TryGetStringField(TEXT("member_owner_class"), Entry.MemberOwnerClass);
+		Json->TryGetStringField(TEXT("component_property_name"), Entry.ComponentPropertyName);
+		Json->TryGetStringField(TEXT("delegate_property_name"), Entry.DelegatePropertyName);
+		Json->TryGetStringField(TEXT("delegate_owner_class"), Entry.DelegateOwnerClass);
+		Json->TryGetStringField(TEXT("binding_function_name"), Entry.BindingFunctionName);
+		Json->TryGetStringField(TEXT("custom_function_name"), Entry.CustomFunctionName);
+		Json->TryGetBoolField(TEXT("call_in_editor"), Entry.bCallInEditor);
+		Out.Add(MoveTemp(Entry));
+	}
+	return true;
+}
+
+/** Writes the reviewed additional-node admissions: identity, exact class and the admitting proof. */
+void WriteRetireAdditionalNodes(
+	const TArray<FCortexGraphMigrationRetireAdditionalNode>& Nodes,
+	TArray<TSharedPtr<FJsonValue>>& Out)
+{
+	for (const FCortexGraphMigrationRetireAdditionalNode& Node : Nodes)
+	{
+		TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+		Json->SetStringField(TEXT("node_guid"), Node.NodeGuid);
+		Json->SetStringField(TEXT("class_path"), Node.ClassPath);
+		Json->SetStringField(TEXT("reason"), Node.Reason);
+		Out.Add(MakeShared<FJsonValueObject>(Json));
+	}
+}
+
+/**
+ * Reads the reviewed additional nodes. The class and reason are required for every entry a prepared
+ * graph still holds; an idempotent replay echoes the requested identities without a class, because
+ * the node is already gone and its class proof belonged to the approved plan.
+ */
+bool ReadRetireAdditionalNodes(
+	const TSharedPtr<FJsonObject>& Source,
+	const TCHAR* Field,
+	TArray<FCortexGraphMigrationRetireAdditionalNode>& Out)
+{
+	const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+	if (!Source->TryGetArrayField(Field, Values) || !Values) return false;
+	for (const TSharedPtr<FJsonValue>& Value : *Values)
+	{
+		const TSharedPtr<FJsonObject> Json = Value.IsValid() ? Value->AsObject() : nullptr;
+		FCortexGraphMigrationRetireAdditionalNode Node;
+		if (!Json.IsValid() || !Json->TryGetStringField(TEXT("node_guid"), Node.NodeGuid) || Node.NodeGuid.IsEmpty())
+		{
+			return false;
+		}
+		Json->TryGetStringField(TEXT("class_path"), Node.ClassPath);
+		Json->TryGetStringField(TEXT("reason"), Node.Reason);
+		Out.Add(MoveTemp(Node));
+	}
+	return true;
+}
+}
+
 TSharedPtr<FJsonObject> FCortexGraphMigrationRetirePlan::ToJson() const
 {
 	TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
@@ -6117,10 +7187,14 @@ TSharedPtr<FJsonObject> FCortexGraphMigrationRetirePlan::ToJson() const
 	Json->SetNumberField(TEXT("scanned_links"), ScannedLinks);
 	Json->SetStringField(TEXT("blueprint_status_before"), BlueprintStatusBefore);
 	Json->SetBoolField(TEXT("preexisting_diagnostics_truncated"), bPreexistingDiagnosticsTruncated);
+	Json->SetBoolField(TEXT("requires_compile"), bRequiresCompile);
 	TArray<TSharedPtr<FJsonValue>> Values;
 	AppendRetireStrings(SelectedEntryGuids, Values); Json->SetArrayField(TEXT("selected_entry_guids"), Values);
+	Values.Reset(); WriteRetireEntries(Entries, Values); Json->SetArrayField(TEXT("entries"), Values);
 	Values.Reset(); AppendRetireStrings(ApprovedGuids, Values); Json->SetArrayField(TEXT("approved_guids"), Values);
 	Values.Reset(); AppendRetireStrings(RemovableGuids, Values); Json->SetArrayField(TEXT("removable_guids"), Values);
+	Values.Reset(); AppendRetireStrings(AdditionalNodeGuids, Values); Json->SetArrayField(TEXT("additional_guids"), Values);
+	Values.Reset(); WriteRetireAdditionalNodes(AdditionalNodes, Values); Json->SetArrayField(TEXT("additional_nodes"), Values);
 	Values.Reset(); AppendRetireStrings(PreexistingDiagnostics, Values); Json->SetArrayField(TEXT("preexisting_diagnostics"), Values);
 	Values.Reset(); WriteRetirePartition(Shared, Values); Json->SetArrayField(TEXT("shared"), Values);
 	Values.Reset(); WriteRetirePartition(Blocked, Values); Json->SetArrayField(TEXT("blocked"), Values);
@@ -6157,8 +7231,12 @@ bool FCortexGraphMigrationRetirePlan::FromJson(
 		|| OutPlan.Op != RetireEntriesOp
 		|| !Source->TryGetStringField(TEXT("graph_guid"), OutPlan.GraphGuid)
 		|| !ReadRetireStrings(Source, TEXT("selected_entry_guids"), OutPlan.SelectedEntryGuids)
+		|| !ReadRetireEntries(Source, TEXT("entries"), OutPlan.Entries)
+		|| !Source->TryGetBoolField(TEXT("requires_compile"), OutPlan.bRequiresCompile)
 		|| !ReadRetireStrings(Source, TEXT("approved_guids"), OutPlan.ApprovedGuids)
 		|| !ReadRetireStrings(Source, TEXT("removable_guids"), OutPlan.RemovableGuids)
+		|| !ReadRetireStrings(Source, TEXT("additional_guids"), OutPlan.AdditionalNodeGuids)
+		|| !ReadRetireAdditionalNodes(Source, TEXT("additional_nodes"), OutPlan.AdditionalNodes)
 		|| !ReadRetireStrings(Source, TEXT("preexisting_diagnostics"), OutPlan.PreexistingDiagnostics)
 		|| !ReadRetirePartition(Source, TEXT("shared"), OutPlan.Shared)
 		|| !ReadRetirePartition(Source, TEXT("blocked"), OutPlan.Blocked)
@@ -6242,7 +7320,7 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 		return false;
 	}
 	if (!FCortexGraphPatchOps::HasOnlyFields(*SourcePtr,
-		{ TEXT("graph_ref"), TEXT("entry_node_guids") }, OutError, TEXT("migration.source"))) return false;
+		{ TEXT("graph_ref"), TEXT("entry_node_guids"), TEXT("additional_node_guids") }, OutError, TEXT("migration.source"))) return false;
 	const TSharedPtr<FJsonObject>* GraphRefPtr = nullptr;
 	if (!(*SourcePtr)->TryGetObjectField(TEXT("graph_ref"), GraphRefPtr) || !GraphRefPtr || !GraphRefPtr->IsValid())
 	{
@@ -6302,6 +7380,47 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 		SelectedSet.Add(Guid);
 		SelectedGuids.Add(Guid);
 	}
+	// The optional reviewed additional-node list. Field-level validation happens here, before any
+	// partition work: the entries must be unique valid GUIDs that do not repeat a selected entry, and
+	// an empty list is a request for nothing rather than a malformed one.
+	TArray<FGuid> AdditionalGuids;
+	TSet<FGuid> AdditionalSet;
+	if ((*SourcePtr)->HasField(TEXT("additional_node_guids")))
+	{
+		const TArray<TSharedPtr<FJsonValue>>* AdditionalValues = nullptr;
+		if (!(*SourcePtr)->TryGetArrayField(TEXT("additional_node_guids"), AdditionalValues) || !AdditionalValues)
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+				TEXT("migration.source.additional_node_guids must be an array"));
+			return false;
+		}
+		for (const TSharedPtr<FJsonValue>& Value : *AdditionalValues)
+		{
+			FString Text;
+			FGuid Guid;
+			if (!Value.IsValid() || !Value->TryGetString(Text) || !FGuid::Parse(Text, Guid) || !Guid.IsValid())
+			{
+				OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+					TEXT("additional_node_guids entries must be valid GUID strings"));
+				return false;
+			}
+			if (AdditionalSet.Contains(Guid))
+			{
+				OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+					TEXT("additional_node_guids must contain unique valid GUID strings"));
+				return false;
+			}
+			if (SelectedSet.Contains(Guid))
+			{
+				OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+					FString::Printf(TEXT("additional_node_guids must not repeat the selected entry '%s'"), *Guid.ToString()));
+				return false;
+			}
+			AdditionalSet.Add(Guid);
+			AdditionalGuids.Add(Guid);
+		}
+		AdditionalGuids.Sort([](const FGuid& A, const FGuid& B) { return A.ToString() < B.ToString(); });
+	}
 	const bool bHasApproval = Migration->HasField(TEXT("approved_node_guids"));
 	TArray<FGuid> Approved;
 	if (bHasApproval)
@@ -6327,6 +7446,8 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 		}
 	}
 	TArray<UEdGraphNode*> SelectedNodes;
+	TArray<FCortexGraphMigrationRetireEntry> SelectedEntries;
+	bool bRequiresCompile = false;
 	if (bHasApproval)
 	{
 		for (const FGuid& Guid : SelectedGuids)
@@ -6404,6 +7525,26 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 			OutPlan.SelectedEntryGuids.Sort();
 			OutPlan.ApprovedGuids = PruneGuidText(Approved);
 			OutPlan.RemovableGuids = OutPlan.ApprovedGuids;
+			// An idempotent replay has no node left to classify, so the requested identities are
+			// echoed canonically without a class: the class-specific proof belonged to the plan that
+			// was approved, and the approved set already covers every requested identity.
+			for (const FGuid& Guid : AdditionalGuids)
+			{
+				if (!Approved.Contains(Guid))
+				{
+					OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+						FString::Printf(TEXT("approved_node_guids must include the requested additional node '%s'"),
+							*Guid.ToString()));
+					return false;
+				}
+			}
+			OutPlan.AdditionalNodeGuids = PruneGuidText(AdditionalGuids);
+			for (const FString& GuidText : OutPlan.AdditionalNodeGuids)
+			{
+				FCortexGraphMigrationRetireAdditionalNode Additional;
+				Additional.NodeGuid = GuidText;
+				OutPlan.AdditionalNodes.Add(MoveTemp(Additional));
+			}
 			OutPlan.bComplete = true;
 			OutPlan.bAwaitingApproval = false;
 			OutPlan.bReused = true;
@@ -6422,10 +7563,21 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 				if (Node && Node->bHasCompilerMessage && !Node->ErrorMsg.IsEmpty()) OutPlan.PreexistingDiagnostics.Add(Node->ErrorMsg);
 			}
 			OutPlan.bPreexistingDiagnosticsTruncated = FCortexGraphPatchOps::TrimDiagnostics(OutPlan.PreexistingDiagnostics);
+			if (!RequirePublishableRetirementInventory(OutPlan, OutError)) return false;
 			bOutReused = true;
 			return true;
 		}
 	}
+	// A custom event compiles into a callable generated function, so foreign call sites are
+	// investigated once for the whole selection; when no custom event is selected nothing is scanned.
+	TSet<FName> SelectedCustomEventFunctions;
+	for (const FGuid& Guid : SelectedGuids)
+	{
+		const UK2Node_CustomEvent* const Custom = Cast<UK2Node_CustomEvent>(FindNodeByGuidInGraph(Graph, Guid));
+		if (Custom && !Custom->CustomFunctionName.IsNone()) SelectedCustomEventFunctions.Add(Custom->CustomFunctionName);
+	}
+	FExternalCallerEvidence ExternalCallers;
+	InvestigateExternalGeneratedFunctionCallers(Blueprint, SelectedCustomEventFunctions, ExternalCallers);
 	for (const FGuid& Guid : SelectedGuids)
 	{
 		UEdGraphNode* Node = FindNodeByGuidInGraph(Graph, Guid);
@@ -6448,38 +7600,108 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 				FString::Printf(TEXT("selected entry identity '%s' is owned by %d nodes instead of exactly one"), *Guid.ToString(), Owners));
 			return false;
 		}
-		UK2Node_Event* Event = Cast<UK2Node_Event>(Node);
-		UClass* Parent = Event ? Event->EventReference.GetMemberParentClass() : nullptr;
-		const FName Member = Event ? Event->EventReference.GetMemberName() : NAME_None;
-		UFunction* Function = Parent && !Member.IsNone() ? Parent->FindFunctionByName(Member) : nullptr;
-		if (!Event || Node->IsA<UK2Node_CustomEvent>() || !Event->bOverrideFunction || Event->bInternalEvent
-			|| !Parent || Member.IsNone() || !Function
-			|| !Function->HasAnyFunctionFlags(FUNC_BlueprintEvent)
-			|| Event->GetSubGraphs().Num() > 0
-			|| (Event->GetDelegatePin() && Event->GetDelegatePin()->LinkedTo.Num() > 0)
-			|| !Node->Pins.ContainsByPredicate([](const UEdGraphPin* Pin)
-				{ return Pin && Pin->Direction == EGPD_Output && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec; }))
+		ERetireEntryKind Kind = ERetireEntryKind::OverrideEvent;
+		FCortexGraphMigrationRetireEntry Entry;
+		FString Reason;
+		if (!ClassifyRetireEntry(Blueprint, Node, ExternalCallers, Kind, Entry, Reason))
 		{
 			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
-				FString::Printf(TEXT("selected node '%s' is not a supported unbound override event with a valid parent member and exec output"), *Guid.ToString()));
+				FString::Printf(TEXT("selected node '%s' is not a supported retirement entry: %s"), *Guid.ToString(), *Reason));
 			return false;
 		}
-		const FString MemberName = Member.ToString();
-		if (MemberName == TEXT("Construct") || MemberName == TEXT("PreConstruct") || MemberName == TEXT("Destruct")
-			|| MemberName == TEXT("OnInitialized"))
+		SelectedEntries.Add(Entry);
+		if (Kind == ERetireEntryKind::ComponentBoundEvent || Kind == ERetireEntryKind::CustomEvent
+			|| Kind == ERetireEntryKind::DisconnectedSetterRoot)
 		{
-			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
-				FString::Printf(TEXT("lifecycle event '%s' is not supported for retirement"), *MemberName));
-			return false;
+			bRequiresCompile = true;
 		}
 		SelectedNodes.Add(Node);
 	}
+	// Every requested additional node is resolved and proven before the partition runs, so an
+	// unsupported class is refused with its class reason no matter where the node sits in the graph.
+	// Only a proven exact-class block may be lifted; structural ownership is never lifted.
+	// The partition may add an explicitly named disconnected dead-end consumer, but cannot widen
+	// execution traversal or admit an arbitrary node outside the original island.
+	TArray<FCortexGraphMigrationRetireAdditionalNode> AdditionalEntries;
+	for (const FGuid& Guid : AdditionalGuids)
+	{
+		UEdGraphNode* Node = FindNodeByGuidInGraph(Graph, Guid);
+		if (!Node)
+		{
+			UEdGraph* OtherOwner = nullptr;
+			TArray<UEdGraph*> AssetGraphs;
+			Blueprint->GetAllGraphs(AssetGraphs);
+			for (UEdGraph* AssetGraph : AssetGraphs)
+			{
+				if (!AssetGraph || AssetGraph == Graph) continue;
+				for (UEdGraphNode* Owned : AssetGraph->Nodes)
+				{
+					if (Owned && Owned->NodeGuid == Guid) { OtherOwner = AssetGraph; break; }
+				}
+				if (OtherOwner) break;
+			}
+			if (OtherOwner)
+			{
+				OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+					FString::Printf(TEXT("additional node '%s' is owned by another graph '%s' of this asset"),
+						*Guid.ToString(), *OtherOwner->GraphGuid.ToString()));
+			}
+			else
+			{
+				OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+					FString::Printf(TEXT("additional node '%s' is not present in this asset"), *Guid.ToString()));
+			}
+			return false;
+		}
+		FString BlockedReason;
+		if (PruneStructuralBlockedReason(Node, BlockedReason))
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("additional node '%s' class '%s' is not admitted for reviewed removal: %s"),
+					*Guid.ToString(), *Node->GetClass()->GetName(), *BlockedReason));
+			return false;
+		}
+		if (PruneClassBlockedReason(Node, BlockedReason))
+		{
+			FString AdmissionReason;
+			if (!AdditionalNodeClassReason(Node, AdmissionReason))
+			{
+				OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+					FString::Printf(TEXT("additional node '%s' class '%s' is not admitted for reviewed removal: %s"),
+						*Guid.ToString(), *Node->GetClass()->GetName(), *BlockedReason));
+				return false;
+			}
+			FCortexGraphMigrationRetireAdditionalNode Additional;
+			Additional.NodeGuid = Guid.ToString();
+			Additional.ClassPath = Node->GetClass()->GetPathName();
+			Additional.Reason = AdmissionReason;
+			AdditionalEntries.Add(MoveTemp(Additional));
+		}
+		else
+		{
+			// A non-blocked node must still pass the island and retained-consumer partition;
+			// only a disconnected dead-end call may join from outside the original island.
+			FCortexGraphMigrationRetireAdditionalNode Additional;
+			Additional.NodeGuid = Guid.ToString();
+			Additional.ClassPath = Node->GetClass()->GetPathName();
+			Additional.Reason = TEXT("non-blocked node explicitly reviewed for removal; island membership and consumer ownership are proven by the partition");
+			AdditionalEntries.Add(MoveTemp(Additional));
+		}
+		if (AdditionalNodeRequiresCompile(Node)) bRequiresCompile = true;
+	}
 	FPrunePartition Partition;
-	if (!ComputeOwnedIslandPartition(Blueprint, Graph, SelectedNodes, true, Partition, OutError)) return false;
+	if (!ComputeOwnedIslandPartition(Blueprint, Graph, SelectedNodes, true, Partition, OutError,
+		AdditionalSet.IsEmpty() ? nullptr : &AdditionalSet)) return false;
 	OutPlan.Op = Op;
 	OutPlan.GraphGuid = GraphGuid.ToString();
 	for (const FGuid& Guid : SelectedGuids) OutPlan.SelectedEntryGuids.Add(Guid.ToString());
 	OutPlan.SelectedEntryGuids.Sort();
+	SelectedEntries.Sort([](const FCortexGraphMigrationRetireEntry& A, const FCortexGraphMigrationRetireEntry& B)
+	{
+		return A.NodeGuid < B.NodeGuid;
+	});
+	OutPlan.Entries = SelectedEntries;
+	OutPlan.bRequiresCompile = bRequiresCompile;
 	OutPlan.ScannedNodes = Partition.Scan.Nodes;
 	OutPlan.ScannedLinks = Partition.Scan.Links;
 	OutPlan.bComplete = !Partition.Scan.bExhausted;
@@ -6488,6 +7710,33 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 	OutPlan.Blocked = Partition.Blocked;
 	OutPlan.ExternalEdges = Partition.ExternalEdges;
 	OutPlan.RemovableGuids = PruneGuidText(Partition.Removable);
+	// A requested node the cut cannot remove refuses instead of being silently dropped: the request
+	// named an identity, so the retirement must either remove it or report exactly why it cannot.
+	AdditionalEntries.Sort([](const FCortexGraphMigrationRetireAdditionalNode& A,
+		const FCortexGraphMigrationRetireAdditionalNode& B) { return A.NodeGuid < B.NodeGuid; });
+	OutPlan.AdditionalNodeGuids = PruneGuidText(AdditionalGuids);
+	OutPlan.AdditionalNodes = AdditionalEntries;
+	for (const FString& GuidText : OutPlan.AdditionalNodeGuids)
+	{
+		if (OutPlan.RemovableGuids.Contains(GuidText)) continue;
+		FString CutReason;
+		const FCortexGraphPruneNode* const SharedNode = Partition.Shared.FindByPredicate(
+			[&](const FCortexGraphPruneNode& Node) { return Node.NodeGuid == GuidText; });
+		const FCortexGraphPruneNode* const BlockedNode = Partition.Blocked.FindByPredicate(
+			[&](const FCortexGraphPruneNode& Node) { return Node.NodeGuid == GuidText; });
+		if (SharedNode) CutReason = SharedNode->Reason;
+		else if (BlockedNode) CutReason = BlockedNode->Reason;
+		if (CutReason.IsEmpty())
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("additional node '%s' is outside the ownership island of the selected entries"),
+					*GuidText));
+			return false;
+		}
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+			FString::Printf(TEXT("additional node '%s' cannot be removed: %s"), *GuidText, *CutReason));
+		return false;
+	}
 	if (bHasApproval)
 	{
 		if (OutPlan.Blocked.Num() > 0 || SelectedGuids.ContainsByPredicate(
@@ -6527,7 +7776,7 @@ bool FCortexGraphMigrationOps::PlanRetirement(
 		if (Node && Node->bHasCompilerMessage && !Node->ErrorMsg.IsEmpty()) OutPlan.PreexistingDiagnostics.Add(Node->ErrorMsg);
 	}
 	OutPlan.bPreexistingDiagnosticsTruncated = FCortexGraphPatchOps::TrimDiagnostics(OutPlan.PreexistingDiagnostics);
-	return true;
+	return RequirePublishableRetirementInventory(OutPlan, OutError);
 }
 
 TSharedPtr<FJsonObject> FCortexGraphMigrationOps::MakeRetirementInventory(const TSharedPtr<FJsonObject>& RetirePlanJson)
@@ -6553,6 +7802,44 @@ TSharedPtr<FJsonObject> FCortexGraphMigrationOps::MakeRetirementInventory(const 
 	Inventory->SetNumberField(TEXT("scanned_links"), Plan.ScannedLinks);
 	Inventory->SetArrayField(TEXT("removable"), ToValues(Plan.RemovableGuids));
 	Inventory->SetArrayField(TEXT("approved_guids"), ToValues(Plan.ApprovedGuids));
+	Inventory->SetBoolField(TEXT("requires_compile"), Plan.bRequiresCompile);
+	// Every review-critical identity list below is published whole. `complete` means both that the
+	// ownership scan finished and that this inventory carries the full set the caller is asked to
+	// approve and replay, so a trimmed list under `complete: true` would be an approval set the
+	// caller can neither review nor echo back. An inventory too large for the connected bridge is
+	// refused by `RequirePublishableRetirementInventory` before it is ever published; the shared
+	// diagnostics bound is therefore not applied here. It stays applied to `preexisting_diagnostics`
+	// alone, which is explicitly non-critical and carries its own truncation flag.
+	TArray<FString> EntryLines;
+	for (const FCortexGraphMigrationRetireEntry& Entry : Plan.Entries)
+	{
+		FString Line = FString::Printf(TEXT("%s %s class=%s"), *Entry.NodeGuid, *Entry.Kind, *Entry.ClassPath);
+		if (!Entry.MemberName.IsEmpty())
+		{
+			Line += FString::Printf(TEXT(" member=%s owner=%s"), *Entry.MemberName, *Entry.MemberOwnerClass);
+		}
+		if (!Entry.ComponentPropertyName.IsEmpty())
+		{
+			Line += FString::Printf(TEXT(" component=%s delegate=%s owner=%s binding=%s"),
+				*Entry.ComponentPropertyName, *Entry.DelegatePropertyName, *Entry.DelegateOwnerClass, *Entry.BindingFunctionName);
+		}
+		if (!Entry.CustomFunctionName.IsEmpty())
+		{
+			Line += FString::Printf(TEXT(" custom=%s call_in_editor=%d"),
+				*Entry.CustomFunctionName, Entry.bCallInEditor ? 1 : 0);
+		}
+		EntryLines.Add(MoveTemp(Line));
+	}
+	Inventory->SetArrayField(TEXT("selected_entries"), ToValues(EntryLines));
+	// The caller reviews the requested additional nodes here, so each line names the identity, the
+	// exact engine class and the class-specific proof the preview admitted it under.
+	TArray<FString> AdditionalLines;
+	for (const FCortexGraphMigrationRetireAdditionalNode& Additional : Plan.AdditionalNodes)
+	{
+		AdditionalLines.Add(FString::Printf(TEXT("%s %s (%s)"), *Additional.NodeGuid, *Additional.ClassPath,
+			Additional.Reason.IsEmpty() ? TEXT("already removed: class proof was reviewed by the approved plan") : *Additional.Reason));
+	}
+	Inventory->SetArrayField(TEXT("additional_nodes"), ToValues(AdditionalLines));
 	Inventory->SetStringField(TEXT("blueprint_status_before"), Plan.BlueprintStatusBefore);
 	Inventory->SetArrayField(TEXT("preexisting_diagnostics"), ToValues(Plan.PreexistingDiagnostics));
 	Inventory->SetBoolField(TEXT("preexisting_diagnostics_truncated"), Plan.bPreexistingDiagnosticsTruncated);
@@ -6562,7 +7849,6 @@ TSharedPtr<FJsonObject> FCortexGraphMigrationOps::MakeRetirementInventory(const 
 		TArray<FString> Lines;
 		for (const FCortexGraphPruneNode& Node : Nodes)
 			Lines.Add(FString::Printf(TEXT("%s %s (%s)"), *Node.NodeGuid, *Node.ClassPath, *Node.Reason));
-		FCortexGraphPatchOps::TrimDiagnostics(Lines);
 		return Lines;
 	};
 	Inventory->SetArrayField(TEXT("shared"), ToValues(PartitionLines(Plan.Shared)));
@@ -6570,10 +7856,1055 @@ TSharedPtr<FJsonObject> FCortexGraphMigrationOps::MakeRetirementInventory(const 
 	TArray<FString> Edges;
 	for (const FCortexGraphPruneEdge& Edge : Plan.ExternalEdges)
 		Edges.Add(FString::Printf(TEXT("%s.%s -> %s.%s"), *Edge.FromGuid, *Edge.FromPin, *Edge.ToGuid, *Edge.ToPin));
-	FCortexGraphPatchOps::TrimDiagnostics(Edges);
 	Inventory->SetArrayField(TEXT("external_edges"), ToValues(Edges));
 	return Inventory;
 }
+
+bool FCortexGraphMigrationOps::RequirePublishableRetirementInventory(
+	const FCortexGraphMigrationRetirePlan& Plan,
+	FCortexCommandResult& OutError)
+{
+	const TSharedPtr<FJsonObject> Inventory = MakeRetirementInventory(Plan.ToJson());
+	int32 InventoryChars = 0;
+	const bool bMeasured = Inventory.IsValid() && EncodedResponseChars(Inventory, InventoryChars);
+	if (bMeasured && InventoryChars <= MaxPublishableRetirementInventoryChars)
+	{
+		return true;
+	}
+	// The caller approves exactly the identity sets this inventory publishes, so a set the connected
+	// bridge could not carry whole is refused here - before approval and before any mutation - instead
+	// of being clipped on the way out while `complete: true` rides through unchanged.
+	const int32 ReviewedNodes = Plan.Shared.Num() + Plan.Blocked.Num() + Plan.AdditionalNodes.Num();
+	const FString Measurement = bMeasured
+		? FString::Printf(TEXT("encodes to %d character(s)"), InventoryChars)
+		: FString(TEXT("could not be encoded"));
+	OutError = FCortexCommandRouter::Error(CortexErrorCodes::LimitExceeded,
+		FString::Printf(TEXT("the complete retirement inventory of %d selected entr%s with %d reviewed shared/blocked/requested node(s) and %d boundary edge(s) %s, which is at or above the publishable %d (bridge response limit %d with %d reserved for the response envelope); the retirement is refused without changing the asset instead of approving an inventory the caller cannot review in full"),
+			Plan.SelectedEntryGuids.Num(), Plan.SelectedEntryGuids.Num() == 1 ? TEXT("y") : TEXT("ies"),
+			ReviewedNodes, Plan.ExternalEdges.Num(), *Measurement,
+			MaxPublishableRetirementInventoryChars, BridgeResponseCharLimit, ApprovalResponseEnvelopeReserveChars));
+	OutError.ErrorDetails = MakeShared<FJsonObject>();
+	OutError.ErrorDetails->SetNumberField(TEXT("response_char_limit"), BridgeResponseCharLimit);
+	OutError.ErrorDetails->SetNumberField(TEXT("publishable_inventory_chars"), MaxPublishableRetirementInventoryChars);
+	OutError.ErrorDetails->SetNumberField(TEXT("inventory_chars"), InventoryChars);
+	OutError.ErrorDetails->SetNumberField(TEXT("selected_entries"), Plan.SelectedEntryGuids.Num());
+	OutError.ErrorDetails->SetNumberField(TEXT("reviewed_nodes"), ReviewedNodes);
+	OutError.ErrorDetails->SetNumberField(TEXT("shared_nodes"), Plan.Shared.Num());
+	OutError.ErrorDetails->SetNumberField(TEXT("blocked_nodes"), Plan.Blocked.Num());
+	OutError.ErrorDetails->SetNumberField(TEXT("boundary_edges"), Plan.ExternalEdges.Num());
+	OutError.ErrorDetails->SetBoolField(TEXT("complete"), false);
+	return false;
+}
+
+namespace
+{
+const TCHAR* const CallOutputOp = TEXT("replace_call_output");
+
+#if WITH_AUTOMATION_TESTS
+/** Test-only call-output readback fault, isolated from the prune and retirement verifier seams. */
+FName CallOutputReadbackFaultForTesting = NAME_None;
+#endif
+
+bool ShouldInjectCallOutputReadbackFault(const FName Check)
+{
+#if WITH_AUTOMATION_TESTS
+	return CallOutputReadbackFaultForTesting == Check;
+#else
+	(void)Check;
+	return false;
+#endif
+}
+
+/** Canonical `"<guid>.<pin>"` key of one reviewed consumer edge. */
+FString CallOutputEdgeKey(const FString& FarGuid, const FString& FarPin)
+{
+	return FarGuid + TEXT(".") + FarPin;
+}
+
+/**
+ * Canonical capture of one call node's pins, excluding the pin this repair removes. Name, canonical
+ * signature and defaults are captured, so the readback proves the replacement ran in place instead of
+ * silently reconstructing the node. The excluded pin is identified by name *and* direction: a migrated
+ * signature can leave an input carrying the historic output's name, and that surviving pin must stay
+ * inside the capture so the readback proves it unchanged.
+ */
+FString CallOutputPinCapture(
+	const UEdGraphNode& Node,
+	const FName ExcludedPin,
+	const EEdGraphPinDirection ExcludedDirection)
+{
+	TArray<FString> Records;
+	for (const UEdGraphPin* Pin : Node.Pins)
+	{
+		if (!Pin || (Pin->PinName == ExcludedPin && Pin->Direction == ExcludedDirection)) continue;
+		Records.Add(FString::Printf(TEXT("%s|%s|def=%s|defobj=%s|deftext=%s"),
+			*Pin->PinName.ToString(),
+			*PinSignature(*Pin),
+			*Pin->DefaultValue,
+			Pin->DefaultObject ? *Pin->DefaultObject->GetPathName() : TEXT("None"),
+			*Pin->DefaultTextValue.ToString()));
+	}
+	Records.Sort();
+	return FString::Join(Records, TEXT("\n"));
+}
+
+/**
+ * Canonical capture of all surviving links on the call node, excluding the stale orphan pin (which
+ * carries no surviving links) and the replacement output pin's reviewed edges (which are already
+ * verified by the edge comparison in VerifyCallOutputAgainstNative).  ExcludedReplacementEdgeKeys
+ * holds `"<far-guid>.<far-pin>"` keys so only the precisely reviewed connections are exempted;
+ * any unrelated link added, removed, or silently re-routed will make the readback diverge.
+ */
+FString CallOutputLinkCapture(
+	const UEdGraphNode& Node,
+	const FName ExcludedStalePinName,
+	const EEdGraphPinDirection ExcludedStalePinDirection,
+	const FName ReplacementPinName,
+	const TSet<FString>& ExcludedReplacementEdgeKeys)
+{
+	TArray<FString> Records;
+	for (const UEdGraphPin* Pin : Node.Pins)
+	{
+		if (!Pin) continue;
+		if (Pin->PinName == ExcludedStalePinName && Pin->Direction == ExcludedStalePinDirection) continue;
+		for (const UEdGraphPin* LinkedPin : Pin->LinkedTo)
+		{
+			const UEdGraphNode* const FarNode = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
+			if (!FarNode) continue;
+			// Exempt only the reviewed replacement-output edges; all other links (including unrelated
+			// outputs and all input-side/exec links) must survive unmodified.
+			if (Pin->PinName == ReplacementPinName && Pin->Direction == EGPD_Output)
+			{
+				const FString EdgeKey = FarNode->NodeGuid.ToString() + TEXT(".") + LinkedPin->PinName.ToString();
+				if (ExcludedReplacementEdgeKeys.Contains(EdgeKey)) continue;
+			}
+			Records.Add(FString::Printf(TEXT("%s:%d->%s.%s"),
+				*Pin->PinName.ToString(),
+				static_cast<int32>(Pin->Direction),
+				*FarNode->NodeGuid.ToString(),
+				*LinkedPin->PinName.ToString()));
+		}
+	}
+	Records.Sort();
+	return FString::Join(Records, TEXT("\n"));
+}
+
+/**
+ * True when the call's reflected target function really declares this output pin.
+ *
+ * A pin is a reflected output only when an `out` or `return` parameter of the target function carries
+ * its name and canonical type: that parameter is what a compiled build materialises. A same-typed,
+ * non-orphan pin the declaration does not expose (a stale or injected pin) is therefore not a repair
+ * target, because the compiler could never produce the value a rewire onto it would claim. `OutDetail`
+ * names the first differing dimension so the refusal says what made the pin unreflected.
+ */
+bool ReflectsOutputPin(
+	const UFunction& Function,
+	const UEdGraphPin& Pin,
+	const UEdGraphSchema_K2& Schema,
+	FString& OutDetail)
+{
+	OutDetail.Reset();
+	if (Pin.Direction != EGPD_Output)
+	{
+		OutDetail = TEXT("the pin is not an output");
+		return false;
+	}
+	const FProperty* const Property = FindFProperty<FProperty>(&Function, Pin.PinName);
+	if (!Property)
+	{
+		OutDetail = FString::Printf(TEXT("the function declares no parameter named '%s'"), *Pin.PinName.ToString());
+		return false;
+	}
+	if (!Property->HasAnyPropertyFlags(CPF_OutParm | CPF_ReturnParm))
+	{
+		OutDetail = FString::Printf(TEXT("the parameter '%s' is neither an out nor a return parameter"),
+			*Pin.PinName.ToString());
+		return false;
+	}
+	FEdGraphPinType ReflectedType;
+	if (!Schema.ConvertPropertyToPinType(Property, ReflectedType))
+	{
+		OutDetail = FString::Printf(TEXT("the parameter '%s' has no blueprint pin type"), *Pin.PinName.ToString());
+		return false;
+	}
+	if (ReflectedType.PinCategory == UEdGraphSchema_K2::PC_Wildcard)
+	{
+		// The declaration itself is unconstrained (a wildcard out or return parameter), so whatever
+		// conformed type the node's live pin carries is exactly what the declaration produces.
+		return true;
+	}
+	if (ReflectedType.PinCategory != Pin.PinType.PinCategory)
+	{
+		OutDetail = FString::Printf(TEXT("category '%s' vs reflected '%s'"),
+			*Pin.PinType.PinCategory.ToString(), *ReflectedType.PinCategory.ToString());
+		return false;
+	}
+	if (ReflectedType.PinSubCategory != Pin.PinType.PinSubCategory)
+	{
+		OutDetail = FString::Printf(TEXT("subcategory '%s' vs reflected '%s'"),
+			*Pin.PinType.PinSubCategory.ToString(), *ReflectedType.PinSubCategory.ToString());
+		return false;
+	}
+	const FString ReflectedObject = ReflectedType.PinSubCategoryObject.IsValid()
+		? ReflectedType.PinSubCategoryObject->GetPathName() : FString();
+	const FString PinObject = Pin.PinType.PinSubCategoryObject.IsValid()
+		? Pin.PinType.PinSubCategoryObject->GetPathName() : FString();
+	if (ReflectedObject != PinObject)
+	{
+		OutDetail = FString::Printf(TEXT("subcategory object '%s' vs reflected '%s'"),
+			PinObject.IsEmpty() ? TEXT("<none>") : *PinObject,
+			ReflectedObject.IsEmpty() ? TEXT("<none>") : *ReflectedObject);
+		return false;
+	}
+	if (ReflectedType.ContainerType != Pin.PinType.ContainerType)
+	{
+		OutDetail = FString::Printf(TEXT("container kind %d vs reflected %d"),
+			static_cast<int32>(Pin.PinType.ContainerType), static_cast<int32>(ReflectedType.ContainerType));
+		return false;
+	}
+	return true;
+}
+
+void WriteCallOutputEdges(const TArray<FCortexGraphCallOutputEdge>& Edges, TArray<TSharedPtr<FJsonValue>>& Out)
+{
+	for (const FCortexGraphCallOutputEdge& Edge : Edges)
+	{
+		TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+		Json->SetStringField(TEXT("far_node_guid"), Edge.FarGuid);
+		Json->SetStringField(TEXT("far_pin"), Edge.FarPin);
+		Json->SetStringField(TEXT("far_pin_signature"), Edge.FarPinSignature);
+		Json->SetNumberField(TEXT("far_direction"), Edge.FarDirection);
+		Json->SetStringField(TEXT("response"), Edge.Response);
+		Out.Add(MakeShared<FJsonValueObject>(Json));
+	}
+}
+
+bool ReadCallOutputEdges(const TSharedPtr<FJsonObject>& Source, TArray<FCortexGraphCallOutputEdge>& Out)
+{
+	const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+	if (!Source->TryGetArrayField(TEXT("edges"), Values) || !Values) return false;
+	for (const TSharedPtr<FJsonValue>& Value : *Values)
+	{
+		const TSharedPtr<FJsonObject> Json = Value.IsValid() ? Value->AsObject() : nullptr;
+		FCortexGraphCallOutputEdge Edge;
+		if (!Json.IsValid()
+			|| !Json->TryGetStringField(TEXT("far_node_guid"), Edge.FarGuid)
+			|| !Json->TryGetStringField(TEXT("far_pin"), Edge.FarPin)
+			|| !Json->TryGetStringField(TEXT("far_pin_signature"), Edge.FarPinSignature)
+			|| !Json->TryGetStringField(TEXT("response"), Edge.Response)
+			|| Edge.FarGuid.IsEmpty() || Edge.FarPin.IsEmpty() || Edge.Response.IsEmpty())
+		{
+			return false;
+		}
+		Json->TryGetNumberField(TEXT("far_direction"), Edge.FarDirection);
+		Out.Add(MoveTemp(Edge));
+	}
+	return true;
+}
+
+/** Canonical order of the reviewed consumer set: identity first, then pin name. */
+void SortCallOutputEdges(TArray<FCortexGraphCallOutputEdge>& Edges)
+{
+	Edges.Sort([](const FCortexGraphCallOutputEdge& A, const FCortexGraphCallOutputEdge& B)
+	{
+		if (A.FarGuid != B.FarGuid) return A.FarGuid < B.FarGuid;
+		return A.FarPin < B.FarPin;
+	});
+}
+}
+
+TSharedPtr<FJsonObject> FCortexGraphMigrationCallOutputPlan::ToJson() const
+{
+	TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+	Json->SetStringField(TEXT("op"), Op);
+	Json->SetStringField(TEXT("graph_guid"), GraphGuid);
+	Json->SetStringField(TEXT("subgraph_path"), SubgraphPath);
+	Json->SetStringField(TEXT("call_node_guid"), CallNodeGuid);
+	Json->SetStringField(TEXT("call_node_class_path"), CallNodeClassPath);
+	Json->SetStringField(TEXT("call_symbol"), CallSymbol);
+	Json->SetStringField(TEXT("stale_pin"), StalePinName);
+	Json->SetStringField(TEXT("stale_pin_signature"), StalePinSignature);
+	Json->SetNumberField(TEXT("stale_direction"), StaleDirection);
+	Json->SetStringField(TEXT("replacement_pin"), ReplacementPinName);
+	Json->SetStringField(TEXT("replacement_pin_signature"), ReplacementPinSignature);
+	Json->SetStringField(TEXT("pins"), Pins);
+	Json->SetStringField(TEXT("call_links"), CallLinks);
+	Json->SetBoolField(TEXT("awaiting_approval"), bAwaitingApproval);
+	Json->SetBoolField(TEXT("reused"), bReused);
+	Json->SetStringField(TEXT("blueprint_status_before"), BlueprintStatusBefore);
+	Json->SetBoolField(TEXT("preexisting_diagnostics_truncated"), bPreexistingDiagnosticsTruncated);
+	TArray<TSharedPtr<FJsonValue>> Values;
+	WriteCallOutputEdges(Edges, Values);
+	Json->SetArrayField(TEXT("edges"), Values);
+	Values.Reset(); AppendRetireStrings(PreexistingDiagnostics, Values);
+	Json->SetArrayField(TEXT("preexisting_diagnostics"), Values);
+	TSharedPtr<FJsonObject> Preserve = MakeShared<FJsonObject>();
+	Preserve->SetStringField(TEXT("label"), Preservation.Label);
+	Preserve->SetStringField(TEXT("graph_guid"), Preservation.GraphGuid);
+	Preserve->SetStringField(TEXT("capture"), Preservation.Capture);
+	Values.Reset(); AppendRetireStrings(Preservation.ExcludedGuids, Values);
+	Preserve->SetArrayField(TEXT("excluded_guids"), Values);
+	Json->SetObjectField(TEXT("preservation"), Preserve);
+	return Json;
+}
+
+bool FCortexGraphMigrationCallOutputPlan::FromJson(
+	const TSharedPtr<FJsonObject>& Source,
+	FCortexGraphMigrationCallOutputPlan& OutPlan,
+	FCortexCommandResult& OutError)
+{
+	OutPlan = FCortexGraphMigrationCallOutputPlan();
+	OutError = FCortexCommandResult();
+	if (!Source.IsValid()
+		|| !Source->TryGetStringField(TEXT("op"), OutPlan.Op)
+		|| OutPlan.Op != CallOutputOp
+		|| !Source->TryGetStringField(TEXT("graph_guid"), OutPlan.GraphGuid)
+		|| !Source->TryGetStringField(TEXT("call_node_guid"), OutPlan.CallNodeGuid)
+		|| !Source->TryGetStringField(TEXT("call_node_class_path"), OutPlan.CallNodeClassPath)
+		|| !Source->TryGetStringField(TEXT("call_symbol"), OutPlan.CallSymbol)
+		|| !Source->TryGetStringField(TEXT("stale_pin"), OutPlan.StalePinName)
+		|| !Source->TryGetStringField(TEXT("replacement_pin"), OutPlan.ReplacementPinName)
+		|| !Source->TryGetStringField(TEXT("replacement_pin_signature"), OutPlan.ReplacementPinSignature)
+		|| !Source->TryGetStringField(TEXT("pins"), OutPlan.Pins)
+		|| !Source->HasTypedField<EJson::String>(TEXT("call_links"))
+		|| !Source->TryGetStringField(TEXT("call_links"), OutPlan.CallLinks)
+		|| !Source->TryGetNumberField(TEXT("stale_direction"), OutPlan.StaleDirection)
+		|| !Source->TryGetBoolField(TEXT("awaiting_approval"), OutPlan.bAwaitingApproval)
+		|| !Source->TryGetBoolField(TEXT("reused"), OutPlan.bReused)
+		|| !Source->TryGetBoolField(TEXT("preexisting_diagnostics_truncated"), OutPlan.bPreexistingDiagnosticsTruncated)
+		|| !ReadCallOutputEdges(Source, OutPlan.Edges)
+		|| !ReadRetireStrings(Source, TEXT("preexisting_diagnostics"), OutPlan.PreexistingDiagnostics))
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation, TEXT("prepared call-output plan is incomplete"));
+		return false;
+	}
+	Source->TryGetStringField(TEXT("subgraph_path"), OutPlan.SubgraphPath);
+	Source->TryGetStringField(TEXT("stale_pin_signature"), OutPlan.StalePinSignature);
+	Source->TryGetStringField(TEXT("blueprint_status_before"), OutPlan.BlueprintStatusBefore);
+	const TSharedPtr<FJsonObject>* PreservationJson = nullptr;
+	if (!Source->TryGetObjectField(TEXT("preservation"), PreservationJson) || !PreservationJson || !PreservationJson->IsValid()
+		|| !(*PreservationJson)->TryGetStringField(TEXT("label"), OutPlan.Preservation.Label)
+		|| !(*PreservationJson)->TryGetStringField(TEXT("graph_guid"), OutPlan.Preservation.GraphGuid)
+		|| !(*PreservationJson)->TryGetStringField(TEXT("capture"), OutPlan.Preservation.Capture)
+		|| !ReadRetireStrings(*PreservationJson, TEXT("excluded_guids"), OutPlan.Preservation.ExcludedGuids))
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation, TEXT("prepared call-output plan has no preservation contract"));
+		return false;
+	}
+	return true;
+}
+
+bool FCortexGraphMigrationOps::PlanCallOutput(
+	UBlueprint* Blueprint,
+	const TSharedPtr<FJsonObject>& Migration,
+	FCortexGraphMigrationCallOutputPlan& OutPlan,
+	bool& bOutReused,
+	FCortexCommandResult& OutError)
+{
+	OutPlan = FCortexGraphMigrationCallOutputPlan();
+	OutError = FCortexCommandResult();
+	bOutReused = false;
+	if (!Blueprint)
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::BlueprintNotFound, TEXT("Blueprint is null"));
+		return false;
+	}
+	if (!Migration.IsValid())
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("migration must be an object"));
+		return false;
+	}
+	if (!FCortexGraphPatchOps::HasOnlyFields(Migration,
+		{ TEXT("op"), TEXT("source"), TEXT("edges") }, OutError, TEXT("migration"))) return false;
+	FString Op;
+	if (!FCortexGraphPatchOps::ReadRequiredString(Migration, TEXT("op"), Op, OutError)) return false;
+	if (Op != CallOutputOp)
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::UnsupportedOperation,
+			TEXT("migration.op must be replace_call_output"));
+		return false;
+	}
+	const TSharedPtr<FJsonObject>* SourcePtr = nullptr;
+	if (!Migration->TryGetObjectField(TEXT("source"), SourcePtr) || !SourcePtr || !SourcePtr->IsValid())
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("migration.source must be an object"));
+		return false;
+	}
+	if (!FCortexGraphPatchOps::HasOnlyFields(*SourcePtr,
+		{ TEXT("graph_ref"), TEXT("call_node_guid"), TEXT("stale_pin"), TEXT("replacement_pin") },
+		OutError, TEXT("migration.source"))) return false;
+	const TSharedPtr<FJsonObject>* GraphRefPtr = nullptr;
+	if (!(*SourcePtr)->TryGetObjectField(TEXT("graph_ref"), GraphRefPtr) || !GraphRefPtr || !GraphRefPtr->IsValid())
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("migration.source.graph_ref must be an object"));
+		return false;
+	}
+	if (!FCortexGraphPatchOps::HasOnlyFields(*GraphRefPtr,
+		{ TEXT("graph_guid"), TEXT("graph_kind"), TEXT("subgraph_path") },
+		OutError, TEXT("migration.source.graph_ref"))) return false;
+	FGuid GraphGuid;
+	if (!FCortexGraphPatchOps::ParseGuidField(*GraphRefPtr, TEXT("graph_guid"), GraphGuid, OutError)) return false;
+	FString SubgraphPath;
+	(*GraphRefPtr)->TryGetStringField(TEXT("subgraph_path"), SubgraphPath);
+	UEdGraph* Graph = nullptr;
+	if (!FCortexGraphPatchOps::ResolveGraphByGuid(Blueprint, GraphGuid, SubgraphPath, Graph, OutError)) return false;
+	// The call-output repair is graph-scoped, so it works in any mutable user graph. The optional
+	// published kind is still checked against the resolved graph instead of being trusted.
+	FString GraphKind;
+	if (!FCortexGraphPatchOps::ResolveGraphKindByGuid(Blueprint, GraphGuid, GraphKind, OutError)) return false;
+	if ((*GraphRefPtr)->HasField(TEXT("graph_kind")))
+	{
+		FString RequestedKind;
+		if (!(*GraphRefPtr)->TryGetStringField(TEXT("graph_kind"), RequestedKind) || RequestedKind != GraphKind)
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+				TEXT("migration.source.graph_ref.graph_kind conflicts with the resolved graph"));
+			return false;
+		}
+	}
+	FGuid CallGuid;
+	if (!FCortexGraphPatchOps::ParseGuidField(*SourcePtr, TEXT("call_node_guid"), CallGuid, OutError)) return false;
+	FString StalePinName;
+	FString ReplacementPinName;
+	if (!FCortexGraphPatchOps::ReadRequiredString(*SourcePtr, TEXT("stale_pin"), StalePinName, OutError)) return false;
+	if (!FCortexGraphPatchOps::ReadRequiredString(*SourcePtr, TEXT("replacement_pin"), ReplacementPinName, OutError)) return false;
+	if (StalePinName == ReplacementPinName)
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+			TEXT("migration.source.stale_pin and migration.source.replacement_pin must name different pins"));
+		return false;
+	}
+	UEdGraphNode* const CallNode = FindNodeByGuidInGraph(Graph, CallGuid);
+	if (!CallNode)
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::NodeNotFound,
+			FString::Printf(TEXT("the call node '%s' is not in the named graph"), *CallGuid.ToString()));
+		return false;
+	}
+	UK2Node_CallFunction* const Call = Cast<UK2Node_CallFunction>(CallNode);
+	if (!Call)
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+			FString::Printf(TEXT("node '%s' is not a UK2Node_CallFunction, so it has no call output to replace"),
+				*CallGuid.ToString()));
+		return false;
+	}
+	UEdGraphPin* const ReplacementPin = Call->FindPin(FName(*ReplacementPinName), EGPD_Output);
+	if (!ReplacementPin)
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::PinNotFound,
+			FString::Printf(TEXT("the replacement output pin '%s' does not exist on call node '%s'"),
+				*ReplacementPinName, *CallGuid.ToString()));
+		return false;
+	}
+	if (ReplacementPin->bOrphanedPin)
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+			FString::Printf(TEXT("the replacement output pin '%s' is itself an orphaned pin; this operation needs the current reflected output"),
+				*ReplacementPinName));
+		return false;
+	}
+	// The replacement must be a real reflected output of the call's own target function. Merely being a
+	// same-typed, non-orphan live pin is not enough: a stale or injected pin the native declaration does
+	// not expose would be rewired as a verified repair although the compiler could never produce its
+	// value. An unresolvable target function cannot be verified either, so it refuses instead of trusting
+	// the pin's mere presence.
+	{
+		UFunction* const TargetFunction = Call->GetTargetFunction();
+		if (!TargetFunction)
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("the call node's target function does not resolve, so the reflected replacement output pin '%s' cannot be verified"),
+					*ReplacementPinName));
+			return false;
+		}
+		const UEdGraphSchema_K2* const K2Schema = Cast<UEdGraphSchema_K2>(Graph->GetSchema());
+		FString ReflectedDetail;
+		if (!K2Schema || !ReflectsOutputPin(*TargetFunction, *ReplacementPin, *K2Schema, ReflectedDetail))
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("the replacement output pin '%s' is not declared as an out or return parameter of the call's reflected target function '%s' (%s)"),
+					*ReplacementPinName, *TargetFunction->GetName(),
+					ReflectedDetail.IsEmpty() ? TEXT("the graph schema is not a K2 schema") : *ReflectedDetail));
+			return false;
+		}
+	}
+
+	// The reviewed set the caller declares. It is compared against the freshly discovered set, never
+	// substituted for it.
+	bool bHasReview = false;
+	TArray<FString> ReviewedKeys;
+	if (Migration->HasField(TEXT("edges")))
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+		if (!Migration->TryGetArrayField(TEXT("edges"), Values) || !Values)
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("migration.edges must be an array"));
+			return false;
+		}
+		bHasReview = true;
+		TSet<FString> Seen;
+		for (const TSharedPtr<FJsonValue>& Value : *Values)
+		{
+			const TSharedPtr<FJsonObject> Json = Value.IsValid() ? Value->AsObject() : nullptr;
+			if (!Json.IsValid()
+				|| !FCortexGraphPatchOps::HasOnlyFields(Json, { TEXT("far_node_guid"), TEXT("far_pin") },
+					OutError, TEXT("migration.edges entry")))
+			{
+				return false;
+			}
+			FString FarGuid;
+			FString FarPin;
+			FGuid ParsedGuid;
+			if (!Json->TryGetStringField(TEXT("far_node_guid"), FarGuid)
+				|| !Json->TryGetStringField(TEXT("far_pin"), FarPin)
+				|| !FGuid::Parse(FarGuid, ParsedGuid) || !ParsedGuid.IsValid() || FarPin.IsEmpty())
+			{
+				OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+					TEXT("every migration.edges entry needs a valid far_node_guid and a non-empty far_pin"));
+				return false;
+			}
+			const FString Key = CallOutputEdgeKey(FarGuid, FarPin);
+			if (Seen.Contains(Key))
+			{
+				OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+					FString::Printf(TEXT("migration.edges repeats the consumer edge '%s'"), *Key));
+				return false;
+			}
+			Seen.Add(Key);
+			ReviewedKeys.Add(Key);
+		}
+		ReviewedKeys.Sort();
+	}
+
+	auto MakeEdge = [](const UEdGraphPin& FarPin, const FString& Response)
+	{
+		FCortexGraphCallOutputEdge Edge;
+		Edge.FarGuid = FarPin.GetOwningNode()->NodeGuid.ToString();
+		Edge.FarPin = FarPin.PinName.ToString();
+		Edge.FarPinSignature = PinSignature(FarPin);
+		Edge.FarDirection = static_cast<int32>(FarPin.Direction);
+		Edge.Response = Response;
+		return Edge;
+	};
+
+	UEdGraphPin* const StalePin = Call->FindPin(FName(*StalePinName), EGPD_Output);
+	TArray<FCortexGraphCallOutputEdge> Discovered;
+	bool bReused = false;
+	if (StalePin)
+	{
+		// The in-use orphan output: the reason the asset is compiler-invalid. A pin that is not
+		// orphaned, or one no consumer uses, is a different repair and is refused here.
+		if (!StalePin->bOrphanedPin)
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("the declared stale output pin '%s' is not an orphaned pin; this operation replaces an in-use orphan output"),
+					*StalePinName));
+			return false;
+		}
+		if (StalePin->LinkedTo.IsEmpty())
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("the orphaned output pin '%s' has no consumer; a removal-only repair is a different contract"),
+					*StalePinName));
+			return false;
+		}
+		FString Dimension;
+		FString Detail;
+		// The stale orphan pin is an out/reference parameter pin while the current output is a plain
+		// return value, so the reference storage flag legitimately differs and is not compared.
+		if (!CompareMappedPins(*StalePin, *ReplacementPin, OutputDirection, Dimension, Detail, false))
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::TypeMismatch,
+				FString::Printf(TEXT("pin '%s': incompatible %s (%s)"), *ReplacementPinName, *Dimension, *Detail));
+			return false;
+		}
+		if (!ReplacementPin->LinkedTo.IsEmpty())
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("the replacement output pin '%s' already carries %d link(s); this operation reconnects only the reviewed stale consumers"),
+					*ReplacementPinName, ReplacementPin->LinkedTo.Num()));
+			return false;
+		}
+		const UEdGraphSchema* const Schema = Graph->GetSchema();
+		if (!Schema)
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation, TEXT("the target graph has no schema"));
+			return false;
+		}
+		for (UEdGraphPin* FarPin : StalePin->LinkedTo)
+		{
+			UEdGraphNode* const FarNode = FarPin ? FarPin->GetOwningNode() : nullptr;
+			const FString EdgeKey = FarNode && FarPin
+				? CallOutputEdgeKey(FarNode->NodeGuid.ToString(), FarPin->PinName.ToString())
+				: FString(TEXT("<unresolved>"));
+			if (!FarNode || FarPin->Direction != EGPD_Input || FarNode == CallNode || FarNode->GetGraph() != Graph)
+			{
+				OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+					FString::Printf(TEXT("the consumer '%s' of the orphaned output pin '%s' is not an input inside the named graph"),
+						*EdgeKey, *StalePinName));
+				return false;
+			}
+			if (FarPin->LinkedTo.Num() != 1 || FarPin->LinkedTo[0] != StalePin)
+			{
+				OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+					FString::Printf(TEXT("the consumer input '%s' is not linked only to the orphaned output pin '%s'"),
+						*EdgeKey, *StalePinName));
+				return false;
+			}
+			// The displaced link is provably ours, so a BREAK_OTHERS response only ever replaces the
+			// approved stale link and is safe to classify. Conversion and promotion would author a node
+			// the journal cannot reverse, so both are refused fail-closed.
+			const FPinConnectionResponse Response = Schema->CanCreateConnection(ReplacementPin, FarPin);
+			FString Classification;
+			if (Response.Response == CONNECT_RESPONSE_MAKE)
+			{
+				Classification = TEXT("make");
+			}
+			else if (Response.Response == CONNECT_RESPONSE_BREAK_OTHERS_B)
+			{
+				Classification = TEXT("replace_owned_link");
+			}
+			else
+			{
+				OutError = FCortexCommandRouter::Error(
+					Response.Response == CONNECT_RESPONSE_DISALLOW ? CortexErrorCodes::PinTypeMismatch
+																   : CortexErrorCodes::InvalidOperation,
+					FString::Printf(TEXT("the consumer input '%s' rejects the replacement output pin '%s': %s"),
+						*EdgeKey, *ReplacementPinName, *Response.Message.ToString()));
+				return false;
+			}
+			Discovered.Add(MakeEdge(*FarPin, Classification));
+		}
+		SortCallOutputEdges(Discovered);
+	}
+	else
+	{
+		// The stale pin is already gone: the only accepted state is the idempotent replay of a repair
+		// whose exact reviewed edge set the request carries and whose links the replacement already owns.
+		if (!bHasReview)
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("the stale orphan output pin '%s' is already absent; a replay must carry the previously reviewed migration.edges"),
+					*StalePinName));
+			return false;
+		}
+		if (ReviewedKeys.IsEmpty())
+		{
+			// An absent pin with an empty reviewed set is not a replay: the loop below would run zero
+			// times and an unconnected replacement would satisfy every equality, so an arbitrary call
+			// with no orphan would be accepted as a complete, unchanged repair. The in-use orphan and
+			// the exact nonempty edge contract mean an empty review is a mistargeted request.
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("the stale orphan output pin '%s' is already absent and the request reviews no consumer edge, so there is nothing to replay"),
+					*StalePinName));
+			return false;
+		}
+		for (const FString& Key : ReviewedKeys)
+		{
+			FString FarGuidText;
+			FString FarPinName;
+			Key.Split(TEXT("."), &FarGuidText, &FarPinName, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+			FGuid FarGuid;
+			UEdGraphNode* const FarNode = FGuid::Parse(FarGuidText, FarGuid)
+				? FindNodeByGuidInGraph(Graph, FarGuid) : nullptr;
+			UEdGraphPin* const FarPin = FarNode ? FarNode->FindPin(FName(*FarPinName), EGPD_Input) : nullptr;
+			if (!FarPin || FarPin->LinkedTo.Num() != 1 || FarPin->LinkedTo[0] != ReplacementPin)
+			{
+				OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+					FString::Printf(TEXT("the replay consumer '%s' is not linked to the replacement output pin '%s' exactly once"),
+						*Key, *ReplacementPinName));
+				return false;
+			}
+			Discovered.Add(MakeEdge(*FarPin, TEXT("replay")));
+		}
+		SortCallOutputEdges(Discovered);
+		if (ReplacementPin->LinkedTo.Num() != Discovered.Num())
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("the replacement output pin '%s' feeds %d consumer(s) instead of the reviewed %d; the replay is partial"),
+					*ReplacementPinName, ReplacementPin->LinkedTo.Num(), Discovered.Num()));
+			return false;
+		}
+		bReused = true;
+	}
+
+	if (bHasReview)
+	{
+		TArray<FString> DiscoveredKeys;
+		for (const FCortexGraphCallOutputEdge& Edge : Discovered)
+		{
+			DiscoveredKeys.Add(CallOutputEdgeKey(Edge.FarGuid, Edge.FarPin));
+		}
+		DiscoveredKeys.Sort();
+		TArray<FString> Missing;
+		TArray<FString> Extra;
+		for (const FString& Key : DiscoveredKeys) if (!ReviewedKeys.Contains(Key)) Missing.Add(Key);
+		for (const FString& Key : ReviewedKeys) if (!DiscoveredKeys.Contains(Key)) Extra.Add(Key);
+		if (!Missing.IsEmpty() || !Extra.IsEmpty())
+		{
+			OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("migration.edges must exactly equal the consumer set of the stale orphan output pin '%s' (missing: %s; extra: %s)"),
+					*StalePinName,
+					Missing.IsEmpty() ? TEXT("none") : *FString::Join(Missing, TEXT(", ")),
+					Extra.IsEmpty() ? TEXT("none") : *FString::Join(Extra, TEXT(", "))));
+			return false;
+		}
+	}
+
+	OutPlan.Op = Op;
+	OutPlan.GraphGuid = GraphGuid.ToString();
+	OutPlan.SubgraphPath = SubgraphPath;
+	OutPlan.CallNodeGuid = CallGuid.ToString();
+	OutPlan.CallNodeClassPath = Call->GetClass()->GetPathName();
+	OutPlan.CallSymbol = TransferNodeSymbol(Call);
+	OutPlan.StalePinName = StalePinName;
+	OutPlan.StaleDirection = StalePin ? static_cast<int32>(StalePin->Direction) : static_cast<int32>(EGPD_Output);
+	if (StalePin)
+	{
+		OutPlan.StalePinSignature = PinSignature(*StalePin);
+	}
+	OutPlan.ReplacementPinName = ReplacementPinName;
+	OutPlan.ReplacementPinSignature = PinSignature(*ReplacementPin);
+	OutPlan.Pins = CallOutputPinCapture(*Call, FName(*StalePinName),
+		static_cast<EEdGraphPinDirection>(OutPlan.StaleDirection));
+	{
+		TSet<FString> ReviewedEdgeKeys;
+		for (const FCortexGraphCallOutputEdge& Edge : Discovered)
+		{
+			ReviewedEdgeKeys.Add(CallOutputEdgeKey(Edge.FarGuid, Edge.FarPin));
+		}
+		OutPlan.CallLinks = CallOutputLinkCapture(*Call, FName(*StalePinName),
+			static_cast<EEdGraphPinDirection>(OutPlan.StaleDirection),
+			FName(*ReplacementPinName), ReviewedEdgeKeys);
+	}
+	OutPlan.Edges = Discovered;
+	OutPlan.bAwaitingApproval = !bHasReview;
+	OutPlan.bReused = bReused;
+	OutPlan.Preservation.Label = TEXT("graph");
+	OutPlan.Preservation.GraphGuid = GraphGuid.ToString();
+	OutPlan.Preservation.ExcludedGuids = { CallGuid.ToString() };
+	OutPlan.Preservation.Capture = CapturePreservation(Blueprint, Graph, { CallGuid });
+	if (OutPlan.Preservation.Capture.IsEmpty())
+	{
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+			TEXT("call-output preservation could not be captured"));
+		return false;
+	}
+	OutPlan.BlueprintStatusBefore = BlueprintStatusName(Blueprint->Status);
+	for (UEdGraphNode* Node : Graph->Nodes)
+	{
+		if (Node && Node->bHasCompilerMessage && !Node->ErrorMsg.IsEmpty()) OutPlan.PreexistingDiagnostics.Add(Node->ErrorMsg);
+	}
+	OutPlan.bPreexistingDiagnosticsTruncated = FCortexGraphPatchOps::TrimDiagnostics(OutPlan.PreexistingDiagnostics);
+
+	// The preview is the approval contract: the caller approves exactly the edge inventory it can read
+	// back, so a complete inventory is planned only when the connected bridge can publish it whole. The
+	// bridge truncates the largest array of any response above its budget while carrying a native
+	// `complete: true` through unchanged, so an inventory that would be clipped is refused here — before
+	// approval and before any mutation — instead of being published as a complete set the caller cannot
+	// review or replay. The measurement covers the whole published inventory, not only its edge array,
+	// because every field of it is checked by the caller.
+	const TSharedPtr<FJsonObject> Inventory = MakeCallOutputInventory(OutPlan);
+	int32 InventoryChars = 0;
+	const bool bMeasured = Inventory.IsValid() && EncodedResponseChars(Inventory, InventoryChars);
+	if (!bMeasured || InventoryChars > MaxPublishableCallOutputInventoryChars)
+	{
+		const FString Measurement = bMeasured
+			? FString::Printf(TEXT("encodes to %d character(s)"), InventoryChars)
+			: FString(TEXT("could not be encoded"));
+		OutError = FCortexCommandRouter::Error(CortexErrorCodes::LimitExceeded,
+			FString::Printf(TEXT("the complete call-output inventory of '%s' with %d reviewed consumer edge(s) %s, which is at or above the publishable %d (bridge response limit %d with %d reserved for the response envelope); the repair is refused without changing the asset instead of approving an inventory the caller cannot review in full"),
+				*StalePinName, OutPlan.Edges.Num(), *Measurement,
+				MaxPublishableCallOutputInventoryChars, BridgeResponseCharLimit, ApprovalResponseEnvelopeReserveChars));
+		OutError.ErrorDetails = MakeShared<FJsonObject>();
+		OutError.ErrorDetails->SetNumberField(TEXT("response_char_limit"), BridgeResponseCharLimit);
+		OutError.ErrorDetails->SetNumberField(TEXT("publishable_inventory_chars"), MaxPublishableCallOutputInventoryChars);
+		OutError.ErrorDetails->SetNumberField(TEXT("inventory_chars"), InventoryChars);
+		OutError.ErrorDetails->SetNumberField(TEXT("reviewed_edges"), OutPlan.Edges.Num());
+		OutError.ErrorDetails->SetBoolField(TEXT("complete"), false);
+		return false;
+	}
+
+	bOutReused = bReused;
+	return true;
+}
+
+bool FCortexGraphMigrationOps::VerifyCallOutputAgainstNative(
+	UBlueprint* Blueprint,
+	const FCortexGraphMigrationCallOutputPlan& Plan,
+	FString& OutFailure)
+{
+	OutFailure.Reset();
+	if (!Blueprint)
+	{
+		OutFailure = TEXT("the blueprint is null");
+		return false;
+	}
+	FGuid GraphGuid;
+	if (!FGuid::Parse(Plan.GraphGuid, GraphGuid))
+	{
+		OutFailure = TEXT("the prepared call-output plan carries an invalid graph identity");
+		return false;
+	}
+	UEdGraph* const Graph = FindGraphByGuid(Blueprint, GraphGuid);
+	if (!Graph)
+	{
+		OutFailure = FString::Printf(TEXT("the call-output graph '%s' did not re-resolve"), *Plan.GraphGuid);
+		return false;
+	}
+	FGuid CallGuid;
+	if (!FGuid::Parse(Plan.CallNodeGuid, CallGuid))
+	{
+		OutFailure = TEXT("the prepared call-output plan carries an invalid call identity");
+		return false;
+	}
+	UEdGraphNode* const CallNode = FindNodeByGuidInGraph(Graph, CallGuid);
+	const UK2Node_CallFunction* const Call = Cast<UK2Node_CallFunction>(CallNode);
+	if (!Call)
+	{
+		OutFailure = FString::Printf(TEXT("the planned call node '%s' did not re-resolve as a call in the named graph"), *Plan.CallNodeGuid);
+		return false;
+	}
+	if (!Plan.CallSymbol.IsEmpty() && TransferNodeSymbol(Call) != Plan.CallSymbol)
+	{
+		OutFailure = FString::Printf(TEXT("the call symbol changed: expected '%s', found '%s'"),
+			*Plan.CallSymbol, *TransferNodeSymbol(Call));
+		return false;
+	}
+	const EEdGraphPinDirection StaleDirection = static_cast<EEdGraphPinDirection>(Plan.StaleDirection);
+	if (Call->FindPin(FName(*Plan.StalePinName), StaleDirection))
+	{
+		OutFailure = FString::Printf(TEXT("the stale orphan output pin '%s' is still present on the call node"), *Plan.StalePinName);
+		return false;
+	}
+	UEdGraphPin* const ReplacementPin = Call->FindPin(FName(*Plan.ReplacementPinName), EGPD_Output);
+	if (!ReplacementPin || ReplacementPin->bOrphanedPin)
+	{
+		OutFailure = FString::Printf(TEXT("the replacement output pin '%s' did not re-resolve as a live output"), *Plan.ReplacementPinName);
+		return false;
+	}
+	if (PinSignature(*ReplacementPin) != Plan.ReplacementPinSignature)
+	{
+		OutFailure = FString::Printf(TEXT("the replacement output pin '%s' changed its canonical signature"), *Plan.ReplacementPinName);
+		return false;
+	}
+	if (ReplacementPin->LinkedTo.Num() != Plan.Edges.Num())
+	{
+		OutFailure = FString::Printf(TEXT("the replacement output pin '%s' feeds %d consumer(s) instead of the reviewed %d"),
+			*Plan.ReplacementPinName, ReplacementPin->LinkedTo.Num(), Plan.Edges.Num());
+		return false;
+	}
+	for (const FCortexGraphCallOutputEdge& Edge : Plan.Edges)
+	{
+		FGuid FarGuid;
+		if (!FGuid::Parse(Edge.FarGuid, FarGuid))
+		{
+			OutFailure = TEXT("the prepared call-output plan carries an invalid consumer identity");
+			return false;
+		}
+		UEdGraphNode* const FarNode = FindNodeByGuidInGraph(Graph, FarGuid);
+		UEdGraphPin* const FarPin = FarNode ? FarNode->FindPin(FName(*Edge.FarPin), EGPD_Input) : nullptr;
+		if (!FarPin)
+		{
+			OutFailure = FString::Printf(TEXT("the reviewed consumer '%s.%s' did not re-resolve"), *Edge.FarGuid, *Edge.FarPin);
+			return false;
+		}
+		if (!ReplacementPin->LinkedTo.Contains(FarPin) || FarPin->LinkedTo.Num() != 1 || FarPin->LinkedTo[0] != ReplacementPin)
+		{
+			OutFailure = FString::Printf(TEXT("the reviewed consumer '%s.%s' is not linked to the replacement output exactly once"),
+				*Edge.FarGuid, *Edge.FarPin);
+			return false;
+		}
+	}
+	if (ShouldInjectCallOutputReadbackFault(TEXT("call_output_after_edges")))
+	{
+		OutFailure = TEXT("call-output readback failed by test injection after the reviewed-edge comparison");
+		return false;
+	}
+	if (CallOutputPinCapture(*Call, FName(*Plan.StalePinName), StaleDirection) != Plan.Pins)
+	{
+		OutFailure = TEXT("the call node's surviving pin set changed: the repair was not in place");
+		return false;
+	}
+	// An empty inventory is still a preservation contract: no unrelated links may appear.
+	{
+		TSet<FString> ReviewedEdgeKeys;
+		for (const FCortexGraphCallOutputEdge& Edge : Plan.Edges)
+		{
+			ReviewedEdgeKeys.Add(CallOutputEdgeKey(Edge.FarGuid, Edge.FarPin));
+		}
+		const FString CurrentCallLinks = CallOutputLinkCapture(*Call, FName(*Plan.StalePinName),
+			StaleDirection, FName(*Plan.ReplacementPinName), ReviewedEdgeKeys);
+		if (CurrentCallLinks != Plan.CallLinks)
+		{
+			OutFailure = TEXT("the call node's surviving links changed: an unrelated connection was silently added, removed, or re-routed");
+			return false;
+		}
+	}
+	if (ShouldInjectCallOutputReadbackFault(TEXT("call_output_after_pins")))
+	{
+		OutFailure = TEXT("call-output readback failed by test injection after the surviving-pin comparison");
+		return false;
+	}
+	{
+		TSet<FGuid> InGraph;
+		for (const UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (Node) InGraph.Add(Node->NodeGuid);
+		}
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (!Node) continue;
+			for (UEdGraphPin* Pin : Node->Pins)
+			{
+				if (!Pin) continue;
+				for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
+				{
+					UEdGraphNode* const FarNode = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
+					if (!FarNode || !InGraph.Contains(FarNode->NodeGuid))
+					{
+						OutFailure = FString::Printf(TEXT("a dangling link survives on '%s.%s'"),
+							*Node->NodeGuid.ToString(), *Pin->PinName.ToString());
+						return false;
+					}
+					if (!LinkedPin->LinkedTo.Contains(Pin))
+					{
+						OutFailure = FString::Printf(TEXT("the link on '%s.%s' is not reciprocal"),
+							*Node->NodeGuid.ToString(), *Pin->PinName.ToString());
+						return false;
+					}
+				}
+			}
+		}
+	}
+	const TArray<FCortexGraphTransferPreservation> Contracts = { Plan.Preservation };
+	if (!VerifyPreservationContracts(Blueprint, Contracts, OutFailure)) return false;
+	if (ShouldInjectCallOutputReadbackFault(TEXT("call_output_after_preservation")))
+	{
+		OutFailure = TEXT("call-output readback failed by test injection after the preservation comparison");
+		return false;
+	}
+	return true;
+}
+
+TSharedPtr<FJsonObject> FCortexGraphMigrationOps::MakeCallOutputInventory(const FCortexGraphMigrationCallOutputPlan& Plan)
+{
+	TSharedPtr<FJsonObject> Inventory = MakeShared<FJsonObject>();
+	Inventory->SetStringField(TEXT("operation"), Plan.Op);
+	Inventory->SetStringField(TEXT("graph_guid"), Plan.GraphGuid);
+	Inventory->SetStringField(TEXT("call_node_guid"), Plan.CallNodeGuid);
+	Inventory->SetStringField(TEXT("stale_pin"), Plan.StalePinName);
+	Inventory->SetStringField(TEXT("stale_pin_signature"), Plan.StalePinSignature);
+	Inventory->SetStringField(TEXT("replacement_pin"), Plan.ReplacementPinName);
+	Inventory->SetStringField(TEXT("replacement_pin_signature"), Plan.ReplacementPinSignature);
+	Inventory->SetBoolField(TEXT("awaiting_approval"), Plan.bAwaitingApproval);
+	Inventory->SetBoolField(TEXT("complete"), true);
+	Inventory->SetBoolField(TEXT("reused"), Plan.bReused);
+	Inventory->SetNumberField(TEXT("scan_limit"), FCortexGraphPatchOps::MaxScannedNodes);
+	Inventory->SetStringField(TEXT("blueprint_status_before"), Plan.BlueprintStatusBefore);
+	Inventory->SetBoolField(TEXT("preexisting_diagnostics_truncated"), Plan.bPreexistingDiagnosticsTruncated);
+	TArray<TSharedPtr<FJsonValue>> Edges;
+	WriteCallOutputEdges(Plan.Edges, Edges);
+	Inventory->SetArrayField(TEXT("edges"), Edges);
+	TArray<TSharedPtr<FJsonValue>> Diagnostics;
+	AppendRetireStrings(Plan.PreexistingDiagnostics, Diagnostics);
+	Inventory->SetArrayField(TEXT("preexisting_diagnostics"), Diagnostics);
+	return Inventory;
+}
+
+TSharedPtr<FJsonObject> FCortexGraphMigrationOps::MakeCallOutputInventory(const TSharedPtr<FJsonObject>& PlanJson)
+{
+	if (!PlanJson.IsValid()) return nullptr;
+	FCortexGraphMigrationCallOutputPlan Plan;
+	FCortexCommandResult PlanError;
+	if (!FCortexGraphMigrationCallOutputPlan::FromJson(PlanJson, Plan, PlanError)) return nullptr;
+	return MakeCallOutputInventory(Plan);
+}
+
+namespace
+{
+/** Numbers in one JSON value, so the encoder difference of every number can be allowed for. */
+void CountJsonNumbers(const TSharedPtr<FJsonValue>& Value, int32& InOutCount)
+{
+	if (!Value.IsValid()) return;
+	switch (Value->Type)
+	{
+	case EJson::Number:
+		++InOutCount;
+		break;
+	case EJson::Array:
+		for (const TSharedPtr<FJsonValue>& Element : Value->AsArray()) CountJsonNumbers(Element, InOutCount);
+		break;
+	case EJson::Object:
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Value->AsObject()->Values) CountJsonNumbers(Pair.Value, InOutCount);
+		break;
+	default:
+		break;
+	}
+}
+}
+
+bool FCortexGraphMigrationOps::EncodedResponseChars(const TSharedPtr<FJsonObject>& Object, int32& OutChars)
+{
+	OutChars = 0;
+	if (!Object.IsValid()) return false;
+	FString Encoded;
+	{
+		// The engine's string writer buffers until it is closed, so the writer is closed (and flushed)
+		// before the encoded text is measured.
+		const TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer =
+			TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&Encoded);
+		if (!FJsonSerializer::Serialize(Object.ToSharedRef(), Writer))
+		{
+			return false;
+		}
+		Writer->Close();
+	}
+	// The engine writes an integral number as `1` where the bridge writes `1.0`, so every number is
+	// credited with those two characters; a non-integral number is written by the engine long enough
+	// (17 significant digits) that the allowance only ever adds headroom.
+	int32 NumberCount = 0;
+	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Object->Values)
+	{
+		CountJsonNumbers(Pair.Value, NumberCount);
+	}
+	int32 Chars = Encoded.Len() + 2 * NumberCount;
+	for (const TCHAR Character : Encoded)
+	{
+		if (Character == TEXT('\t'))
+		{
+			// The bridge indents with two spaces where the engine writes one tab.
+			++Chars;
+		}
+		else if (Character == TEXT('\r'))
+		{
+			// The bridge terminates every line with one LF where the engine writes CRLF.
+			--Chars;
+		}
+		else if (Character > 0x7F)
+		{
+			// The bridge escapes a non-ASCII character as `\uXXXX`; an astral code point's two
+			// surrogate halves add up to the same twelve characters the bridge writes for it.
+			Chars += 5;
+		}
+	}
+	OutChars = Chars;
+	return true;
+}
+
+#if WITH_AUTOMATION_TESTS
+void FCortexGraphMigrationOps::SetCallOutputReadbackFaultForTesting(const FName Check)
+{
+	CallOutputReadbackFaultForTesting = Check;
+}
+
+void FCortexGraphMigrationOps::ClearCallOutputReadbackFaultForTesting()
+{
+	CallOutputReadbackFaultForTesting = NAME_None;
+}
+#endif
 
 #if WITH_AUTOMATION_TESTS
 void FCortexGraphMigrationOps::SetPruneReadbackFaultForTesting(const FName Check)

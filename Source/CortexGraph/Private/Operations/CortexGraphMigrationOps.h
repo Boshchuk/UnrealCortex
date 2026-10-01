@@ -238,6 +238,49 @@ struct FCortexGraphMigrationPrunePlan
 		FCortexCommandResult& OutError);
 };
 
+/**
+ * One selected `retire_entries` entry with the class-specific identity the reviewed approval binds.
+ *
+ * The retirement predicate accepts four event entry classes plus an exact disconnected setter root.
+ * Class-specific facts distinguish eligible nodes and ride in the normalized plan JSON and
+ * validation hash; compiled readback proves generated bindings and functions disappeared.
+ */
+struct FCortexGraphMigrationRetireEntry
+{
+	FString NodeGuid;
+	/** override_event | lifecycle_event | component_bound_event | custom_event | disconnected_setter_root */
+	FString Kind;
+	FString ClassPath;
+	/** Override and lifecycle member identity; empty for component-bound and custom entries. */
+	FString MemberName;
+	FString MemberOwnerClass;
+	/** Component-bound identity: component property, delegate property/owner and generated binding function. */
+	FString ComponentPropertyName;
+	FString DelegatePropertyName;
+	FString DelegateOwnerClass;
+	FString BindingFunctionName;
+	/** Custom-event identity: the generated function name the removal must clean up. */
+	FString CustomFunctionName;
+	/** A `CallInEditor` custom event is refused, so this is always false in an accepted plan. */
+	bool bCallInEditor = false;
+};
+
+/**
+ * One explicitly requested `migration.source.additional_node_guids` node with the class-specific
+ * removal semantics the reviewed preview admitted it under.
+ *
+ * The class path and reason ride in the plan JSON, so they are part of the normalized request and of
+ * the validation hash the caller reviews: the selection cannot silently change class or reason
+ * without changing the hash the approval echoes back.
+ */
+struct FCortexGraphMigrationRetireAdditionalNode
+{
+	FString NodeGuid;
+	FString ClassPath;
+	/** The class-specific removal semantics that admitted this node, never a bare request echo. */
+	FString Reason;
+};
+
 /** Durable preview of a bounded set-level `retire_entries` migration. */
 struct FCortexGraphMigrationRetirePlan
 {
@@ -246,6 +289,21 @@ struct FCortexGraphMigrationRetirePlan
 	TArray<FString> SelectedEntryGuids;
 	TArray<FString> ApprovedGuids;
 	TArray<FString> RemovableGuids;
+	/** Class-specific identity of every selected entry, ordered by node GUID. */
+	TArray<FCortexGraphMigrationRetireEntry> Entries;
+	/** Canonical ascending identity of every explicitly requested additional node. */
+	TArray<FString> AdditionalNodeGuids;
+	/** Class-specific admission of every requested additional node, ordered by node GUID. */
+	TArray<FCortexGraphMigrationRetireAdditionalNode> AdditionalNodes;
+	/**
+	 * True when an approved removal leaves a compiled artefact behind: an event node registers a
+	 * dynamic component delegate binding, a custom event compiles into a callable generated function,
+	 * and every additional node the compiler consumes - a macro instance, a latent call or a delegate
+	 * node - only stops compiling once the graph is rebuilt. A compiler-irrelevant reroute is the one
+	 * admitted class that leaves no compiled trace. Removing the node clears those only on the next
+	 * successful compile, so a staged `compile=false` result is never reported as runtime-safe.
+	 */
+	bool bRequiresCompile = false;
 	TArray<FCortexGraphPruneNode> Shared;
 	TArray<FCortexGraphPruneNode> Blocked;
 	TArray<FCortexGraphPruneEdge> ExternalEdges;
@@ -263,6 +321,72 @@ struct FCortexGraphMigrationRetirePlan
 	static bool FromJson(
 		const TSharedPtr<FJsonObject>& Source,
 		FCortexGraphMigrationRetirePlan& OutPlan,
+		FCortexCommandResult& OutError);
+};
+
+/**
+ * One reviewed consumer edge of a `replace_call_output` repair.
+ *
+ * `Response` is the schema classification the preview proved for this edge, so the apply re-checks
+ * the same response instead of trusting a remembered one: "make" for a free input, or
+ * "replace_owned_link" when the input's only connection is the approved stale link, which the apply
+ * breaks explicitly before it demands a direct `make`.
+ */
+struct FCortexGraphCallOutputEdge
+{
+	FString FarGuid;
+	FString FarPin;
+	/** Canonical signature descriptor of the consumer input, so a re-typed pin is caught by identity. */
+	FString FarPinSignature;
+	int32 FarDirection = 0;
+	FString Response;
+};
+
+/**
+ * Durable, JSON-serializable plan of one `replace_call_output` repair.
+ *
+ * The operation reconnects the reviewed consumers of an in-use orphan output to the call's current
+ * output of the same canonical type, then removes the now-unlinked orphan pin. Nothing is created or
+ * re-authored, so the plan carries the call identity, both pin identities, the exact reviewed edge
+ * set and a capture of the call's surviving pins (the "no silent reconstruct" proof).
+ */
+struct FCortexGraphMigrationCallOutputPlan
+{
+	FString Op;
+	FString GraphGuid;
+	FString SubgraphPath;
+	FString CallNodeGuid;
+	FString CallNodeClassPath;
+	/** Canonical symbol descriptor of the call, so a re-targeted call is refused by identity. */
+	FString CallSymbol;
+	FString StalePinName;
+	FString StalePinSignature;
+	int32 StaleDirection = 0;
+	FString ReplacementPinName;
+	FString ReplacementPinSignature;
+	/** Canonical capture of the call node's surviving pins, the stale orphan pin excluded. */
+	FString Pins;
+	/**
+	 * Canonical capture of all surviving links on the call node, excluding the replacement output
+	 * pin's reviewed edges (which are already verified by the edge comparison above).  The stale
+	 * orphan pin carries no surviving links and is also excluded.  Readback compares this so that
+	 * unrelated execution, input-producer, and other output links cannot be silently dropped.
+	 */
+	FString CallLinks;
+	TArray<FCortexGraphCallOutputEdge> Edges;
+	FCortexGraphTransferPreservation Preservation;
+	FString BlueprintStatusBefore;
+	TArray<FString> PreexistingDiagnostics;
+	bool bPreexistingDiagnosticsTruncated = false;
+	/** True when the request carried no reviewed edge set: the plan publishes the discovered set. */
+	bool bAwaitingApproval = false;
+	/** True when the stale pin is already gone and the replacement already owns the reviewed edges. */
+	bool bReused = false;
+
+	TSharedPtr<FJsonObject> ToJson() const;
+	static bool FromJson(
+		const TSharedPtr<FJsonObject>& Source,
+		FCortexGraphMigrationCallOutputPlan& OutPlan,
 		FCortexCommandResult& OutError);
 };
 
@@ -520,15 +644,118 @@ public:
 	/** Compact presentation inventory of a durable retirement plan. */
 	static TSharedPtr<FJsonObject> MakeRetirementInventory(const TSharedPtr<FJsonObject>& RetirePlanJson);
 
-	/** Native readback for the approved retirement set and its retained graph contract. */
+	/**
+	 * Refuses a prepared retirement whose complete approval inventory the connected bridge could not
+	 * publish whole.
+	 *
+	 * The retirement inventory is the approval contract: `selected_entries`, the requested additional
+	 * nodes, `removable`, `shared`, `blocked_nodes` and `external_edges` are published whole so the
+	 * caller can review and echo the exact sets, which makes `complete: true` mean both that the
+	 * ownership scan finished and that nothing was dropped from the published review. An inventory
+	 * whose whole encoded form does not fit the bridge budget therefore cannot be published at all:
+	 * the plan is refused with `LIMIT_EXCEEDED` and `complete: false` instead of handing the caller a
+	 * clipped prefix it would have to approve as the complete set.
+	 */
+	static bool RequirePublishableRetirementInventory(
+		const FCortexGraphMigrationRetirePlan& Plan,
+		FCortexCommandResult& OutError);
+
+	/**
+	 * Native readback for the approved retirement set and its retained graph contract. When
+	 * BCompiled is true it additionally proves the class-specific compiled artefacts are gone: no
+	 * dynamic component delegate binding and no generated function survives for an approved entry.
+	 */
 	static bool VerifyRetirementAgainstNative(
 		UBlueprint* Blueprint,
 		const FCortexGraphMigrationRetirePlan& Plan,
+		bool bCompiled,
 		FString& OutFailure);
 #if WITH_AUTOMATION_TESTS
 	/** Test-only divergence seams; each fires only after its named native comparison. */
 	static void SetRetirementReadbackFaultForTesting(FName Check);
 	static void ClearRetirementReadbackFaultForTesting();
+#endif
+
+	/**
+	 * Validates and normalizes one `replace_call_output` repair without touching the asset: the
+	 * graph-scoped call identity, the in-use orphan output, the current output of the same canonical
+	 * type, the per-edge schema classification and the exact match of the caller's reviewed edge set.
+	 * On success OutPlan is complete and durable.
+	 */
+	static bool PlanCallOutput(
+		UBlueprint* Blueprint,
+		const TSharedPtr<FJsonObject>& Migration,
+		FCortexGraphMigrationCallOutputPlan& OutPlan,
+		bool& bOutReused,
+		FCortexCommandResult& OutError);
+
+	/**
+	 * Native readback of a `replace_call_output` repair: the call identity, the absence of the stale
+	 * orphan pin, the replacement pin owning exactly the reviewed consumers (reciprocally, once each),
+	 * the call's surviving pin set and the retained graph preservation contract.
+	 */
+	static bool VerifyCallOutputAgainstNative(
+		UBlueprint* Blueprint,
+		const FCortexGraphMigrationCallOutputPlan& Plan,
+		FString& OutFailure);
+
+	/** Compact presentation inventory of a durable call-output plan. */
+	static TSharedPtr<FJsonObject> MakeCallOutputInventory(const TSharedPtr<FJsonObject>& PlanJson);
+
+	/**
+	 * The same compact inventory built from the durable plan: the planner measures exactly the object
+	 * the response publishes instead of re-parsing its own serialized output.
+	 */
+	static TSharedPtr<FJsonObject> MakeCallOutputInventory(const FCortexGraphMigrationCallOutputPlan& Plan);
+
+	/**
+	 * The response budget of the connected MCP bridge, mirrored from the bridge's own contract
+	 * (`MCP/src/cortex_mcp/response.py`: `MAX_RESPONSE_CHARS = 40_000`). Above that many encoded
+	 * characters the bridge's `format_response` replaces the largest array of a response with a prefix
+	 * while serializing every other field — including a native `complete: true` — unchanged, so an
+	 * approval inventory published at or above the budget can reach the caller clipped while still
+	 * claiming to be the complete set the caller is asked to approve.
+	 */
+	static constexpr int32 BridgeResponseCharLimit = 40000;
+
+	/**
+	 * Headroom this operation keeps below the bridge budget for the response envelope published around
+	 * an approval inventory: the compact outcome phases, the live fingerprints, locators, client-id
+	 * mappings, the bounded diagnostics, and the residual differences between the bridge's encoder and
+	 * `EncodedResponseChars` (a control character the two encoders spell differently, and any other
+	 * detail of either encoder).
+	 */
+	static constexpr int32 ApprovalResponseEnvelopeReserveChars = 4000;
+
+	/** Largest complete call-output approval inventory this operation publishes instead of refusing. */
+	static constexpr int32 MaxPublishableCallOutputInventoryChars =
+		BridgeResponseCharLimit - ApprovalResponseEnvelopeReserveChars;
+
+	/** Largest complete retirement approval inventory this operation publishes instead of refusing. */
+	static constexpr int32 MaxPublishableRetirementInventoryChars =
+		BridgeResponseCharLimit - ApprovalResponseEnvelopeReserveChars;
+
+	/**
+	 * Characters the connected bridge encodes for one native response object, so a refusal can be based
+	 * on the caller's real budget instead of on an estimate of one part of it.
+	 *
+	 * `graph_patch_boundary.dispatch_graph_apply_patch` hands the native `data` object to
+	 * `cortex_mcp.response.format_response`, which measures `json.dumps(data, indent=2)`: two spaces per
+	 * indentation level, LF terminators, `": "` between a name and its value, and the six characters of
+	 * `\uXXXX` for every non-ASCII character. The engine's pretty writer emits the same document with one
+	 * tab per indentation level and CRLF terminators, so expanding every tab by one character and every CR
+	 * by one less reproduces that count, and every number is credited with the two characters the bridge
+	 * writes for an integral value (`1.0` against the engine's `1`). Control-character escaping and other
+	 * encoder details can still differ by a few characters in either direction, which the envelope reserve
+	 * above covers. Returns false when the object cannot be serialized, so an unmeasurable inventory is
+	 * never treated as fitting.
+	 */
+	static bool EncodedResponseChars(const TSharedPtr<FJsonObject>& Object, int32& OutChars);
+
+#if WITH_AUTOMATION_TESTS
+	/** Test-only divergence seam of the call-output verifier: never accepts external command input. */
+	static void SetCallOutputReadbackFaultForTesting(FName Check);
+	static void ClearCallOutputReadbackFaultForTesting();
 #endif
 
 	static UEdGraphNode* FindNodeByGuid(UBlueprint* Blueprint, const FGuid& NodeGuid);

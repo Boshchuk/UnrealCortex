@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 
+#include "Components/Button.h"
 #include "GameFramework/Actor.h"
 #include "Blueprint/UserWidget.h"
 
@@ -87,6 +88,15 @@ public:
 	UFUNCTION(BlueprintNativeEvent, Category = "CortexGraphMigrationTest")
 	void OnRetainedEvent();
 	virtual void OnRetainedEvent_Implementation() {}
+
+	/**
+	 * Delegate-binding fixture target. It is a native read/write property so a `UK2Node_VariableGet`
+	 * resolves it through the Blueprint's parent class, which lets a fixture wire a real create/add
+	 * delegate binding without adding a Blueprint variable - a variable would need a skeleton
+	 * regeneration or a full compile during fixture setup.
+	 */
+	UPROPERTY(BlueprintReadWrite, Category = "CortexGraphMigrationTest")
+	TObjectPtr<UButton> RetireButtonTarget;
 };
 
 UCLASS(Blueprintable)
@@ -108,4 +118,104 @@ class UCortexGraphRetireCollisionTargetWidget : public UCortexGraphRetireTargetW
 public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CortexGraphMigrationTest")
 	int32 NativeCollision = 0;
+};
+
+/**
+ * Native reparent target for guarded widget lifecycle retirement.
+ *
+ * A plain `UUserWidget` parent is not proof that native behaviour replaced a retired Blueprint
+ * lifecycle body, so this target implements the widget lifecycle natively: the four `Native*` entry
+ * points are overridden (they are plain virtuals, not UFUNCTIONs, so the fixture proves native
+ * ownership through the Blueprint's parent class) and one unrelated cosmetic override event must
+ * survive retirement.
+ */
+UCLASS(Blueprintable)
+class UCortexGraphRetireNativeLifecycleWidget : public UUserWidget
+{
+	GENERATED_BODY()
+
+public:
+	/** Unrelated cosmetic override retained next to the selected lifecycle entries. */
+	UFUNCTION(BlueprintNativeEvent, BlueprintCosmetic, Category = "CortexGraphMigrationTest")
+	void OnRetainedCosmeticEvent();
+	virtual void OnRetainedCosmeticEvent_Implementation() {}
+
+	/** Lifecycle replaced natively after the reparent, making the Blueprint body obsolete. */
+	virtual void NativeOnInitialized() override {}
+	virtual void NativePreConstruct() override {}
+	virtual void NativeConstruct() override {}
+	virtual void NativeDestruct() override {}
+};
+
+/**
+ * Generic Widget-derived native fixture for guarded call-output rewiring.
+ *
+ * `LegacyQuestRequirements` is the historic declaration whose pass/fail result was an out parameter;
+ * `UpdateFromQuestRequirements` is the migrated declaration whose result is the return value. A live
+ * `UK2Node_CallFunction` rebuilt from one to the other therefore retains the old `bPassedRequirements`
+ * output as an in-use orphan while the current `ReturnValue` output exists. `SetGateEnabled` is the
+ * direct bool consumer the orphan output feeds and `SetGateCount` is an independent int consumer
+ * reached through the engine's bool-to-int conversion, so one stale output really has two consumers.
+ *
+ * `LegacyGuestEmailRequirements` / `UpdateGuestEmailRequirements` add the second signature shape: the
+ * historic out parameter becomes an input of the same name, so the same rebuild leaves a same-named
+ * surviving input next to the in-use orphan output.
+ */
+UCLASS(Blueprintable)
+class UCortexGraphRewireFixtureWidget : public UUserWidget
+{
+	GENERATED_BODY()
+
+public:
+	/** Historic declaration: the pass/fail result is a non-const out parameter. */
+	UFUNCTION(BlueprintCallable, Category = "CortexGraphMigrationTest")
+	void LegacyQuestRequirements(int32 Quest, bool& bPassedRequirements)
+	{
+		(void)Quest;
+		bPassedRequirements = false;
+	}
+
+	/** Migrated declaration: the same result is now the return value. */
+	UFUNCTION(BlueprintCallable, Category = "CortexGraphMigrationTest")
+	bool UpdateFromQuestRequirements(int32 Quest, int32 Attempt)
+	{
+		(void)Quest;
+		return Attempt > 0;
+	}
+
+	/**
+	 * Historic declaration whose out parameter shares its name with the migrated input parameter.
+	 *
+	 * `LegacyGuestEmailRequirements` carried the verdict as an out parameter, while
+	 * `UpdateGuestEmailRequirements` takes the same name as an input beside its new return value. The
+	 * engine's own signature rebuild therefore leaves an in-use orphan output and a surviving input on
+	 * the same call node under one name, which a direction-blind pin lookup cannot tell apart.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CortexGraphMigrationTest")
+	void LegacyGuestEmailRequirements(const FString& Email, bool& bGuestEmailValid)
+	{
+		(void)Email;
+		bGuestEmailValid = false;
+	}
+
+	/** Migrated declaration: the same name is now an input beside the new return value. */
+	UFUNCTION(BlueprintCallable, Category = "CortexGraphMigrationTest")
+	bool UpdateGuestEmailRequirements(const FString& Email, bool bGuestEmailValid)
+	{
+		return !Email.IsEmpty() && bGuestEmailValid;
+	}
+
+	/** Independent bool consumer of the gate result. */
+	UFUNCTION(BlueprintCallable, Category = "CortexGraphMigrationTest")
+	void SetGateEnabled(bool bEnabled)
+	{
+		(void)bEnabled;
+	}
+
+	/** Independent int consumer of the converted gate result. */
+	UFUNCTION(BlueprintCallable, Category = "CortexGraphMigrationTest")
+	void SetGateCount(int32 Count)
+	{
+		(void)Count;
+	}
 };
