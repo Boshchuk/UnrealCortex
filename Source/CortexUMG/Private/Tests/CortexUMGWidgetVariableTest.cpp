@@ -10,6 +10,9 @@
 #include "Blueprint/UserWidget.h"
 #include "Editor.h"
 #include "Editor/Transactor.h"
+#include "CortexUMGAnimationBindingTestUtils.h"
+#include "UObject/UnrealType.h"
+#include "Engine/BlueprintGeneratedClass.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexUMGWidgetVariableTest,
@@ -179,4 +182,159 @@ bool FCortexUMGWidgetVariableTest::RunTest(const FString& Parameters)
 
 	WBP->MarkAsGarbage();
 	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexUMGRenameWidgetTest,
+    "Cortex.UMG.RenameWidget", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGRenameWidgetTest::RunTest(const FString& Parameters)
+{
+    FCortexUMGAnimationBindingFixture Fixture(*this);
+    UWidgetBlueprint* WBP = Fixture.Blueprint.Get();
+    UWidget* Widget = WBP->WidgetTree->FindWidget(TEXT("BodySizeBox"));
+    if (!TestNotNull(TEXT("existing animated widget"), Widget)) return false;
+    // USizeBox deliberately defaults to a designer-only widget. The dependent getter must
+    // reference a real compiled member, rather than a fabricated or cache-only dependency.
+    Widget->bIsVariable = true;
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
+    FKismetEditorUtilities::CompileBlueprint(WBP);
+    if (!TestTrue(TEXT("variable target fixture compiles"), WBP->Status == BS_UpToDate
+        || WBP->Status == BS_UpToDateWithWarnings)
+        || !TestNotNull(TEXT("compiled target contains widget property"),
+            FindFProperty<FObjectPropertyBase>(WBP->GeneratedClass, TEXT("BodySizeBox")))) return false;
+    FDelegateEditorBinding Binding;
+    Binding.ObjectName = TEXT("BodySizeBox");
+    Binding.PropertyName = TEXT("Visibility");
+    Binding.FunctionName = TEXT("GetVisibility");
+    WBP->Bindings.Add(Binding);
+    TSharedPtr<FJsonObject> GetFingerprint = MakeShared<FJsonObject>();
+    GetFingerprint->SetStringField(TEXT("asset_path"), WBP->GetPathName());
+    GetFingerprint->SetStringField(TEXT("widget_name"), TEXT("BodySizeBox"));
+    GetFingerprint->SetBoolField(TEXT("is_variable"), Widget->bIsVariable);
+    FCortexCommandResult State = Fixture.Router.Execute(TEXT("umg.set_widget_variable"), GetFingerprint);
+    if (!TestTrue(TEXT("tree fingerprint available"), State.bSuccess)) return false;
+    const TSharedPtr<FJsonObject> Before = State.Data->GetObjectField(TEXT("fingerprint"));
+    const bool bDirtyBefore = WBP->GetPackage()->IsDirty();
+    UWidgetAnimation* Animation = WBP->Animations[0];
+    const FGuid AnimationGuid = Animation->AnimationBindings[0].AnimationGuid;
+    const int32 TrackCount = static_cast<const UMovieScene*>(Animation->MovieScene)->GetBindings()[0].GetTracks().Num();
+    TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+    Params->SetStringField(TEXT("asset_path"), WBP->GetPathName());
+    Params->SetStringField(TEXT("widget_name"), TEXT("BodySizeBox"));
+    Params->SetStringField(TEXT("new_name"), TEXT("RenamedBodySizeBox"));
+    TestFalse(TEXT("fingerprint required"), Fixture.Router.Execute(TEXT("umg.rename_widget"), Params).bSuccess);
+    Params->SetObjectField(TEXT("expected_fingerprint"), Before);
+    UPackage* ChildPackage = CreatePackage(*(TEXT("/Temp/CortexRenameChild_") + FGuid::NewGuid().ToString(EGuidFormats::Digits)));
+    UBlueprint* Child = NewObject<UBlueprint>(ChildPackage, TEXT("RenameChild"));
+    Child->ParentClass = WBP->GeneratedClass;
+    ChildPackage->SetDirtyFlag(false);
+    FCortexCommandResult ChildRefusal = Fixture.Router.Execute(TEXT("umg.rename_widget"), Params);
+    TestFalse(TEXT("loaded child refuses target-only rename"), ChildRefusal.bSuccess);
+    TestEqual(TEXT("loaded child refusal explains containment"), ChildRefusal.ErrorCode, CortexErrorCodes::InvalidOperation);
+    TestTrue(TEXT("loaded child refusal names child"), ChildRefusal.ErrorMessage.Contains(Child->GetPathName()));
+    TestEqual(TEXT("child refusal preserves target name"), Widget->GetName(), FString(TEXT("BodySizeBox")));
+    TestEqual(TEXT("child refusal preserves target dirty state"), WBP->GetPackage()->IsDirty(), bDirtyBefore);
+    TestEqual(TEXT("child refusal preserves child name"), Child->GetName(), FString(TEXT("RenameChild")));
+    TestTrue(TEXT("child refusal preserves child parent"), Child->ParentClass == WBP->GeneratedClass);
+    TestFalse(TEXT("child refusal leaves child clean"), ChildPackage->IsDirty());
+    Child->ParentClass = UUserWidget::StaticClass();
+    Child->MarkAsGarbage();
+
+    UPackage* DependentPackage = CreatePackage(*(TEXT("/Temp/CortexRenameDependent_") + FGuid::NewGuid().ToString(EGuidFormats::Digits)));
+    UBlueprint* Dependent = FKismetEditorUtilities::CreateBlueprint(UObject::StaticClass(),
+        DependentPackage, TEXT("RenameDependent"), BPTYPE_Normal,
+        UBlueprint::StaticClass(), UBlueprintGeneratedClass::StaticClass(), TEXT("CortexWidgetRenameTest"));
+    if (!TestNotNull(TEXT("real dependent Blueprint created"), Dependent)) return false;
+    UEdGraph* DependentGraph = FBlueprintEditorUtils::CreateNewGraph(Dependent, TEXT("DependentGraph"),
+        UEdGraph::StaticClass(), UEdGraphSchema_K2::StaticClass());
+    Dependent->UbergraphPages.Add(DependentGraph);
+    UK2Node_VariableGet* Reference = NewObject<UK2Node_VariableGet>(DependentGraph);
+    Reference->VariableReference.SetExternalMember(TEXT("BodySizeBox"), WBP->GeneratedClass);
+    Reference->CreateNewGuid();
+    DependentGraph->AddNode(Reference, false, false);
+    if (!TestNotNull(TEXT("dependent getter resolves real target widget property"), Reference->GetPropertyForVariable())) return false;
+    Reference->AllocateDefaultPins();
+    Dependent->bCachedDependenciesUpToDate = false;
+    TArray<UBlueprint*> DiscoveredDependents;
+    FBlueprintEditorUtils::FindDependentBlueprints(WBP, DiscoveredDependents);
+    TestTrue(TEXT("engine discovers actual dependent graph reference"), DiscoveredDependents.Contains(Dependent));
+    DependentPackage->SetDirtyFlag(false);
+    const FGuid ReferenceGuid = Reference->NodeGuid;
+    FCortexCommandResult DependentRefusal = Fixture.Router.Execute(TEXT("umg.rename_widget"), Params);
+    TestFalse(TEXT("external dependent graph reference refuses rename"), DependentRefusal.bSuccess);
+    TestEqual(TEXT("dependent refusal reports containment"), DependentRefusal.ErrorCode, CortexErrorCodes::InvalidOperation);
+    TestTrue(TEXT("dependent refusal names dependent asset"), DependentRefusal.ErrorMessage.Contains(Dependent->GetPathName()));
+    TestEqual(TEXT("dependent refusal preserves target name"), Widget->GetName(), FString(TEXT("BodySizeBox")));
+    TestEqual(TEXT("dependent refusal preserves target binding"), WBP->Bindings.Last().ObjectName, FString(TEXT("BodySizeBox")));
+    TestEqual(TEXT("dependent refusal preserves target animation"), Animation->AnimationBindings[0].WidgetName, FName(TEXT("BodySizeBox")));
+    TestEqual(TEXT("dependent refusal preserves target dirty state"), WBP->GetPackage()->IsDirty(), bDirtyBefore);
+    TestEqual(TEXT("dependent refusal preserves dependent asset name"), Dependent->GetName(), FString(TEXT("RenameDependent")));
+    TestEqual(TEXT("dependent refusal preserves graph identity"), Reference->NodeGuid, ReferenceGuid);
+    TestEqual(TEXT("dependent refusal preserves variable reference"), Reference->VariableReference.GetMemberName(), FName(TEXT("BodySizeBox")));
+    TestFalse(TEXT("dependent refusal leaves dependent clean"), DependentPackage->IsDirty());
+    DependentGraph->RemoveNode(Reference);
+    Reference->MarkAsGarbage();
+    FEdGraphPinType InstanceType;
+    InstanceType.PinCategory = UEdGraphSchema_K2::PC_Object;
+    InstanceType.PinSubCategoryObject = WBP->GeneratedClass;
+    if (!TestTrue(TEXT("class-instance variable created"),
+        FBlueprintEditorUtils::AddMemberVariable(Dependent, TEXT("WidgetInstance"), InstanceType))) return false;
+    UK2Node_VariableGet* InstanceGetter = NewObject<UK2Node_VariableGet>(DependentGraph);
+    InstanceGetter->VariableReference.SetSelfMember(TEXT("WidgetInstance"));
+    InstanceGetter->CreateNewGuid();
+    DependentGraph->AddNode(InstanceGetter, false, false);
+    InstanceGetter->AllocateDefaultPins();
+    FKismetEditorUtilities::CompileBlueprint(Dependent);
+    if (!TestTrue(TEXT("class-instance dependent compiles"), Dependent->Status != BS_Error)) return false;
+    if (!TestNotNull(TEXT("real class-instance getter property"), InstanceGetter->GetPropertyForVariable())) return false;
+    TArray<UStruct*> InstanceDependencies;
+    TestTrue(TEXT("instance getter reports target class dependency"), InstanceGetter->HasExternalDependencies(&InstanceDependencies));
+    TestTrue(TEXT("instance getter type includes target class"), InstanceDependencies.Contains(WBP->GeneratedClass));
+    TestFalse(TEXT("instance getter does not refer to widget member"), InstanceGetter->ReferencesVariable(TEXT("BodySizeBox"), nullptr));
+    Dependent->bCachedDependenciesUpToDate = false;
+    DiscoveredDependents.Reset();
+    FBlueprintEditorUtils::FindDependentBlueprints(WBP, DiscoveredDependents);
+    TestTrue(TEXT("engine discovers class-instance-only dependency"), DiscoveredDependents.Contains(Dependent));
+    Params->SetStringField(TEXT("new_name"), TEXT("BorderBody"));
+    TestFalse(TEXT("collision refused"), Fixture.Router.Execute(TEXT("umg.rename_widget"), Params).bSuccess);
+    Params->SetStringField(TEXT("new_name"), TEXT("Body Size Box"));
+    TestFalse(TEXT("sanitizing refused"), Fixture.Router.Execute(TEXT("umg.rename_widget"), Params).bSuccess);
+    TestEqual(TEXT("refusals preserve object identity"), Widget->GetName(), FString(TEXT("BodySizeBox")));
+    TestEqual(TEXT("refusals preserve binding reference"), WBP->Bindings.Last().ObjectName, FString(TEXT("BodySizeBox")));
+    TestEqual(TEXT("refusals preserve animation reference"), Animation->AnimationBindings[0].WidgetName, FName(TEXT("BodySizeBox")));
+    TestEqual(TEXT("refusals preserve dirty state"), WBP->GetPackage()->IsDirty(), bDirtyBefore);
+    DependentPackage->SetDirtyFlag(false);
+    TestFalse(TEXT("class-instance dependent is clean immediately before rename"), DependentPackage->IsDirty());
+    Params->SetStringField(TEXT("new_name"), TEXT("RenamedBodySizeBox"));
+    FCortexCommandResult Renamed = Fixture.Router.Execute(TEXT("umg.rename_widget"), Params);
+    if (!TestTrue(TEXT("guarded rename succeeds"), Renamed.bSuccess)) return false;
+    TestFalse(TEXT("class-instance-only dependent stays clean after allowed rename"), DependentPackage->IsDirty());
+    TestEqual(TEXT("instance getter member preserved"), InstanceGetter->VariableReference.GetMemberName(), FName(TEXT("WidgetInstance")));
+    TestEqual(TEXT("class-instance-only dependency keeps its variable"), Dependent->NewVariables[0].VarName, FName(TEXT("WidgetInstance")));
+    TestEqual(TEXT("class-instance-only dependency keeps asset identity"), Dependent->GetName(), FString(TEXT("RenameDependent")));
+    TestTrue(TEXT("rename reports changed"), Renamed.Data->GetBoolField(TEXT("changed")));
+    TestTrue(TEXT("rename returns fresh tree fingerprint"), Renamed.Data->HasField(TEXT("fingerprint")));
+    TestTrue(TEXT("same widget remains in same tree"), WBP->WidgetTree->FindWidget(TEXT("RenamedBodySizeBox")) == Widget);
+    TestNull(TEXT("old widget name gone"), WBP->WidgetTree->FindWidget(TEXT("BodySizeBox")));
+    TestEqual(TEXT("property binding reference renamed"), WBP->Bindings.Last().ObjectName, FString(TEXT("RenamedBodySizeBox")));
+    TestEqual(TEXT("animation target renamed"), Animation->AnimationBindings[0].WidgetName, FName(TEXT("RenamedBodySizeBox")));
+    TestEqual(TEXT("animation GUID preserved"), Animation->AnimationBindings[0].AnimationGuid, AnimationGuid);
+    TestEqual(TEXT("movie scene possessable renamed"), Animation->MovieScene->FindPossessable(AnimationGuid)->GetName(), FString(TEXT("RenamedBodySizeBox")));
+    TestEqual(TEXT("animation tracks preserved"), static_cast<const UMovieScene*>(Animation->MovieScene)->GetBindings()[0].GetTracks().Num(), TrackCount);
+    Params->SetStringField(TEXT("widget_name"), TEXT("RenamedBodySizeBox"));
+    Params->SetStringField(TEXT("new_name"), TEXT("AnotherName"));
+    FCortexCommandResult Stale = Fixture.Router.Execute(TEXT("umg.rename_widget"), Params);
+    TestFalse(TEXT("stale tree fingerprint refused"), Stale.bSuccess);
+    TestEqual(TEXT("stale error reported"), Stale.ErrorCode, CortexErrorCodes::StalePrecondition);
+    TestEqual(TEXT("stale refusal preserves widget"), Widget->GetName(), FString(TEXT("RenamedBodySizeBox")));
+    TestEqual(TEXT("stale refusal preserves binding"), WBP->Bindings.Last().ObjectName, FString(TEXT("RenamedBodySizeBox")));
+    Params->SetStringField(TEXT("new_name"), TEXT("RenamedBodySizeBox"));
+    Params->SetObjectField(TEXT("expected_fingerprint"), Renamed.Data->GetObjectField(TEXT("fingerprint")));
+    FCortexCommandResult NoOp = Fixture.Router.Execute(TEXT("umg.rename_widget"), Params);
+    TestTrue(TEXT("same-name rename succeeds without mutation"), NoOp.bSuccess);
+    if (NoOp.bSuccess) TestFalse(TEXT("same-name reports unchanged"), NoOp.Data->GetBoolField(TEXT("changed")));
+    WBP->CachedDependents.Remove(Dependent);
+    Dependent->CachedDependencies.Remove(WBP);
+    Dependent->MarkAsGarbage();
+    return true;
 }

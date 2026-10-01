@@ -3,6 +3,8 @@
 #include "CortexAssetFingerprint.h"
 #include "CortexUMGUtils.h"
 #include "WidgetBlueprint.h"
+#include "WidgetBlueprintOperationUtils.h"
+#include "Editor.h"
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/Widget.h"
@@ -37,6 +39,9 @@
 #include "Engine/Engine.h"
 #include "Engine/Blueprint.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "K2Node.h"
+#include "EdGraph/EdGraph.h"
+#include "UObject/UObjectIterator.h"
 #include "Misc/PackageName.h"
 #include "UObject/UObjectGlobals.h"
 #include "Dom/JsonObject.h"
@@ -789,6 +794,106 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::DuplicateWidget(const TSharedPtr<F
     Data->SetStringField(TEXT("new_root"), NewName);
     Data->SetNumberField(TEXT("widgets_created"), WidgetsCreated);
     Data->SetObjectField(TEXT("name_mapping"), NameMapping);
+    return FCortexCommandRouter::Success(Data);
+}
+
+FCortexCommandResult FCortexUMGWidgetTreeOps::RenameWidget(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath, WidgetName, NewName;
+    const TSharedPtr<FJsonObject>* Expected = nullptr;
+    if (!Params.IsValid() || !Params->TryGetStringField(TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty()
+        || !Params->TryGetStringField(TEXT("widget_name"), WidgetName) || WidgetName.IsEmpty()
+        || !Params->TryGetStringField(TEXT("new_name"), NewName)
+        || !Params->TryGetObjectField(TEXT("expected_fingerprint"), Expected) || !Expected || !Expected->IsValid()
+        || !(*Expected)->HasTypedField<EJson::Number>(TEXT("compiled_signature_crc")))
+    {
+        return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+            TEXT("asset_path, widget_name, new_name and a complete tree expected_fingerprint are required"));
+    }
+    // Accept literal identifiers only; UE's display-name rename otherwise silently slugs names.
+    auto IsLetter = [](TCHAR Ch) { return (Ch >= TEXT('A') && Ch <= TEXT('Z')) || (Ch >= TEXT('a') && Ch <= TEXT('z')); };
+    bool bInvalidCharacter = false;
+    for (TCHAR Ch : NewName)
+        bInvalidCharacter |= !IsLetter(Ch) && Ch != TEXT('_') && (Ch < TEXT('0') || Ch > TEXT('9'));
+    if (NewName.IsEmpty() || NewName.Len() >= NAME_SIZE || (!IsLetter(NewName[0]) && NewName[0] != TEXT('_'))
+        || bInvalidCharacter
+        || FName(*NewName).IsNone())
+    {
+        return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+            TEXT("new_name must be a literal identifier beginning with a letter or underscore; sanitizing is not supported"));
+    }
+    FCortexCommandResult LoadError;
+    UWidgetBlueprint* WBP = CortexUMGUtils::LoadWidgetBlueprint(AssetPath, LoadError);
+    if (!WBP) return LoadError;
+    if (!WBP->WidgetTree || !GEditor)
+        return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation, TEXT("Widget tree and Editor are required for rename"));
+    const TSharedPtr<FJsonObject> Before = MakeWidgetBlueprintFingerprint(WBP).ToJson();
+    if (!FCortexBatchMutation::FingerprintsMatch(Before, *Expected))
+    {
+        TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+        Details->SetObjectField(TEXT("current_fingerprint"), Before);
+        return FCortexCommandRouter::Error(CortexErrorCodes::StalePrecondition,
+            TEXT("Expected fingerprint does not match current widget tree"), Details);
+    }
+    UWidget* Widget = CortexUMGUtils::FindWidgetByName(WBP->WidgetTree, WidgetName);
+    if (!Widget || Widget->GetName() != WidgetName)
+        return FCortexCommandRouter::Error(CortexErrorCodes::WidgetNotFound, TEXT("Exact widget name to rename was not found"));
+    const FString OldName = Widget->GetName();
+    const bool bChanged = OldName != NewName;
+    if (bChanged)
+    {
+        // Unreal's rename also visits loaded children and dependent graphs. This
+        // command guards one asset, so refuse any operation that could dirty another.
+        for (TObjectIterator<UBlueprint> It; It; ++It)
+        {
+            UBlueprint* Child = *It;
+            if (Child != WBP && Child->ParentClass && WBP->GeneratedClass
+                && Child->ParentClass->IsChildOf(WBP->GeneratedClass))
+            {
+                return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+                    FString::Printf(TEXT("Target-only widget rename does not support loaded child Blueprint: %s"), *Child->GetPathName()));
+            }
+        }
+        TArray<UBlueprint*> Dependents;
+        FBlueprintEditorUtils::FindDependentBlueprints(WBP, Dependents);
+        for (UBlueprint* Dependent : Dependents)
+        {
+            if (!Dependent || Dependent == WBP) continue;
+            TArray<UEdGraph*> Graphs;
+            Dependent->GetAllGraphs(Graphs);
+            for (UEdGraph* Graph : Graphs)
+            {
+                for (UEdGraphNode* Node : Graph->Nodes)
+                {
+                    const UK2Node* K2Node = Cast<UK2Node>(Node);
+                    if (K2Node && K2Node->ReferencesVariable(Widget->GetFName(), nullptr))
+                    {
+                        return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+                            FString::Printf(TEXT("Widget rename would modify an unguarded dependent Blueprint: %s"), *Dependent->GetPathName()));
+                    }
+                }
+            }
+        }
+        // Case-only names cannot reliably change object identity through FName.
+        FText Error;
+        if (Widget->GetFName() == FName(*NewName)
+            || !FWidgetBlueprintOperationUtils::VerifyWidgetRename(WBP, Widget, FText::FromString(NewName), Error)
+            || !Widget->Rename(*NewName, nullptr, REN_Test))
+        {
+            return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+                Error.IsEmpty() ? TEXT("Widget name conflicts with an existing identity") : Error.ToString());
+        }
+        if (!FWidgetBlueprintOperationUtils::RenameWidget(WBP, Widget, NewName))
+            return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation, TEXT("Unreal widget rename failed"));
+    }
+    TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("asset_path"), AssetPath);
+    Data->SetStringField(TEXT("old_name"), OldName);
+    Data->SetStringField(TEXT("widget_name"), Widget->GetName());
+    Data->SetBoolField(TEXT("changed"), bChanged);
+    Data->SetBoolField(TEXT("saved"), false);
+    Data->SetBoolField(TEXT("skeleton_regenerated"), bChanged);
+    Data->SetObjectField(TEXT("fingerprint"), MakeWidgetBlueprintFingerprint(WBP).ToJson());
     return FCortexCommandRouter::Success(Data);
 }
 
