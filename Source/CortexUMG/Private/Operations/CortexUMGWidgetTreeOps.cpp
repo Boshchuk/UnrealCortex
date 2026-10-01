@@ -44,6 +44,8 @@
 #include "UObject/UObjectIterator.h"
 #include "Misc/PackageName.h"
 #include "UObject/UObjectGlobals.h"
+#include "Animation/WidgetAnimation.h"
+#include "MovieScene.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "UObject/UnrealType.h"
@@ -836,10 +838,10 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::RenameWidget(const TSharedPtr<FJso
             TEXT("Expected fingerprint does not match current widget tree"), Details);
     }
     UWidget* Widget = CortexUMGUtils::FindWidgetByName(WBP->WidgetTree, WidgetName);
-    if (!Widget || Widget->GetName() != WidgetName)
+    if (!Widget || !Widget->GetName().Equals(WidgetName, ESearchCase::CaseSensitive))
         return FCortexCommandRouter::Error(CortexErrorCodes::WidgetNotFound, TEXT("Exact widget name to rename was not found"));
     const FString OldName = Widget->GetName();
-    const bool bChanged = OldName != NewName;
+    const bool bChanged = !OldName.Equals(NewName, ESearchCase::CaseSensitive);
     if (bChanged)
     {
         // Unreal's rename also visits loaded children and dependent graphs. This
@@ -883,8 +885,66 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::RenameWidget(const TSharedPtr<FJso
             return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
                 Error.IsEmpty() ? TEXT("Widget name conflicts with an existing identity") : Error.ToString());
         }
+        FScopedTransaction Transaction(FText::FromString(
+            FString::Printf(TEXT("Cortex: Rename Widget %s to %s"), *OldName, *NewName)));
+
+        const FName OldFName(*OldName);
+        const FName NewFName(*NewName);
+
+        // Snapshot every animation referencing OldName before the engine utility edits
+        // the first slot binding. The engine's inner transaction will join this outer
+        // transaction, ensuring all animation binding updates revert atomically on undo.
+        for (UWidgetAnimation* WidgetAnimation : WBP->Animations)
+        {
+            if (!WidgetAnimation)
+            {
+                continue;
+            }
+            for (const FWidgetAnimationBinding& AnimBinding : WidgetAnimation->AnimationBindings)
+            {
+                if (AnimBinding.WidgetName == OldFName)
+                {
+                    WidgetAnimation->Modify();
+                    if (WidgetAnimation->MovieScene)
+                    {
+                        WidgetAnimation->MovieScene->Modify();
+                    }
+                    break;
+                }
+            }
+        }
+
         if (!FWidgetBlueprintOperationUtils::RenameWidget(WBP, Widget, NewName))
+        {
+            Transaction.Cancel();
             return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation, TEXT("Unreal widget rename failed"));
+        }
+
+        // FWidgetBlueprintOperationUtils::RenameWidget prematurely breaks on the first slot
+        // binding encountered in an animation, leaving subsequent bindings for the same widget
+        // stale. Ensure every remaining binding and MovieScene possessable for OldName is updated.
+        for (UWidgetAnimation* WidgetAnimation : WBP->Animations)
+        {
+            if (!WidgetAnimation)
+            {
+                continue;
+            }
+            for (FWidgetAnimationBinding& AnimBinding : WidgetAnimation->AnimationBindings)
+            {
+                if (AnimBinding.WidgetName == OldFName)
+                {
+                    AnimBinding.WidgetName = NewFName;
+                    if (AnimBinding.SlotWidgetName == NAME_None && WidgetAnimation->MovieScene)
+                    {
+                        FMovieScenePossessable* Possessable = WidgetAnimation->MovieScene->FindPossessable(AnimBinding.AnimationGuid);
+                        if (Possessable)
+                        {
+                            Possessable->SetName(NewName);
+                        }
+                    }
+                }
+            }
+        }
     }
     TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
     Data->SetStringField(TEXT("asset_path"), AssetPath);

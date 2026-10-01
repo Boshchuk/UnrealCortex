@@ -7,6 +7,7 @@
 #include "Blueprint/WidgetTree.h"
 #include "Components/TextBlock.h"
 #include "Components/CanvasPanel.h"
+#include "Components/PanelSlot.h"
 #include "Blueprint/UserWidget.h"
 #include "Editor.h"
 #include "Editor/Transactor.h"
@@ -299,6 +300,20 @@ bool FCortexUMGRenameWidgetTest::RunTest(const FString& Parameters)
     TestFalse(TEXT("collision refused"), Fixture.Router.Execute(TEXT("umg.rename_widget"), Params).bSuccess);
     Params->SetStringField(TEXT("new_name"), TEXT("Body Size Box"));
     TestFalse(TEXT("sanitizing refused"), Fixture.Router.Execute(TEXT("umg.rename_widget"), Params).bSuccess);
+    TSharedPtr<FJsonObject> WrongCaseParams = MakeShared<FJsonObject>();
+    WrongCaseParams->SetStringField(TEXT("asset_path"), WBP->GetPathName());
+    WrongCaseParams->SetStringField(TEXT("widget_name"), TEXT("bodysizebox"));
+    WrongCaseParams->SetStringField(TEXT("new_name"), TEXT("BodySizeBox"));
+    WrongCaseParams->SetObjectField(TEXT("expected_fingerprint"), Before);
+    FCortexCommandResult WrongCaseResult = Fixture.Router.Execute(TEXT("umg.rename_widget"), WrongCaseParams);
+    TestFalse(TEXT("wrong-case widget_name refused"), WrongCaseResult.bSuccess);
+    TestEqual(TEXT("wrong-case widget_name error code"), WrongCaseResult.ErrorCode, CortexErrorCodes::WidgetNotFound);
+
+    Params->SetStringField(TEXT("widget_name"), TEXT("BodySizeBox"));
+    Params->SetStringField(TEXT("new_name"), TEXT("bodysizebox"));
+    FCortexCommandResult CaseOnlyResult = Fixture.Router.Execute(TEXT("umg.rename_widget"), Params);
+    TestFalse(TEXT("case-only new_name refused"), CaseOnlyResult.bSuccess);
+    TestEqual(TEXT("case-only new_name error code"), CaseOnlyResult.ErrorCode, CortexErrorCodes::InvalidOperation);
     TestEqual(TEXT("refusals preserve object identity"), Widget->GetName(), FString(TEXT("BodySizeBox")));
     TestEqual(TEXT("refusals preserve binding reference"), WBP->Bindings.Last().ObjectName, FString(TEXT("BodySizeBox")));
     TestEqual(TEXT("refusals preserve animation reference"), Animation->AnimationBindings[0].WidgetName, FName(TEXT("BodySizeBox")));
@@ -336,5 +351,340 @@ bool FCortexUMGRenameWidgetTest::RunTest(const FString& Parameters)
     WBP->CachedDependents.Remove(Dependent);
     Dependent->CachedDependencies.Remove(WBP);
     Dependent->MarkAsGarbage();
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexUMGRenameWidgetSlotFirstAnimationBindingTest,
+    "Cortex.UMG.RenameWidgetSlotFirstAnimationBinding",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGRenameWidgetSlotFirstAnimationBindingTest::RunTest(const FString& Parameters)
+{
+    FCortexUMGAnimationBindingFixture Fixture(*this);
+    UWidgetBlueprint* WBP = Fixture.Blueprint.Get();
+    if (!TestNotNull(TEXT("fixture blueprint exists"), WBP))
+    {
+        return false;
+    }
+
+    UWidget* TargetWidget = WBP->WidgetTree ? WBP->WidgetTree->FindWidget(TEXT("BodySizeBox")) : nullptr;
+    if (!TestNotNull(TEXT("target widget exists in tree"), TargetWidget))
+    {
+        return false;
+    }
+
+    UPanelSlot* TargetSlot = TargetWidget->Slot;
+    if (!TestNotNull(TEXT("target widget has valid slot"), TargetSlot))
+    {
+        return false;
+    }
+
+    TargetWidget->bIsVariable = true;
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
+    FKismetEditorUtilities::CompileBlueprint(WBP);
+    if (!TestTrue(TEXT("fixture compiles"), WBP->Status == BS_UpToDate || WBP->Status == BS_UpToDateWithWarnings))
+    {
+        return false;
+    }
+
+    if (!TestTrue(TEXT("fixture has animations"), WBP->Animations.Num() > 0))
+    {
+        return false;
+    }
+
+    UWidgetAnimation* Animation = WBP->Animations[0];
+    if (!TestNotNull(TEXT("fixture animation exists"), Animation)
+        || !TestNotNull(TEXT("animation movie scene exists"), Animation->MovieScene.Get()))
+    {
+        return false;
+    }
+
+    UMovieScene* MovieScene = Animation->MovieScene;
+    if (!TestTrue(TEXT("animation has initial direct binding"), Animation->AnimationBindings.Num() > 0))
+    {
+        return false;
+    }
+
+    // Existing direct binding on BodySizeBox: snapshot track identities to avoid retaining
+    // an internal FMovieSceneBinding pointer across MovieScene TArray reallocations
+    const FGuid DirectGuid = Animation->AnimationBindings[0].AnimationGuid;
+    TArray<UMovieSceneTrack*> InitialDirectTracks;
+    {
+        const FMovieSceneBinding* DirectBindingPtr = MovieScene->FindBinding(DirectGuid);
+        if (!TestNotNull(TEXT("initial direct movie scene binding exists"), DirectBindingPtr))
+        {
+            return false;
+        }
+        for (UMovieSceneTrack* Track : DirectBindingPtr->GetTracks())
+        {
+            InitialDirectTracks.Add(Track);
+        }
+    }
+    const int32 InitialDirectTrackCount = InitialDirectTracks.Num();
+
+    // Create slot possessable and authored track for BodySizeBox.Slot
+    const FName SlotWidgetName = TEXT("CanvasSlot");
+    const FGuid SlotGuid = MovieScene->AddPossessable(TEXT("BodySizeBox.Slot"), TargetSlot->GetClass());
+
+    UMovieSceneFloatTrack* SlotTrack = MovieScene->AddTrack<UMovieSceneFloatTrack>(SlotGuid);
+    SlotTrack->SetPropertyNameAndPath(FName("LayoutData"), TEXT("LayoutData.Offsets.Left"));
+    UMovieSceneFloatSection* SlotSection = Cast<UMovieSceneFloatSection>(SlotTrack->CreateNewSection());
+    SlotTrack->AddSection(*SlotSection);
+    SlotSection->SetRange(TRange<FFrameNumber>(FFrameNumber(120), FFrameNumber(720)));
+    SlotSection->GetChannel().AddKeys(
+        { FFrameNumber(120), FFrameNumber(720) },
+        { FMovieSceneFloatValue(10.0f), FMovieSceneFloatValue(50.0f) });
+    const TRange<FFrameNumber> InitialSlotSectionRange = SlotSection->GetRange();
+    const int32 InitialSlotTrackCount = 1;
+    const TRange<FFrameNumber> InitialPlaybackRange = MovieScene->GetPlaybackRange();
+
+    // Insert slot binding at index 0, BEFORE the direct binding (index 1) for the same widget
+    FWidgetAnimationBinding SlotBinding;
+    SlotBinding.WidgetName = TEXT("BodySizeBox");
+    SlotBinding.SlotWidgetName = SlotWidgetName;
+    SlotBinding.AnimationGuid = SlotGuid;
+    SlotBinding.bIsRootWidget = false;
+    Animation->AnimationBindings.Insert(SlotBinding, 0);
+
+    TestEqual(TEXT("binding 0 is slot binding for BodySizeBox"),
+        Animation->AnimationBindings[0].WidgetName, FName(TEXT("BodySizeBox")));
+    TestEqual(TEXT("binding 0 has slot name"),
+        Animation->AnimationBindings[0].SlotWidgetName, SlotWidgetName);
+    TestEqual(TEXT("binding 1 is direct binding for BodySizeBox"),
+        Animation->AnimationBindings[1].WidgetName, FName(TEXT("BodySizeBox")));
+    TestEqual(TEXT("binding 1 has no slot name"),
+        Animation->AnimationBindings[1].SlotWidgetName, FName(NAME_None));
+
+    UClass* WidgetClass = WBP->GeneratedClass.Get() ? static_cast<UClass*>(WBP->GeneratedClass.Get()) : UUserWidget::StaticClass();
+    UUserWidget* PreviewWidget = NewObject<UUserWidget>(WBP, WidgetClass);
+    if (!TestNotNull(TEXT("preview widget instance created"), PreviewWidget))
+    {
+        return false;
+    }
+    UObject* PreRenameSlotObj = Animation->AnimationBindings[0].FindRuntimeObject(
+        *WBP->WidgetTree, *PreviewWidget, Animation, nullptr);
+    TestEqual(TEXT("pre-rename slot binding resolves to slot"), PreRenameSlotObj, (UObject*)TargetSlot);
+
+    UObject* PreRenameDirectObj = Animation->AnimationBindings[1].FindRuntimeObject(
+        *WBP->WidgetTree, *PreviewWidget, Animation, nullptr);
+    TestEqual(TEXT("pre-rename direct binding resolves to widget"), PreRenameDirectObj, (UObject*)TargetWidget);
+
+    TSharedPtr<FJsonObject> GetFingerprint = MakeShared<FJsonObject>();
+    GetFingerprint->SetStringField(TEXT("asset_path"), WBP->GetPathName());
+    GetFingerprint->SetStringField(TEXT("widget_name"), TEXT("BodySizeBox"));
+    GetFingerprint->SetBoolField(TEXT("is_variable"), TargetWidget->bIsVariable);
+    FCortexCommandResult State = Fixture.Router.Execute(TEXT("umg.set_widget_variable"), GetFingerprint);
+    if (!TestTrue(TEXT("tree fingerprint available"), State.bSuccess) || !State.Data.IsValid())
+    {
+        if (PreviewWidget)
+        {
+            PreviewWidget->MarkAsGarbage();
+        }
+        return false;
+    }
+    const TSharedPtr<FJsonObject> ExpectedFingerprint = State.Data->GetObjectField(TEXT("fingerprint"));
+
+    if (GEditor && GEditor->Trans && GEditor->CanTransact())
+    {
+        GEditor->ResetTransaction(FText::FromString(TEXT("Cortex UMG SlotFirst Rename Setup")));
+    }
+
+    TSharedPtr<FJsonObject> RenameParams = MakeShared<FJsonObject>();
+    RenameParams->SetStringField(TEXT("asset_path"), WBP->GetPathName());
+    RenameParams->SetStringField(TEXT("widget_name"), TEXT("BodySizeBox"));
+    RenameParams->SetStringField(TEXT("new_name"), TEXT("RenamedBodySizeBox"));
+    RenameParams->SetObjectField(TEXT("expected_fingerprint"), ExpectedFingerprint);
+
+    FCortexCommandResult RenameResult = Fixture.Router.Execute(TEXT("umg.rename_widget"), RenameParams);
+    TestTrue(TEXT("rename command reports success"), RenameResult.bSuccess);
+    if (RenameResult.bSuccess && RenameResult.Data.IsValid())
+    {
+        TestTrue(TEXT("rename reports changed true"), RenameResult.Data->GetBoolField(TEXT("changed")));
+    }
+
+    UWidget* RenamedWidget = WBP->WidgetTree->FindWidget(TEXT("RenamedBodySizeBox"));
+    TestNotNull(TEXT("renamed widget exists in tree"), RenamedWidget);
+    TestEqual(TEXT("renamed widget is same instance"), RenamedWidget, TargetWidget);
+    TestNull(TEXT("old widget name not in tree"), WBP->WidgetTree->FindWidget(TEXT("BodySizeBox")));
+
+    // Assertions on Binding 0 (slot binding)
+    TestEqual(TEXT("slot binding target widget name updated"),
+        Animation->AnimationBindings[0].WidgetName, FName(TEXT("RenamedBodySizeBox")));
+    TestEqual(TEXT("slot binding slot widget name preserved"),
+        Animation->AnimationBindings[0].SlotWidgetName, SlotWidgetName);
+    TestEqual(TEXT("slot binding animation GUID preserved"),
+        Animation->AnimationBindings[0].AnimationGuid, SlotGuid);
+
+    UObject* PostRenameSlotObj = Animation->AnimationBindings[0].FindRuntimeObject(
+        *WBP->WidgetTree, *PreviewWidget, Animation, nullptr);
+    TestNotNull(TEXT("slot binding resolves runtime object after rename"), PostRenameSlotObj);
+    TestEqual(TEXT("slot binding resolves to renamed widget slot"),
+        PostRenameSlotObj, (UObject*)TargetSlot);
+
+    // Assertions on Binding 1 (direct binding): verify rename reaches later bindings for the same widget
+    TestEqual(TEXT("direct binding target widget name updated after slot binding"),
+        Animation->AnimationBindings[1].WidgetName, FName(TEXT("RenamedBodySizeBox")));
+    TestEqual(TEXT("direct binding slot widget name remains None"),
+        Animation->AnimationBindings[1].SlotWidgetName, FName(NAME_None));
+    TestEqual(TEXT("direct binding animation GUID preserved"),
+        Animation->AnimationBindings[1].AnimationGuid, DirectGuid);
+
+    UObject* PostRenameDirectObj = Animation->AnimationBindings[1].FindRuntimeObject(
+        *WBP->WidgetTree, *PreviewWidget, Animation, nullptr);
+    TestNotNull(TEXT("direct binding resolves runtime object after rename"), PostRenameDirectObj);
+    TestEqual(TEXT("direct binding resolves to renamed widget object"),
+        PostRenameDirectObj, (UObject*)RenamedWidget);
+
+    // MovieScene possessable and binding assertions
+    FMovieScenePossessable* DirectPossessable = MovieScene->FindPossessable(DirectGuid);
+    TestNotNull(TEXT("direct possessable exists"), DirectPossessable);
+    if (DirectPossessable)
+    {
+        TestEqual(TEXT("direct possessable renamed to match new widget name"),
+            DirectPossessable->GetName(), FString(TEXT("RenamedBodySizeBox")));
+    }
+
+    FMovieScenePossessable* SlotPossessable = MovieScene->FindPossessable(SlotGuid);
+    TestNotNull(TEXT("slot possessable exists"), SlotPossessable);
+
+    const FMovieSceneBinding* PostSlotMSBinding = MovieScene->FindBinding(SlotGuid);
+    TestNotNull(TEXT("slot movie scene binding preserved"), PostSlotMSBinding);
+    if (PostSlotMSBinding)
+    {
+        TestEqual(TEXT("slot track count preserved"),
+            PostSlotMSBinding->GetTracks().Num(), InitialSlotTrackCount);
+        if (PostSlotMSBinding->GetTracks().Num() > 0)
+        {
+            TestEqual(TEXT("slot track identity preserved"),
+                PostSlotMSBinding->GetTracks()[0], static_cast<UMovieSceneTrack*>(SlotTrack));
+        }
+    }
+
+    TestEqual(TEXT("slot section count preserved"), SlotTrack->GetAllSections().Num(), 1);
+    if (SlotTrack->GetAllSections().Num() > 0)
+    {
+        TestEqual(TEXT("slot section identity preserved"),
+            SlotTrack->GetAllSections()[0], static_cast<UMovieSceneSection*>(SlotSection));
+    }
+    TestEqual(TEXT("slot section range preserved"), SlotSection->GetRange(), InitialSlotSectionRange);
+
+    const FMovieSceneFloatChannel& PostSlotChannel = SlotSection->GetChannel();
+    TestEqual(TEXT("slot channel key count preserved"), PostSlotChannel.GetNumKeys(), 2);
+    TArrayView<const FFrameNumber> SlotKeyTimes = PostSlotChannel.GetTimes();
+    TArrayView<const FMovieSceneFloatValue> SlotKeyValues = PostSlotChannel.GetValues();
+    if (TestTrue(TEXT("slot channel key array valid"), SlotKeyTimes.Num() == 2 && SlotKeyValues.Num() == 2))
+    {
+        TestEqual(TEXT("slot key 0 time preserved"), SlotKeyTimes[0], FFrameNumber(120));
+        TestEqual(TEXT("slot key 0 value preserved"), SlotKeyValues[0].Value, 10.0f);
+        TestEqual(TEXT("slot key 1 time preserved"), SlotKeyTimes[1], FFrameNumber(720));
+        TestEqual(TEXT("slot key 1 value preserved"), SlotKeyValues[1].Value, 50.0f);
+    }
+    const FMovieSceneBinding* PostDirectMSBinding = MovieScene->FindBinding(DirectGuid);
+    TestNotNull(TEXT("direct movie scene binding preserved"), PostDirectMSBinding);
+    if (PostDirectMSBinding)
+    {
+        TestEqual(TEXT("direct track count preserved"),
+            PostDirectMSBinding->GetTracks().Num(), InitialDirectTrackCount);
+        for (int32 TrackIdx = 0; TrackIdx < InitialDirectTrackCount && TrackIdx < PostDirectMSBinding->GetTracks().Num(); ++TrackIdx)
+        {
+            TestEqual(TEXT("direct track identity preserved"),
+                PostDirectMSBinding->GetTracks()[TrackIdx], InitialDirectTracks[TrackIdx]);
+        }
+    }
+    TestEqual(TEXT("movie scene playback range preserved"),
+        MovieScene->GetPlaybackRange(), InitialPlaybackRange);
+
+    // Undo / Redo transaction assertions:
+    // Isolates whether the rename operation's entire effect (including later animation bindings
+    // and possessables) was captured atomically in a single transaction.
+    if (GEditor && GEditor->Trans && GEditor->CanTransact())
+    {
+        const bool bUndoSuccess = GEditor->UndoTransaction();
+        TestTrue(TEXT("undo rename transaction succeeds"), bUndoSuccess);
+
+        UWidget* RestoredWidget = WBP->WidgetTree->FindWidget(TEXT("BodySizeBox"));
+        TestNotNull(TEXT("restored widget exists under old name after undo"), RestoredWidget);
+        TestNull(TEXT("renamed widget gone after undo"), WBP->WidgetTree->FindWidget(TEXT("RenamedBodySizeBox")));
+        TestEqual(TEXT("restored widget is same instance after undo"), RestoredWidget, TargetWidget);
+
+        TestEqual(TEXT("slot binding target widget name restored after undo"),
+            Animation->AnimationBindings[0].WidgetName, FName(TEXT("BodySizeBox")));
+        TestEqual(TEXT("direct binding target widget name restored after undo"),
+            Animation->AnimationBindings[1].WidgetName, FName(TEXT("BodySizeBox")));
+
+        UObject* UndoSlotObj = Animation->AnimationBindings[0].FindRuntimeObject(
+            *WBP->WidgetTree, *PreviewWidget, Animation, nullptr);
+        TestNotNull(TEXT("slot binding resolves runtime object after undo"), UndoSlotObj);
+        TestEqual(TEXT("slot binding resolves to restored widget slot after undo"),
+            UndoSlotObj, (UObject*)TargetSlot);
+
+        UObject* UndoDirectObj = Animation->AnimationBindings[1].FindRuntimeObject(
+            *WBP->WidgetTree, *PreviewWidget, Animation, nullptr);
+        TestNotNull(TEXT("direct binding resolves runtime object after undo"), UndoDirectObj);
+        TestEqual(TEXT("direct binding resolves to restored widget after undo"),
+            UndoDirectObj, (UObject*)RestoredWidget);
+
+        FMovieScenePossessable* UndoDirectPossessable = MovieScene->FindPossessable(DirectGuid);
+        TestNotNull(TEXT("direct possessable exists after undo"), UndoDirectPossessable);
+        if (UndoDirectPossessable)
+        {
+            TestEqual(TEXT("direct possessable name restored to old name after undo"),
+                UndoDirectPossessable->GetName(), FString(TEXT("BodySizeBox")));
+        }
+
+        TestEqual(TEXT("slot binding GUID unchanged after undo"),
+            Animation->AnimationBindings[0].AnimationGuid, SlotGuid);
+        TestEqual(TEXT("direct binding GUID unchanged after undo"),
+            Animation->AnimationBindings[1].AnimationGuid, DirectGuid);
+        TestEqual(TEXT("slot track count unchanged after undo"),
+            PostSlotMSBinding ? PostSlotMSBinding->GetTracks().Num() : 0, InitialSlotTrackCount);
+        TestEqual(TEXT("direct track count unchanged after undo"),
+            PostDirectMSBinding ? PostDirectMSBinding->GetTracks().Num() : 0, InitialDirectTrackCount);
+
+        const bool bRedoSuccess = GEditor->RedoTransaction();
+        TestTrue(TEXT("redo rename transaction succeeds"), bRedoSuccess);
+
+        UWidget* RedoRenamedWidget = WBP->WidgetTree->FindWidget(TEXT("RenamedBodySizeBox"));
+        TestNotNull(TEXT("renamed widget exists under new name after redo"), RedoRenamedWidget);
+        TestNull(TEXT("old widget name gone after redo"), WBP->WidgetTree->FindWidget(TEXT("BodySizeBox")));
+
+        TestEqual(TEXT("slot binding target widget name updated after redo"),
+            Animation->AnimationBindings[0].WidgetName, FName(TEXT("RenamedBodySizeBox")));
+        TestEqual(TEXT("direct binding target widget name updated after redo"),
+            Animation->AnimationBindings[1].WidgetName, FName(TEXT("RenamedBodySizeBox")));
+
+        UObject* RedoSlotObj = Animation->AnimationBindings[0].FindRuntimeObject(
+            *WBP->WidgetTree, *PreviewWidget, Animation, nullptr);
+        TestNotNull(TEXT("slot binding resolves runtime object after redo"), RedoSlotObj);
+        TestEqual(TEXT("slot binding resolves to renamed widget slot after redo"),
+            RedoSlotObj, (UObject*)TargetSlot);
+
+        UObject* RedoDirectObj = Animation->AnimationBindings[1].FindRuntimeObject(
+            *WBP->WidgetTree, *PreviewWidget, Animation, nullptr);
+        TestNotNull(TEXT("direct binding resolves runtime object after redo"), RedoDirectObj);
+        TestEqual(TEXT("direct binding resolves to renamed widget after redo"),
+            RedoDirectObj, (UObject*)RedoRenamedWidget);
+
+        FMovieScenePossessable* RedoDirectPossessable = MovieScene->FindPossessable(DirectGuid);
+        TestNotNull(TEXT("direct possessable exists after redo"), RedoDirectPossessable);
+        if (RedoDirectPossessable)
+        {
+            TestEqual(TEXT("direct possessable renamed after redo"),
+                RedoDirectPossessable->GetName(), FString(TEXT("RenamedBodySizeBox")));
+        }
+
+        TestEqual(TEXT("slot binding GUID unchanged after redo"),
+            Animation->AnimationBindings[0].AnimationGuid, SlotGuid);
+        TestEqual(TEXT("direct binding GUID unchanged after redo"),
+            Animation->AnimationBindings[1].AnimationGuid, DirectGuid);
+
+        GEditor->ResetTransaction(FText::FromString(TEXT("Cortex UMG SlotFirst Rename Cleanup")));
+    }
+
+    if (PreviewWidget)
+    {
+        PreviewWidget->MarkAsGarbage();
+    }
+
     return true;
 }

@@ -118,3 +118,11 @@ First run: `uv add --dev pytest pytest-cov`
 ### Blueprint migration cleanup persistence
 
 `cleanup_blueprint_migration` and `blueprint.cleanup_migration` accept strict boolean `compile` and `save`, both defaulting to `true` for existing callers. `save=false` stages cleanup in memory and leaves package bytes on disk unchanged; compilation is independent. The response reports `saved`, `is_dirty`, `compiled` and `compile_status`. A compiler-error result is not saved. Saving writes the entire package, including any edits that were already dirty before cleanup. With `migrated_overrides`, initial cleanup and orphan pruning stay unsaved and uncompiled; final cleanup performs the requested compile/save after all pruning, and its final state is returned with the original mutation inventory.
+
+### UMG widget rename contract
+
+`umg.rename_widget` / `rename_widget` performs a guarded in-memory widget rename with structural and skeleton refresh (`skeleton_regenerated=true`, `saved=false`), leaving package saving and full recompilation to caller orchestration:
+- **Identifier discipline:** Requires literal identifier `new_name` (must begin with a letter or underscore, alphanumeric/underscore characters only, non-empty, length below `NAME_SIZE`). Sanitizing, slugging, and case-only renames are rejected.
+- **Fingerprint pre-condition:** Requires complete widget tree `expected_fingerprint` containing `compiled_signature_crc`. A mismatching supplied fingerprint returns `StalePrecondition`.
+- **Containment safeguards:** Refuses rename if loaded child Blueprints or external Blueprints with member graph variable references exist (`InvalidOperation`), preventing un-guarded external package mutation.
+- **Binding & animation preservation:** Maintains engine reference-aware rename for widget tree, property bindings, focus, navigation, and child variables, and guarantees all widget animation bindings are updated—including cases where slot bindings precede direct bindings for the same widget. Preserves slot names, GUIDs, MovieScene possessables, tracks, section ranges, and keyed values across the rename.
