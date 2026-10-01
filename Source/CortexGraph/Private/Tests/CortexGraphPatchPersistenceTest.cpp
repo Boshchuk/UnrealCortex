@@ -913,19 +913,28 @@ bool FCortexGraphPatchPersistencePostSaveVerificationTest::RunTest(const FString
 	TestNotEqual(TEXT("post-save failure is never reported as a rollback"),
 		Outcome.RollbackStatus, FString(TEXT("restored")));
 	TestEqual(TEXT("post-save failure performs exactly one engine save event"), Operations.Saves, 1);
-	TestFalse(TEXT("post-save failure does not block the asset"), Outcome.bBlocked);
+	TestTrue(TEXT("post-save verification failure blocks the asset"), Outcome.bBlocked);
 	FString BlockReason;
-	TestFalse(TEXT("post-save failure leaves the asset mutable"),
+	TestTrue(TEXT("post-save failure is registered in the mutation guard"),
 		FCortexAssetMutationGuard::IsBlocked(Fixture.Blueprint, BlockReason));
 	TestTrue(TEXT("post-save failure names the failed check"),
 		Error.ErrorMessage.Contains(TEXT("asset_file")));
-	TestTrue(TEXT("post-save failure carries the reopen guidance"),
-		Error.ErrorMessage.Contains(TEXT("reopened before further authoring")));
+	TestTrue(TEXT("post-save failure carries the restart guidance"),
+		Error.ErrorMessage.Contains(TEXT("restart the Editor")));
 	TestTrue(TEXT("post-save failure reports the same diagnostic in the outcome"),
 		FString::Join(Outcome.Diagnostics, TEXT(" | ")).Contains(TEXT("asset_file")));
 	TestFalse(TEXT("post-save failure keeps the committed package clean"), Fixture.Package->IsDirty());
 	TestFalse(TEXT("post-save failure keeps the committed file on disk"),
 		SameBytes(ReadFileBytes(Fixture.Filename), BaselineBytes));
+	const FString CommittedHash = LiveGraphHash(Fixture.Blueprint);
+	const TArray<uint8> CommittedBytes = ReadFileBytes(Fixture.Filename);
+	FCortexCommandRouter Router;
+	Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"), MakeShared<FCortexGraphCommandHandler>());
+	const FCortexCommandResult SecondApply = Router.Execute(TEXT("graph.apply_patch"), Request);
+	TestFalse(TEXT("a second public-route apply is refused after post-save verification failure"), SecondApply.bSuccess);
+	TestTrue(TEXT("the second apply is refused by the mutation guard"), SecondApply.ErrorMessage.Contains(TEXT("blocked")));
+	TestEqual(TEXT("the second apply preserves committed memory"), LiveGraphHash(Fixture.Blueprint), CommittedHash);
+	TestTrue(TEXT("the second apply preserves committed disk bytes"), SameBytes(ReadFileBytes(Fixture.Filename), CommittedBytes));
 
 	DeleteFixtureFile(Fixture.Filename);
 	Fixture.Cleanup();

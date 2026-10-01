@@ -1347,6 +1347,84 @@ bool FCortexGraphMigrationRewireReadbackFaultTest::RunTest(const FString& Parame
 	return true;
 }
 // ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRewireCallLinksTest,
+	"Cortex.Graph.Authoring.Migration.Rewire.UnreviewedCallLinksRefuseAndRestore",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexGraphMigrationRewireCallLinksTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexGraphMigrationRewireTest;
+	for (const bool bEmptyBaseline : { false, true })
+	{
+		ResetSeams();
+		ExpectFixtureCompileError(*this);
+		FFixture Fixture;
+		if (!TestTrue(TEXT("call-link fixture is created"), Fixture.Build(bEmptyBaseline
+			? TEXT("WBP_RewireEmptyCallLinks") : TEXT("WBP_RewireExistingCallLinks"))))
+		{
+			Fixture.Cleanup();
+			return false;
+		}
+		UEdGraphPin* ThenPin = Fixture.Call->FindPin(TEXT("then"));
+		if (bEmptyBaseline)
+		{
+			Fixture.Call->FindPin(TEXT("execute"))->BreakAllPinLinks();
+			ThenPin->BreakAllPinLinks();
+		}
+		const FString Before = CaptureRewireGraph(Fixture.Graph);
+		const FGuid OrphanPinIdBefore = Fixture.FindHistoricOutputPin()->PinId;
+		TSharedPtr<FJsonObject> Request;
+		FCortexCommandResult Error;
+		if (!TestTrue(TEXT("reviewed staged request is prepared"), PrepareRewireApply(Fixture,
+			bEmptyBaseline ? TEXT("00000000-0000-0000-0000-000000113121")
+				: TEXT("00000000-0000-0000-0000-000000113122"), Fixture.OrphanEdgeEndpoints(),
+			Request, Error, false, false)))
+		{
+			Fixture.Cleanup();
+			return false;
+		}
+		FCortexGraphPreparedPatch Preview;
+		TSharedPtr<FJsonObject> PreviewRequest = RewireRequest(Fixture,
+			TEXT("00000000-0000-0000-0000-000000113123"));
+		TestTrue(TEXT("call-link plan is captured"), FCortexGraphPatchOps::Preflight(Fixture.Blueprint, PreviewRequest, Preview, Error));
+		FCortexGraphMigrationCallOutputPlan PlanValue;
+		TestTrue(TEXT("complete plan deserializes"), FCortexGraphMigrationCallOutputPlan::FromJson(Preview.RewirePlan, PlanValue, Error));
+		TestEqual(TEXT("the empty baseline is captured as an empty inventory"), PlanValue.CallLinks.IsEmpty(), bEmptyBaseline);
+		Preview.RewirePlan->RemoveField(TEXT("call_links"));
+		TestFalse(TEXT("a prepared plan missing the call-link inventory is refused"),
+			FCortexGraphMigrationCallOutputPlan::FromJson(Preview.RewirePlan, PlanValue, Error));
+		Preview.RewirePlan->SetBoolField(TEXT("call_links"), false);
+		TestFalse(TEXT("a prepared plan with a malformed call-link inventory is refused"),
+			FCortexGraphMigrationCallOutputPlan::FromJson(Preview.RewirePlan, PlanValue, Error));
+
+		UEdGraphPin* ConsumerExec = Fixture.EnabledConsumer->FindPin(TEXT("execute"));
+		FCortexGraphPatchOps::SetPreReadbackMutatorForTesting([ThenPin, ConsumerExec, bEmptyBaseline](UBlueprint*)
+		{
+			if (bEmptyBaseline)
+			{
+				ThenPin->MakeLinkTo(ConsumerExec);
+			}
+			else
+			{
+				ThenPin->BreakAllPinLinks();
+			}
+		});
+		FCortexGraphPatchOutcome Outcome;
+		TestFalse(TEXT("an unreviewed change to call links refuses apply"),
+			FCortexGraphPatchOps::Execute(Fixture.Blueprint, Request, Outcome, Error));
+		ResetSeams();
+		TestEqual(TEXT("unrelated call-link divergence is detected"), Outcome.ReadbackStatus, FString(TEXT("mismatched")));
+		TestEqual(TEXT("call-link divergence has verified rollback"), Outcome.RollbackStatus, FString(TEXT("restored")));
+		TestEqual(TEXT("all original nodes, pin shapes, flags and links are restored"), CaptureRewireGraph(Fixture.Graph), Before);
+		UEdGraphPin* const RestoredOrphan = Fixture.FindHistoricOutputPin();
+		TestTrue(TEXT("the restored orphan keeps its original PinId"),
+			RestoredOrphan && RestoredOrphan->PinId == OrphanPinIdBefore);
+		Fixture.Cleanup();
+	}
+	return true;
+}
+
 // 10. A historic output that shares its name with a surviving input is restored by direction
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(

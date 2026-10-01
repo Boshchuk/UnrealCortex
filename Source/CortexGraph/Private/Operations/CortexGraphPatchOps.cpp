@@ -5280,7 +5280,7 @@ bool SaveVerifiedTargetPackage(
 		OutOutcome.PostSaveStatus = TEXT("failed");
 		OutOutcome.bBlocked = true;
 		const FString Message = FString::Printf(
-			TEXT("Post-save verification of '%s' failed after the file was committed; the in-memory result was not rolled back and the saved asset was not reloaded, so the asset must be reopened before further authoring"),
+			TEXT("Post-save verification of '%s' failed after the file was committed; the in-memory result was not rolled back and the saved asset was not reloaded. Further mutation is blocked for this Editor process; restart the Editor, reopen the saved asset and reconcile its disk state before further authoring"),
 			*FailedCheck.ToString());
 		OutOutcome.Diagnostics.Add(Message);
 		FCortexAssetMutationGuard::Block(Blueprint, TEXT("Graph patch post-save verification failed"));

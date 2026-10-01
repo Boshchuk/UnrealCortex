@@ -6654,6 +6654,11 @@ bool NodeCallsTargetGeneratedFunction(
 		{
 			Owner = Call->FunctionReference.GetMemberParentClass();
 		}
+		if (!Owner)
+		{
+			OutbUnresolved = true;
+			return false;
+		}
 		if (!ReferenceOwnerMatchesAsset(Target, Owner)) return false;
 		OutFunctionName = Member;
 		return true;
@@ -6665,11 +6670,19 @@ bool NodeCallsTargetGeneratedFunction(
 		// The self pin is validated directly so the engine accessor's ensure cannot fire on the
 		// node shapes a project-wide scan has to tolerate.
 		const UEdGraphPin* const SelfPin = Node->FindPin(UEdGraphSchema_K2::PN_Self);
-		if (!SelfPin || SelfPin->LinkedTo.Num() > 1) return false;
+		if (!SelfPin || SelfPin->LinkedTo.Num() > 1)
+		{
+			OutbUnresolved = true;
+			return false;
+		}
 		if (SelfPin->LinkedTo.Num() == 1)
 		{
 			const UEdGraphPin* const ScopePin = SelfPin->LinkedTo[0];
-			if (!ScopePin || ScopePin->PinType.PinCategory != UEdGraphSchema_K2::PC_Object) return false;
+			if (!ScopePin || ScopePin->PinType.PinCategory != UEdGraphSchema_K2::PC_Object)
+			{
+				OutbUnresolved = true;
+				return false;
+			}
 		}
 		// GetScopeClass() can return nullptr when the delegate's target class is no longer loaded or
 		// was renamed; the matching function name makes this node a candidate caller whose ownership
@@ -6802,11 +6815,10 @@ void InvestigateExternalGeneratedFunctionCallers(
 				{
 					if (bUnresolved)
 					{
-						// The node names a matching function but its delegate scope class could not be
-						// resolved; treat this as an incomplete investigation rather than a non-caller.
+						// A matching function name with unproved ownership is incomplete caller evidence.
 						Out.bComplete = false;
 						Out.BlockingReason = FString::Printf(
-							TEXT("asset '%s' in package '%s' has a delegate binding whose scope class does not resolve, so a call of a retired generated function from it cannot be ruled out"),
+							TEXT("asset '%s' in package '%s' has a matching call or delegate binding whose owner or scope cannot be resolved, so a call of a retired generated function from it cannot be ruled out"),
 							*Other->GetName(), *Other->GetOutermost()->GetName());
 						return;
 					}
@@ -8155,6 +8167,8 @@ bool FCortexGraphMigrationCallOutputPlan::FromJson(
 		|| !Source->TryGetStringField(TEXT("replacement_pin"), OutPlan.ReplacementPinName)
 		|| !Source->TryGetStringField(TEXT("replacement_pin_signature"), OutPlan.ReplacementPinSignature)
 		|| !Source->TryGetStringField(TEXT("pins"), OutPlan.Pins)
+		|| !Source->HasTypedField<EJson::String>(TEXT("call_links"))
+		|| !Source->TryGetStringField(TEXT("call_links"), OutPlan.CallLinks)
 		|| !Source->TryGetNumberField(TEXT("stale_direction"), OutPlan.StaleDirection)
 		|| !Source->TryGetBoolField(TEXT("awaiting_approval"), OutPlan.bAwaitingApproval)
 		|| !Source->TryGetBoolField(TEXT("reused"), OutPlan.bReused)
@@ -8168,7 +8182,6 @@ bool FCortexGraphMigrationCallOutputPlan::FromJson(
 	Source->TryGetStringField(TEXT("subgraph_path"), OutPlan.SubgraphPath);
 	Source->TryGetStringField(TEXT("stale_pin_signature"), OutPlan.StalePinSignature);
 	Source->TryGetStringField(TEXT("blueprint_status_before"), OutPlan.BlueprintStatusBefore);
-	Source->TryGetStringField(TEXT("call_links"), OutPlan.CallLinks);
 	const TSharedPtr<FJsonObject>* PreservationJson = nullptr;
 	if (!Source->TryGetObjectField(TEXT("preservation"), PreservationJson) || !PreservationJson || !PreservationJson->IsValid()
 		|| !(*PreservationJson)->TryGetStringField(TEXT("label"), OutPlan.Preservation.Label)
@@ -8715,7 +8728,7 @@ bool FCortexGraphMigrationOps::VerifyCallOutputAgainstNative(
 		OutFailure = TEXT("the call node's surviving pin set changed: the repair was not in place");
 		return false;
 	}
-	if (!Plan.CallLinks.IsEmpty())
+	// An empty inventory is still a preservation contract: no unrelated links may appear.
 	{
 		TSet<FString> ReviewedEdgeKeys;
 		for (const FCortexGraphCallOutputEdge& Edge : Plan.Edges)

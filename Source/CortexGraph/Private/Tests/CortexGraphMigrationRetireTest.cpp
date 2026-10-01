@@ -3968,6 +3968,75 @@ bool FCortexGraphMigrationRetireCustomEventExternalCallerTest::RunTest(const FSt
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexGraphMigrationRetireUnresolvedCallerTest,
+	"Cortex.Graph.Authoring.Migration.Retire.UnresolvedCallerRefusesApproval",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexGraphMigrationRetireUnresolvedCallerTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexGraphMigrationRetireTest;
+	FGuardedEntryFixture Fixture;
+	if (!TestTrue(TEXT("target fixture is created"), Fixture.Build(TEXT("BP_RetireUnresolvedCallerTarget"))))
+	{
+		Fixture.Cleanup();
+		return false;
+	}
+	FExternalCallerFixture External;
+	if (!TestTrue(TEXT("foreign caller is created"), External.Build(TEXT("BP_RetireUnresolvedCallerHost"),
+		Fixture.Blueprint, Fixture.Custom->CustomFunctionName)))
+	{
+		External.Cleanup();
+		Fixture.Cleanup();
+		return false;
+	}
+	const FString Selected = Fixture.Custom->NodeGuid.ToString();
+	const FString Before = CaptureNativeGraph(Fixture.Graph);
+	FCortexGraphMigrationRetirePlan PlanValue;
+	FCortexCommandResult Error;
+	bool bReused = false;
+	External.Caller->FunctionReference.SetDirect(Fixture.Custom->CustomFunctionName, FGuid(), nullptr, false);
+	TestFalse(TEXT("a matching foreign call with an unresolved owner cannot authorize retirement"),
+		Plan(Fixture, { Selected }, PlanValue, bReused, Error));
+	TestTrue(TEXT("unresolved call ownership reports incomplete caller evidence"),
+		Error.ErrorMessage.Contains(TEXT("cannot be ruled out")));
+	External.Caller->FunctionReference.SetDirect(TEXT("UnrelatedFunction"), FGuid(), nullptr, false);
+
+	UK2Node_CreateDelegate* Delegate = NewObject<UK2Node_CreateDelegate>(External.Graph, NAME_None, RF_Transactional);
+	Delegate->CreateNewGuid();
+	Delegate->AllocateDefaultPins();
+	Delegate->SetFunction(Fixture.Custom->CustomFunctionName);
+	External.Graph->AddNode(Delegate, true, false);
+	UEdGraphPin* SelfPin = Delegate->FindPin(UEdGraphSchema_K2::PN_Self);
+	UEdGraphPin* ExecPin = External.Caller->FindPin(TEXT("then"));
+	UEdGraphPin* OtherExecPin = External.Caller->FindPin(TEXT("execute"));
+	if (!SelfPin || !ExecPin || !OtherExecPin)
+	{
+		AddError(TEXT("delegate scope fixture pins are missing"));
+		External.Cleanup();
+		Fixture.Cleanup();
+		return false;
+	}
+	SelfPin->PinName = TEXT("MissingSelf");
+	TestFalse(TEXT("a matching delegate without a self pin cannot authorize retirement"),
+		Plan(Fixture, { Selected }, PlanValue, bReused, Error));
+	SelfPin->PinName = UEdGraphSchema_K2::PN_Self;
+	SelfPin->MakeLinkTo(ExecPin);
+	TestFalse(TEXT("a matching delegate with a non-object scope cannot authorize retirement"),
+		Plan(Fixture, { Selected }, PlanValue, bReused, Error));
+	SelfPin->MakeLinkTo(OtherExecPin);
+	TestFalse(TEXT("a matching delegate with multiple scopes cannot authorize retirement"),
+		Plan(Fixture, { Selected }, PlanValue, bReused, Error));
+	SelfPin->BreakAllPinLinks();
+	Delegate->SetFunction(TEXT("UnrelatedFunction"));
+	TestTrue(TEXT("unresolved references to unrelated names do not block retirement"),
+		Plan(Fixture, { Selected }, PlanValue, bReused, Error));
+	TestEqual(TEXT("caller investigation never mutates the target"), CaptureNativeGraph(Fixture.Graph), Before);
+	External.Cleanup();
+	Fixture.Cleanup();
+	return true;
+}
+
 // CortexSandbox #112 second review: the referencer guard keys on `FindPackage`, so a referencer
 // whose package is resident but whose Blueprint asset is not loaded was silently treated as "no
 // caller" — the loaded-Blueprint scan cannot see an unloaded asset. Root docs require fail-closed
@@ -5514,14 +5583,26 @@ bool FCortexGraphMigrationRetireAdditionalClassSaveTest::RunTest(const FString& 
 				bAllPassed &= TestEqual(TEXT("the post-save failure performs exactly one real save"), Operations.Saves, 1);
 				bAllPassed &= TestTrue(TEXT("the post-save failure names the failed check"),
 					Error.ErrorMessage.Contains(TEXT("asset_file")));
-				bAllPassed &= TestTrue(TEXT("the post-save failure carries the reopen guidance"),
-					Error.ErrorMessage.Contains(TEXT("reopened before further authoring")));
+				bAllPassed &= TestTrue(TEXT("the post-save failure carries the restart guidance"),
+					Error.ErrorMessage.Contains(TEXT("restart the Editor")));
 				bAllPassed &= TestTrue(TEXT("the post-save failure reports the same diagnostic in the outcome"),
 					FString::Join(Outcome.Diagnostics, TEXT(" | ")).Contains(TEXT("asset_file")));
 				bAllPassed &= TestFalse(TEXT("the post-save failure keeps the committed package clean"),
 					Fixture.Package->IsDirty());
 				bAllPassed &= TestFalse(TEXT("the post-save failure leaves the committed file on disk"),
 					SameBytes(BaselineBytes, ReadBytes(Filename)));
+				bAllPassed &= TestTrue(TEXT("post-save verification failure blocks subsequent mutations"), Outcome.bBlocked);
+				const FString CommittedGraph = CaptureNativeGraph(Fixture.Graph);
+				const TArray<uint8> CommittedBytes = ReadBytes(Filename);
+				FCortexCommandRouter Router;
+				Router.RegisterDomain(TEXT("graph"), TEXT("Cortex Graph"), TEXT("1.0.1"), MakeShared<FCortexGraphCommandHandler>());
+				const FCortexCommandResult SecondApply = Router.Execute(TEXT("graph.apply_patch"), Request);
+				bAllPassed &= TestFalse(TEXT("the public route refuses a second apply after committed verification failure"), SecondApply.bSuccess);
+				bAllPassed &= TestTrue(TEXT("the second apply is refused by the mutation guard"),
+					SecondApply.ErrorMessage.Contains(TEXT("blocked")));
+				bAllPassed &= TestEqual(TEXT("the refused second apply preserves committed memory"), CaptureNativeGraph(Fixture.Graph), CommittedGraph);
+				bAllPassed &= TestTrue(TEXT("the refused second apply preserves committed disk bytes"),
+					SameBytes(CommittedBytes, ReadBytes(Filename)));
 			}
 			const FString CleanupFilename = Fixture.Filename();
 			EndFixtureCase(Fixture);
