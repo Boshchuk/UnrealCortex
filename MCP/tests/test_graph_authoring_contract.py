@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from cortex_mcp.operation_schema import build_profile_operation_schema, reset_operation_schema_budget
+from cortex_mcp.operation_schema import build_profile_operation_schema
 from cortex_mcp._fallback_generated import FALLBACK_COMMANDS
 from cortex_mcp.tools.routers import make_router
 
@@ -163,7 +163,6 @@ def test_published_apply_patch_description_documents_entry_retirement():
 
 
 def test_umg_authoring_profile_exposes_apply_patch_through_graph_cmd():
-    reset_operation_schema_budget()
     connection = _live_schema_connection(_graph_command("apply_patch"))
     native_schema = connection.send_command.return_value["data"]
     native_snapshot = json.loads(json.dumps(native_schema))
@@ -184,7 +183,6 @@ def test_umg_authoring_profile_exposes_apply_patch_through_graph_cmd():
 
 
 def test_umg_authoring_profile_still_blocks_unrelated_blueprint_commands():
-    reset_operation_schema_budget()
     connection = MagicMock()
     connection.send_command.return_value = {
         "success": True,

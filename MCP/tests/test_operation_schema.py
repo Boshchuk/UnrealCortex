@@ -7,7 +7,6 @@ import pytest
 from cortex_mcp.operation_schema import (
     RETRY_BUDGET_EXHAUSTED,
     build_profile_operation_schema,
-    reset_operation_schema_budget,
 )
 from cortex_mcp.tcp_client import UECommandError
 
@@ -30,7 +29,6 @@ def _live_editor_connection(command="describe_node"):
 
 
 def test_profile_allows_umg_authoring_graph_command():
-    reset_operation_schema_budget()
     connection = _live_editor_connection()
     payload = json.loads(build_profile_operation_schema(connection, "UMGAuthoring", "graph", "describe_node"))
     assert payload["source"] == "live_editor"
@@ -41,7 +39,6 @@ def test_profile_allows_umg_authoring_graph_command():
 
 
 def test_profile_blocks_blueprint_add_variable_even_when_editor_advertises():
-    reset_operation_schema_budget()
     connection = _live_editor_connection(command="add_variable")
     payload = json.loads(build_profile_operation_schema(connection, "UMGAuthoring", "blueprint", "add_variable"))
     assert payload["editor_available"] is True
@@ -52,7 +49,6 @@ def test_profile_blocks_blueprint_add_variable_even_when_editor_advertises():
 
 
 def test_editor_missing_command_reports_restart_guidance():
-    reset_operation_schema_budget()
     connection = MagicMock()
     connection.send_command.side_effect = UECommandError(
         "core.get_operation_schema", "CAPABILITY_COMMAND_NOT_FOUND",
@@ -76,7 +72,6 @@ def test_editor_missing_command_reports_restart_guidance():
 
 
 def test_retry_budget_exhausted_after_declared_corrections():
-    reset_operation_schema_budget()
     connection = MagicMock()
     connection.send_command.side_effect = UECommandError(
         "core.get_operation_schema", "CAPABILITY_COMMAND_NOT_FOUND",

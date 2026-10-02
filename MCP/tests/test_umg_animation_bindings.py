@@ -9,7 +9,6 @@ import pytest
 from cortex_mcp.operation_schema import (
     DEFAULT_PROFILE,
     build_profile_operation_schema,
-    reset_operation_schema_budget,
 )
 from cortex_mcp.pagination import encode_cursor
 from cortex_mcp.response import format_response, MAX_RESPONSE_CHARS
@@ -20,10 +19,8 @@ from cortex_mcp.tools.routers import make_router, strict_router_tool, _paginatio
 @pytest.fixture(autouse=True)
 def _clear_cache():
     _pagination_cache.clear()
-    reset_operation_schema_budget()
     yield
     _pagination_cache.clear()
-    reset_operation_schema_budget()
 
 
 # ---------------------------------------------------------------------------

@@ -75,3 +75,35 @@
 ## Self-review / handoff
 
 Check each spec section against Tasks 1-3: fixed-point ownership (1), optional class-specific selection and existing journal/save (2), complete approval and MCP bounds (3), with no new general deletion operation. Check old behavior when `additional_node_guids` is absent and distinct save-failure states. The user authorized subagent-driven implementation after plan review; plugin implementation proceeds only after resolving material reviewer findings, and Ripper asset mutation remains gated by the fresh real-page preview.
+
+## Fixture-isolation acceptance correction (2026-10-01)
+
+The prerequisite retains the original 30 commits ending at `fac9f808e9963a017dd6e47d2dfff3ef79b1c97e`; these commits are not attributed to RIP-48. The acceptance correction is limited to:
+
+- `Source/CortexGraph/Private/Tests/CortexGraphTestContentRoot.h`
+- `Source/CortexGraph/Private/Tests/CortexGraphMigrationRetireTest.cpp`
+- `Source/CortexGraph/Private/Tests/CortexGraphMigrationRewireTest.cpp`
+- `MCP/tests/conftest.py`
+- `MCP/tests/test_graph_authoring_contract.py`
+- `MCP/tests/test_operation_schema.py`
+- `MCP/tests/test_umg_animation_bindings.py`
+- `MCP/tests/test_level_e2e.py` (separately authorized test-only caller migration)
+
+Use a full-GUID package directory per fixture while preserving the asset leaf name. Capture ownership through explicit unload and remove only owned disk output at final destruction. Preserve the existing mid-test unload/reload semantics; remove obsolete fixed-path predeletes, duplicated end-of-test deletion and incidental file-cleanup assertions. No production operation, additional GC invocation or global editor teardown is introduced.
+
+Observed in `CortexSandboxMirror` on UE 5.8.3:
+
+- Isolation-only diagnostic processor: `Saved/Logs/RIP48-baseline-graph-debug-gc-20261001.log`, verified `gc.ForceEnableGCProcessor=true`, 312/312 Success, completed queue/status 0, no warnings/errors/fatals. Diagnostic only.
+- Isolation-only normal processor: `Saved/Logs/RIP48-baseline-graph-normal-gc-isolated-20261001.log`, 312/312 Success, completed queue/status 0, no warnings/errors/fatals.
+- Final ownership cleanup: native build succeeded (11 actions, 43.66 seconds); `Saved/Logs/RIP48-baseline-graph-owned-fixtures-final-20261001.log`, fresh normal processor, 312/312 Success, completed queue/status 0, no warnings/errors/fatals. All 50 GUID directories observed in this log were absent afterward.
+- Focused cleanup/retirement/rewire Python contracts: 47 passed. Non-live MCP suite: 930 passed, 265 deselected. Registered live retirement plus response-boundary checks: 23 passed, including both routes under asyncio and trio; native mirror PID 50652, port 8743, editor instance `AD3AE7FD47A4D99BA730E29AF80721C4`.
+
+The retained earlier GC access-violation dumps and wrapper-copy failure remain separate historical evidence. These fresh runs do not prove their root cause or claim a historical fix. A full MCP attempt was invalidated by a normal `QUIT_EDITOR` exit during the run and cancelled; it is not a passing full-suite gate.
+
+### Python task-state isolation and live persistence
+
+The first stable full MCP attempt stopped after 407 passes because independent pytest cases shared the operation-schema correction budget. One contract test consumed the first UMG correction, the asyncio scenario consumed the second, and the trio scenario received the intentional exhausted-budget response instead of a fresh-task policy response. A function-scoped autouse fixture now resets the budget before and after each test; the within-case exhaustion test remains intact. The ordered contract/live-adapter/budget/animation regression run passed all 37 cases. Production budget semantics are unchanged.
+
+The next full attempt stopped after 555 passes because existing raw-TCP Level tests used `class` for `level.spawn_actor`, whose live contract requires `class_name`. The operator authorized test-only caller migration. Update spawn requests in the Level E2E cases and shared actor fixture only; retain the valid `class` parameters for class description, component creation and actor filtering. The live Level suite passed 50 cases with its two existing skips. No native Level code or transport compatibility alias changes.
+
+The registered retirement persistence smoke used mirror PID 49904, port 8743, editor instance `CAD3BF344079E3E52349F895CB01968D`. It discovered the complete four-node removable set, reviewed that exact set, applied with one target compile and matched readback, explicitly saved, then reloaded without discarding changes. Removed GUIDs remained absent; the retained override/body/shared-producer GUIDs and execution/data edges survived reload. The saved hash matched after reload and the package was clean. The disposable asset was deleted through its declared ownership record. Raw calls and responses: `Saved/RIP48Validation/prerequisite-retirement-save-smoke.json`.
