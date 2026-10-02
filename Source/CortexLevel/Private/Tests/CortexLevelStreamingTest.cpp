@@ -129,7 +129,11 @@ bool FCortexLevelSaveLevelTest::RunTest(const FString& Parameters)
         IFileManager::Get().DeleteDirectory(*FPaths::GetPath(Filename), false, false);
     };
 
-    TestWorld->SetFlags(RF_Standalone);
+    TestWorld->SetFlags(RF_Public | RF_Standalone);
+    if (!TestFalse(TEXT("Fixture package contains a saveable map asset"), UPackage::IsEmptyPackage(Package)))
+    {
+        return false;
+    }
     IFileManager::Get().MakeDirectory(*FPaths::GetPath(Filename), true);
     FSavePackageArgs SaveArgs;
     SaveArgs.TopLevelFlags = RF_Standalone;
