@@ -491,12 +491,30 @@ class TestProjectValidation:
 class TestProjectRootDiscovery:
     """Tests for _find_project_root() and _find_saved_dir() path resolution."""
 
-    def test_find_project_root_from_file_walk(self):
+    @pytest.fixture(autouse=True)
+    def project_layout(self, tmp_path, monkeypatch):
+        from cortex_mcp import project
+
+        root = tmp_path / "DiscoveryProject"
+        package = root / "Plugins/UnrealCortex/MCP/src/cortex_mcp"
+        package.mkdir(parents=True)
+        (root / "DiscoveryProject.uproject").write_text("{}", encoding="utf-8")
+        (root / "Saved").mkdir()
+        module = package / "project.py"
+        module.touch()
+        monkeypatch.setattr(project, "__file__", str(module))
+        monkeypatch.delenv("CORTEX_PROJECT_DIR", raising=False)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        project._walk_up_for_uproject.cache_clear()
+        try:
+            yield root
+        finally:
+            project._walk_up_for_uproject.cache_clear()
+
+    def test_find_project_root_from_file_walk(self, project_layout):
         """_find_project_root should find the project root by walking up from __file__."""
         root = _find_project_root()
-        # tcp_client.py lives inside the project tree, so root should be found
-        assert root is not None
-        assert list(root.glob("*.uproject"))
+        assert root == project_layout
 
     def test_find_saved_dir_with_absolute_env(self, tmp_path):
         """Absolute CORTEX_PROJECT_DIR should be used directly."""
@@ -507,28 +525,24 @@ class TestProjectRootDiscovery:
             assert result is not None
             assert result == saved
 
-    def test_find_saved_dir_with_relative_env_resolves_against_project_root(self):
+    def test_find_saved_dir_with_relative_env_resolves_against_project_root(self, project_layout, tmp_path, monkeypatch):
         """Relative CORTEX_PROJECT_DIR='.' should resolve against project root, not CWD."""
+        monkeypatch.chdir(tmp_path)
         with patch.dict(os.environ, {"CORTEX_PROJECT_DIR": "."}):
             result = _find_saved_dir()
-            assert result is not None, "Expected to find Saved/ in project root"
-            assert "Saved" in str(result)
-            # Must NOT be under MCP directory
-            assert "MCP\\Saved" not in str(result) and "MCP/Saved" not in str(result)
+            assert result == project_layout / "Saved"
 
-    def test_find_saved_dir_without_env_uses_file_walk(self):
+    def test_find_saved_dir_without_env_uses_file_walk(self, project_layout):
         """Without CORTEX_PROJECT_DIR, should walk up from __file__."""
         with patch.dict(os.environ, {}, clear=True):
             os.environ.pop("CORTEX_PROJECT_DIR", None)
             result = _find_saved_dir()
-            assert result is not None, "Expected to find Saved/ via __file__ walk-up"
-            assert result.name == "Saved"
+            assert result == project_layout / "Saved"
 
     def test_get_expected_project_from_uproject(self):
         """_get_expected_project should return project name from .uproject filename."""
         project = _get_expected_project()
-        # We're running inside CortexSandboxMirror which has CortexSandbox.uproject
-        assert project == "CortexSandbox"
+        assert project == "DiscoveryProject"
 
 
 class TestNoEditorFallback:

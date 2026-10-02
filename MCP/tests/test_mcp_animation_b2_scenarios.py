@@ -7,6 +7,8 @@ import uuid
 
 import pytest
 
+pytestmark = pytest.mark.e2e
+
 
 async def call_tool(client, name: str, args: dict) -> dict:
     result = await client.call_tool(name, args)

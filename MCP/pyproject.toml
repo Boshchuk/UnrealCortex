@@ -28,6 +28,6 @@ dev = [
 [tool.pytest.ini_options]
 markers = [
     "e2e: requires running Unreal Editor",
-    "scenario: multi-step MCP workflow tests",
+    "scenario: multi-step MCP workflow tests (live scenarios also carry e2e)",
     "stress: long-running performance tests",
 ]

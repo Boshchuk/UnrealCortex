@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from cortex_mcp import server
 from cortex_mcp.tcp_client import UEConnection
 
@@ -71,6 +73,10 @@ def test_ripper_scenario_call_budget():
     assert result.repeat_read_ratio < 0.15
 
 
+@pytest.mark.skipif(
+    not (_WORKSPACE_ROOT / "cortex-toolkit").is_dir(),
+    reason="requires sibling cortex-toolkit/ checkout",
+)
 def test_toolkit_prompts_require_prefetched_state_and_expected_fingerprint():
     """Task-launch prompts should require prefetched state and stale-write guards."""
     files = [
@@ -92,6 +98,10 @@ def test_toolkit_prompts_require_prefetched_state_and_expected_fingerprint():
         assert "parallel" in text, f"{path.name} is missing the parallel read contract"
 
 
+@pytest.mark.skipif(
+    not (_WORKSPACE_ROOT / "docs/systems").is_dir(),
+    reason="requires CortexSandbox workspace docs/systems/",
+)
 def test_call_count_docs_capture_shipped_surface():
     """Implementation and system docs should describe the shipped reduction surface."""
     files = [

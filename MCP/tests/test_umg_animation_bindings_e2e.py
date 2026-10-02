@@ -54,11 +54,11 @@ def test_live_binding_schema(tcp_connection):
             assert "save" in param_names
 
     # Verify editor/build identity and domain registration
-    status_resp = tcp_connection.send_command("core.get_status", {})
-    assert status_resp.get("success") is True, f"core.get_status failed: {status_resp}"
-    status_data = status_resp.get("data", {})
-    domains = status_data.get("domains", {})
-    assert "umg" in domains, f"Domain 'umg' not found in registered domains: {domains.keys()}"
+    status_resp = tcp_connection.send_command("get_status", {})
+    assert status_resp.get("success") is True, f"get_status failed: {status_resp}"
+    status_data = status_resp["data"]
+    capabilities = tcp_connection.send_command("get_capabilities", {})["data"]
+    assert "umg" in capabilities["domains"]
 
     # Verify build configuration and engine identity fields
     assert "engine_version" in status_data, f"Missing engine_version in get_status: {status_data}"
@@ -111,7 +111,7 @@ def test_fixture_seed_inspection(tcp_connection, mcp_client):
 
 @pytest.mark.e2e
 def test_duplicate_mutation_preview_and_apply(tcp_connection, mcp_client):
-    """Inspect blueprint.duplicate schema, create duplicate, preview removal, apply removal, verify stale token on edited asset, save-error, reload."""
+    """Preview/apply on a duplicate; refuse stale tokens and invalid requests; compile, save and reload."""
     # 1. Inspect blueprint.duplicate schema before constructing calls
     dup_schema_resp = tcp_connection.send_command(
         "core.get_operation_schema", {"domain": "blueprint", "command": "duplicate"}
@@ -182,6 +182,8 @@ def test_duplicate_mutation_preview_and_apply(tcp_connection, mcp_client):
             {"asset_path": dup_asset_path, "animation_name": "appearance"},
         )
         assert len(post_preview_read["data"]["bindings"]) == 3
+        assert post_preview_read["data"]["bindings"] == initial_bindings
+        assert post_preview_read["data"]["fingerprint"] == initial_fp
 
         # 5. Perform real removal of first binding (dry_run=False, save=True)
         remove_params = {
@@ -242,71 +244,79 @@ def test_duplicate_mutation_preview_and_apply(tcp_connection, mcp_client):
         )
         assert intervening_edit_resp["success"] is True
 
-        # Now attempt to remove binding 2 using the OLD fp_before_second_edit
-        # Must be rejected with STALE_PRECONDITION because the asset was modified!
-        stale_call_resp = tcp_connection.send_command(
-            "umg.remove_animation_binding",
-            {
-                "asset_path": dup_asset_path,
-                "animation_name": "appearance",
-                "selector": selector_2,
-                "expected_fingerprint": fp_before_second_edit,
-                "dry_run": False,
-                "save": False,
-            },
-        )
-        assert stale_call_resp["success"] is False
-        assert stale_call_resp.get("error_code") == "STALE_PRECONDITION", (
-            f"Expected STALE_PRECONDITION on edited asset, got: {stale_call_resp}"
-        )
-
-        # 7. Test Save-Error case:
-        # Attempt removal on an invalid/un-saveable asset path with save=True
-        save_error_resp = tcp_connection.send_command(
-            "umg.remove_animation_binding",
-            {
-                "asset_path": "/Game/Temp/CortexE2E/NonExistentAssetPath_12345",
-                "animation_name": "appearance",
-                "selector": selector_2,
-                "expected_fingerprint": fp_before_second_edit,
-                "dry_run": False,
-                "save": True,
-            },
-        )
-        assert save_error_resp["success"] is False
-        assert save_error_resp.get("error_code") in ("BLUEPRINT_NOT_FOUND", "INVALID_FIELD")
-
-        # Attempt dry_run=True, save=True conflict -> INVALID_FIELD
-        conflict_resp = tcp_connection.send_command(
-            "umg.remove_animation_binding",
-            {
-                "asset_path": dup_asset_path,
-                "animation_name": "appearance",
-                "selector": selector_2,
-                "expected_fingerprint": fp_before_second_edit,
-                "dry_run": True,
-                "save": True,
-            },
-        )
-        assert conflict_resp["success"] is False
-        assert conflict_resp.get("error_code") == "INVALID_FIELD"
-
-        # 8. Reload verification:
-        # Save the current state and reload from disk
-        tcp_connection.send_command("blueprint.save", {"asset_path": dup_asset_path})
-        reread_resp = tcp_connection.send_command(
+        # The stale token must refuse without touching the remaining binding or dirty state.
+        before_refusal = tcp_connection.send_command(
             "umg.list_animation_bindings",
             {"asset_path": dup_asset_path, "animation_name": "appearance"},
-        )
-        assert reread_resp["success"] is True
-        assert len(reread_resp["data"]["bindings"]) == 1
-        assert reread_resp["data"]["bindings"][0]["widget_name"] == target_binding_2["widget_name"]
+        )["data"]
+        assert before_refusal["fingerprint"]["is_dirty"] is True
+        with pytest.raises(UECommandError) as stale:
+            tcp_connection.send_command(
+                "umg.remove_animation_binding",
+                {
+                    "asset_path": dup_asset_path,
+                    "animation_name": "appearance",
+                    "selector": selector_2,
+                    "expected_fingerprint": fp_before_second_edit,
+                    "dry_run": False,
+                    "save": False,
+                },
+            )
+        assert stale.value.code == "STALE_PRECONDITION"
+        assert stale.value.command == "umg.remove_animation_binding"
+        after_refusal = tcp_connection.send_command(
+            "umg.list_animation_bindings",
+            {"asset_path": dup_asset_path, "animation_name": "appearance"},
+        )["data"]
+        assert after_refusal["bindings"] == before_refusal["bindings"]
+        assert after_refusal["fingerprint"] == before_refusal["fingerprint"]
 
-        # 9. Compile the duplicate
-        compile_resp = tcp_connection.send_command(
-            "blueprint.compile", {"asset_path": dup_asset_path}
-        )
-        assert compile_resp["success"] is True
+        # Missing-asset rejection is not a save failure.
+        with pytest.raises(UECommandError) as missing:
+            tcp_connection.send_command(
+                "umg.remove_animation_binding",
+                {
+                    "asset_path": "/Game/Temp/CortexE2E/NonExistentAssetPath_12345",
+                    "animation_name": "appearance",
+                    "selector": selector_2,
+                    "expected_fingerprint": fp_before_second_edit,
+                    "dry_run": False,
+                    "save": True,
+                },
+            )
+        assert missing.value.code == "BLUEPRINT_NOT_FOUND"
+
+        with pytest.raises(UECommandError) as conflict:
+            tcp_connection.send_command(
+                "umg.remove_animation_binding",
+                {
+                    "asset_path": dup_asset_path,
+                    "animation_name": "appearance",
+                    "selector": selector_2,
+                    "expected_fingerprint": fp_before_second_edit,
+                    "dry_run": True,
+                    "save": True,
+                },
+            )
+        assert conflict.value.code == "INVALID_FIELD"
+
+        compiled = tcp_connection.send_command("blueprint.compile", {"asset_path": dup_asset_path})["data"]
+        assert compiled["error_count"] == 0
+        tcp_connection.send_command("blueprint.save", {"asset_path": dup_asset_path})
+        persisted = tcp_connection.send_command(
+            "umg.list_animation_bindings",
+            {"asset_path": dup_asset_path, "animation_name": "appearance"},
+        )["data"]
+        reloaded = tcp_connection.send_command("core.reload_asset", {"asset_path": dup_asset_path})["data"]
+        assert reloaded["reloaded"] is True
+        assert reloaded["discarded_changes"] is False
+        reread = tcp_connection.send_command(
+            "umg.list_animation_bindings",
+            {"asset_path": dup_asset_path, "animation_name": "appearance"},
+        )["data"]
+        assert reread["bindings"] == before_refusal["bindings"]
+        assert reread["fingerprint"]["is_dirty"] is False
+        assert reread["fingerprint"]["domain_signature"] == persisted["fingerprint"]["domain_signature"]
 
     finally:
         # Explicit cleanup with error assertion
@@ -382,24 +392,23 @@ def test_generic_split_smoke(tcp_connection, mcp_client):
         )
         assert del_widget_host["success"] is True
 
-        # Save host after widget deletion
-        save_host = tcp_connection.send_command("blueprint.save", {"asset_path": host_path})
-        assert save_host["success"] is True
-
-        # Reload/re-read host from disk and verify zero dangling references
+        compiled_host = tcp_connection.send_command("blueprint.compile", {"asset_path": host_path})["data"]
+        assert compiled_host["error_count"] == 0 and compiled_host["warning_count"] == 0
+        tcp_connection.send_command("blueprint.save", {"asset_path": host_path})
+        reloaded_host = tcp_connection.send_command("core.reload_asset", {"asset_path": host_path})["data"]
+        assert reloaded_host["reloaded"] is True and reloaded_host["discarded_changes"] is False
         host_final_read = tcp_connection.send_command(
             "umg.list_animation_bindings", {"asset_path": host_path, "animation_name": "appearance"}
         )
         assert host_final_read["success"] is True
         assert len(host_final_read["data"]["bindings"]) == 2
         assert {b["widget_name"] for b in host_final_read["data"]["bindings"]} == {"BodySizeBox", "BorderBody"}
-        for diag in host_final_read["data"].get("diagnostics", []):
-            assert "no corresponding UMG animation binding record" not in diag
-            assert "Duplicate animation binding record" not in diag
-
-        # Compile host
-        compile_host = tcp_connection.send_command("blueprint.compile", {"asset_path": host_path})
-        assert compile_host["success"] is True
+        for binding in host_final_read["data"]["bindings"]:
+            assert binding["target_exists"] is True and binding["possessable_exists"] is True
+        assert host_final_read["data"]["fingerprint"]["is_dirty"] is False
+        assert {b["binding_guid"] for b in host_final_read["data"]["bindings"]} == {
+            b["binding_guid"] for b in host_read["data"]["bindings"] if b["widget_name"] != "StorylineIcon"
+        }
 
         # --- CHILD: retains StorylineIcon, removes BodySizeBox and BorderBody ---
         child_read = tcp_connection.send_command(
@@ -449,36 +458,56 @@ def test_generic_split_smoke(tcp_connection, mcp_client):
         del_w2 = tcp_connection.send_command("umg.remove_widget", {"asset_path": child_path, "widget_name": "BorderBody"})
         assert del_w2["success"] is True
 
-        # Save child after widget deletion
-        save_child = tcp_connection.send_command("blueprint.save", {"asset_path": child_path})
-        assert save_child["success"] is True
-
-        # Reload/re-read child from disk and verify zero dangling references
+        compiled_child = tcp_connection.send_command("blueprint.compile", {"asset_path": child_path})["data"]
+        assert compiled_child["error_count"] == 0 and compiled_child["warning_count"] == 0
+        tcp_connection.send_command("blueprint.save", {"asset_path": child_path})
+        reloaded_child = tcp_connection.send_command("core.reload_asset", {"asset_path": child_path})["data"]
+        assert reloaded_child["reloaded"] is True and reloaded_child["discarded_changes"] is False
         child_final_read = tcp_connection.send_command(
             "umg.list_animation_bindings", {"asset_path": child_path, "animation_name": "appearance"}
         )
         assert child_final_read["success"] is True
         assert len(child_final_read["data"]["bindings"]) == 1
         assert child_final_read["data"]["bindings"][0]["widget_name"] == "StorylineIcon"
-        for diag in child_final_read["data"].get("diagnostics", []):
-            assert "no corresponding UMG animation binding record" not in diag
-            assert "Duplicate animation binding record" not in diag
-
-
-        # Compile child
-        compile_child = tcp_connection.send_command("blueprint.compile", {"asset_path": child_path})
-        assert compile_child["success"] is True
+        assert child_final_read["data"]["bindings"][0]["target_exists"] is True
+        assert child_final_read["data"]["bindings"][0]["possessable_exists"] is True
+        assert child_final_read["data"]["fingerprint"]["is_dirty"] is False
+        assert child_final_read["data"]["bindings"][0]["binding_guid"] == next(
+            b["binding_guid"] for b in child_read["data"]["bindings"] if b["widget_name"] == "StorylineIcon"
+        )
 
         # --- 4 TEMPLATES: remove whole animation ---
         for t_path in template_paths:
+            original_animations = tcp_connection.send_command(
+                "umg.list_animations", {"asset_path": t_path},
+            )["data"]["animations"]
+            retained_animations = [animation for animation in original_animations if animation["name"] != "appearance"]
+            # Only these owned templates lose their authored playback consumer.
+            for filters in (
+                {"node_class": "K2Node_CallFunction", "function_name": "PlayAnimation"},
+                {"node_class": "K2Node_VariableGet", "display_name": "appearance"},
+            ):
+                matches = tcp_connection.send_command(
+                    "graph.search_nodes",
+                    {"asset_path": t_path, "graph_name": "EventGraph", **filters},
+                )["data"]["results"]
+                assert len(matches) == 1, matches
+                tcp_connection.send_command(
+                    "graph.remove_node",
+                    {"asset_path": t_path, "graph_name": "EventGraph", "node_id": matches[0]["node_id"]},
+                )
             rem_anim_resp = tcp_connection.send_command(
                 "umg.remove_animation", {"asset_path": t_path, "animation_name": "appearance"}
             )
             assert rem_anim_resp["success"] is True
-            # Save template package
+            compile_t = tcp_connection.send_command("blueprint.compile", {"asset_path": t_path})["data"]
+            assert compile_t["error_count"] == 0
+            assert compile_t["warning_count"] == 0
             tcp_connection.send_command("blueprint.save", {"asset_path": t_path})
-            compile_t = tcp_connection.send_command("blueprint.compile", {"asset_path": t_path})
-            assert compile_t["success"] is True
+            reloaded = tcp_connection.send_command("core.reload_asset", {"asset_path": t_path})["data"]
+            assert reloaded["reloaded"] is True and reloaded["discarded_changes"] is False
+            animations = tcp_connection.send_command("umg.list_animations", {"asset_path": t_path})["data"]
+            assert animations["animations"] == retained_animations
 
     finally:
         for path in reversed(created_assets):

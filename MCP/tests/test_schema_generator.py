@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from cortex_mcp.schema_generator import find_project_root, get_schema_dir
 from cortex_mcp.schema_generator import SCHEMA_VERSION, render_catalog
 from cortex_mcp.schema_generator import collect_blueprint_domain
@@ -17,6 +19,14 @@ from cortex_mcp.schema_generator import generate_schema
 from cortex_mcp.schema_generator import read_meta_from_file
 from cortex_mcp.schema_generator import _decode_data
 from cortex_mcp.schema_generator import render_data_formats, render_data_index, render_data_structs
+
+
+@pytest.fixture(autouse=True)
+def schema_project(tmp_path, monkeypatch):
+    """Schema unit tests own their project rather than borrowing live-test state."""
+    (tmp_path / "SchemaTest.uproject").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("CORTEX_PROJECT_DIR", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
 
 
 class TestProjectRootDiscovery(unittest.TestCase):

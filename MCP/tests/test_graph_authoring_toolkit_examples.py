@@ -38,11 +38,18 @@ from test_graph_authoring_scenario import (
     node_name_map,
 )
 
-pytestmark = pytest.mark.scenario
-
 TOOLKIT_ROOT = (
     Path(__file__).resolve().parents[4] / "cortex-toolkit" / "examples" / "typed-blueprint-authoring"
 )
+
+pytestmark = [
+    pytest.mark.scenario,
+    pytest.mark.e2e,
+    pytest.mark.skipif(
+        not TOOLKIT_ROOT.is_dir(),
+        reason="requires sibling cortex-toolkit/examples/typed-blueprint-authoring/",
+    ),
+]
 
 # Tokens this module binds. Anything outside this set must appear in UNPRODUCIBLE below.
 BOUND_TOKENS = {

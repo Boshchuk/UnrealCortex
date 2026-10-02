@@ -6752,6 +6752,8 @@ struct FExternalCallerEvidence
 
 /**
  * True when one node of a foreign Blueprint actually references a generated function of the target.
+ * Sets OutbUnresolved when the node names a matching function but ownership cannot be established;
+ * the caller must then mark its investigation incomplete rather than treating the node as a non-caller.
  *
  * A function call and a delegate binding are the two node kinds whose reference resolves to a
  * function on the target's generated or skeleton class chain, so both are real call sites.
@@ -6761,9 +6763,11 @@ bool NodeCallsTargetGeneratedFunction(
 	UBlueprint* Other,
 	UEdGraphNode* Node,
 	const TSet<FName>& FunctionNames,
-	FName& OutFunctionName)
+	FName& OutFunctionName,
+	bool& OutbUnresolved)
 {
 	OutFunctionName = NAME_None;
+	OutbUnresolved = false;
 	if (const UK2Node_CallFunction* const Call = Cast<UK2Node_CallFunction>(Node))
 	{
 		const FName Member = Call->FunctionReference.GetMemberName();
@@ -6780,6 +6784,11 @@ bool NodeCallsTargetGeneratedFunction(
 		{
 			Owner = Call->FunctionReference.GetMemberParentClass();
 		}
+		if (!Owner)
+		{
+			OutbUnresolved = true;
+			return false;
+		}
 		if (!ReferenceOwnerMatchesAsset(Target, Owner)) return false;
 		OutFunctionName = Member;
 		return true;
@@ -6791,13 +6800,31 @@ bool NodeCallsTargetGeneratedFunction(
 		// The self pin is validated directly so the engine accessor's ensure cannot fire on the
 		// node shapes a project-wide scan has to tolerate.
 		const UEdGraphPin* const SelfPin = Node->FindPin(UEdGraphSchema_K2::PN_Self);
-		if (!SelfPin || SelfPin->LinkedTo.Num() > 1) return false;
+		if (!SelfPin || SelfPin->LinkedTo.Num() > 1)
+		{
+			OutbUnresolved = true;
+			return false;
+		}
 		if (SelfPin->LinkedTo.Num() == 1)
 		{
 			const UEdGraphPin* const ScopePin = SelfPin->LinkedTo[0];
-			if (!ScopePin || ScopePin->PinType.PinCategory != UEdGraphSchema_K2::PC_Object) return false;
+			if (!ScopePin || ScopePin->PinType.PinCategory != UEdGraphSchema_K2::PC_Object)
+			{
+				OutbUnresolved = true;
+				return false;
+			}
 		}
-		if (!ReferenceOwnerMatchesAsset(Target, CreateDelegate->GetScopeClass())) return false;
+		// GetScopeClass() can return nullptr when the delegate's target class is no longer loaded or
+		// was renamed; the matching function name makes this node a candidate caller whose ownership
+		// is unresolvable, not a confirmed non-caller.  Signal that to the caller so it can refuse
+		// instead of silently treating an unresolvable reference as safe to retire past.
+		const UClass* const ScopeClass = CreateDelegate->GetScopeClass();
+		if (!ScopeClass)
+		{
+			OutbUnresolved = true;
+			return false;
+		}
+		if (!ReferenceOwnerMatchesAsset(Target, ScopeClass)) return false;
 		OutFunctionName = Member;
 		return true;
 	}
@@ -6913,7 +6940,20 @@ void InvestigateExternalGeneratedFunctionCallers(
 			{
 				if (!Node) continue;
 				FName CalledFunction;
-				if (!NodeCallsTargetGeneratedFunction(Target, Other, Node, FunctionNames, CalledFunction)) continue;
+				bool bUnresolved = false;
+				if (!NodeCallsTargetGeneratedFunction(Target, Other, Node, FunctionNames, CalledFunction, bUnresolved))
+				{
+					if (bUnresolved)
+					{
+						// A matching function name with unproved ownership is incomplete caller evidence.
+						Out.bComplete = false;
+						Out.BlockingReason = FString::Printf(
+							TEXT("asset '%s' in package '%s' has a matching call or delegate binding whose owner or scope cannot be resolved, so a call of a retired generated function from it cannot be ruled out"),
+							*Other->GetName(), *Other->GetOutermost()->GetName());
+						return;
+					}
+					continue;
+				}
 				Out.Callers.FindOrAdd(CalledFunction).Add(FString::Printf(
 					TEXT("package '%s' asset '%s' graph '%s' node '%s' (GUID %s)"),
 					*Other->GetOutermost()->GetName(), *Other->GetName(), *Graph->GetName(),
@@ -8096,6 +8136,47 @@ FString CallOutputPinCapture(
 }
 
 /**
+ * Canonical capture of all surviving links on the call node, excluding the stale orphan pin (which
+ * carries no surviving links) and the replacement output pin's reviewed edges (which are already
+ * verified by the edge comparison in VerifyCallOutputAgainstNative).  ExcludedReplacementEdgeKeys
+ * holds `"<far-guid>.<far-pin>"` keys so only the precisely reviewed connections are exempted;
+ * any unrelated link added, removed, or silently re-routed will make the readback diverge.
+ */
+FString CallOutputLinkCapture(
+	const UEdGraphNode& Node,
+	const FName ExcludedStalePinName,
+	const EEdGraphPinDirection ExcludedStalePinDirection,
+	const FName ReplacementPinName,
+	const TSet<FString>& ExcludedReplacementEdgeKeys)
+{
+	TArray<FString> Records;
+	for (const UEdGraphPin* Pin : Node.Pins)
+	{
+		if (!Pin) continue;
+		if (Pin->PinName == ExcludedStalePinName && Pin->Direction == ExcludedStalePinDirection) continue;
+		for (const UEdGraphPin* LinkedPin : Pin->LinkedTo)
+		{
+			const UEdGraphNode* const FarNode = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
+			if (!FarNode) continue;
+			// Exempt only the reviewed replacement-output edges; all other links (including unrelated
+			// outputs and all input-side/exec links) must survive unmodified.
+			if (Pin->PinName == ReplacementPinName && Pin->Direction == EGPD_Output)
+			{
+				const FString EdgeKey = FarNode->NodeGuid.ToString() + TEXT(".") + LinkedPin->PinName.ToString();
+				if (ExcludedReplacementEdgeKeys.Contains(EdgeKey)) continue;
+			}
+			Records.Add(FString::Printf(TEXT("%s:%d->%s.%s"),
+				*Pin->PinName.ToString(),
+				static_cast<int32>(Pin->Direction),
+				*FarNode->NodeGuid.ToString(),
+				*LinkedPin->PinName.ToString()));
+		}
+	}
+	Records.Sort();
+	return FString::Join(Records, TEXT("\n"));
+}
+
+/**
  * True when the call's reflected target function really declares this output pin.
  *
  * A pin is a reflected output only when an `out` or `return` parameter of the target function carries
@@ -8235,6 +8316,7 @@ TSharedPtr<FJsonObject> FCortexGraphMigrationCallOutputPlan::ToJson() const
 	Json->SetStringField(TEXT("replacement_pin"), ReplacementPinName);
 	Json->SetStringField(TEXT("replacement_pin_signature"), ReplacementPinSignature);
 	Json->SetStringField(TEXT("pins"), Pins);
+	Json->SetStringField(TEXT("call_links"), CallLinks);
 	Json->SetBoolField(TEXT("awaiting_approval"), bAwaitingApproval);
 	Json->SetBoolField(TEXT("reused"), bReused);
 	Json->SetStringField(TEXT("blueprint_status_before"), BlueprintStatusBefore);
@@ -8272,6 +8354,8 @@ bool FCortexGraphMigrationCallOutputPlan::FromJson(
 		|| !Source->TryGetStringField(TEXT("replacement_pin"), OutPlan.ReplacementPinName)
 		|| !Source->TryGetStringField(TEXT("replacement_pin_signature"), OutPlan.ReplacementPinSignature)
 		|| !Source->TryGetStringField(TEXT("pins"), OutPlan.Pins)
+		|| !Source->HasTypedField<EJson::String>(TEXT("call_links"))
+		|| !Source->TryGetStringField(TEXT("call_links"), OutPlan.CallLinks)
 		|| !Source->TryGetNumberField(TEXT("stale_direction"), OutPlan.StaleDirection)
 		|| !Source->TryGetBoolField(TEXT("awaiting_approval"), OutPlan.bAwaitingApproval)
 		|| !Source->TryGetBoolField(TEXT("reused"), OutPlan.bReused)
@@ -8672,6 +8756,16 @@ bool FCortexGraphMigrationOps::PlanCallOutput(
 	OutPlan.ReplacementPinSignature = PinSignature(*ReplacementPin);
 	OutPlan.Pins = CallOutputPinCapture(*Call, FName(*StalePinName),
 		static_cast<EEdGraphPinDirection>(OutPlan.StaleDirection));
+	{
+		TSet<FString> ReviewedEdgeKeys;
+		for (const FCortexGraphCallOutputEdge& Edge : Discovered)
+		{
+			ReviewedEdgeKeys.Add(CallOutputEdgeKey(Edge.FarGuid, Edge.FarPin));
+		}
+		OutPlan.CallLinks = CallOutputLinkCapture(*Call, FName(*StalePinName),
+			static_cast<EEdGraphPinDirection>(OutPlan.StaleDirection),
+			FName(*ReplacementPinName), ReviewedEdgeKeys);
+	}
 	OutPlan.Edges = Discovered;
 	OutPlan.bAwaitingApproval = !bHasReview;
 	OutPlan.bReused = bReused;
@@ -8820,6 +8914,21 @@ bool FCortexGraphMigrationOps::VerifyCallOutputAgainstNative(
 	{
 		OutFailure = TEXT("the call node's surviving pin set changed: the repair was not in place");
 		return false;
+	}
+	// An empty inventory is still a preservation contract: no unrelated links may appear.
+	{
+		TSet<FString> ReviewedEdgeKeys;
+		for (const FCortexGraphCallOutputEdge& Edge : Plan.Edges)
+		{
+			ReviewedEdgeKeys.Add(CallOutputEdgeKey(Edge.FarGuid, Edge.FarPin));
+		}
+		const FString CurrentCallLinks = CallOutputLinkCapture(*Call, FName(*Plan.StalePinName),
+			StaleDirection, FName(*Plan.ReplacementPinName), ReviewedEdgeKeys);
+		if (CurrentCallLinks != Plan.CallLinks)
+		{
+			OutFailure = TEXT("the call node's surviving links changed: an unrelated connection was silently added, removed, or re-routed");
+			return false;
+		}
 	}
 	if (ShouldInjectCallOutputReadbackFault(TEXT("call_output_after_pins")))
 	{
