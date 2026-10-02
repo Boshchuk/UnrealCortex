@@ -1,8 +1,12 @@
 #include "Misc/AutomationTest.h"
 #include "CortexCommandRouter.h"
 #include "CortexLevelCommandHandler.h"
+#include "Editor.h"
+#include "Engine/World.h"
+#include "FileHelpers.h"
 #include "HAL/PlatformFileManager.h"
 #include "Misc/PackageName.h"
+#include "UObject/Package.h"
 
 namespace
 {
@@ -27,7 +31,7 @@ namespace
     bool CanOpenForExclusiveWrite(const FString& Filename)
     {
         IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
-        TUniquePtr<IFileHandle> Handle(PlatformFile.OpenWrite(*Filename, false, false));
+        TUniquePtr<IFileHandle> Handle(PlatformFile.OpenWrite(*Filename, true, false));
         return Handle.IsValid();
     }
 
@@ -140,5 +144,47 @@ bool FCortexLevelSaveAllTest::RunTest(const FString& Parameters)
         TestTrue(TEXT("saved field should exist"), Result.Data->HasField(TEXT("saved")));
     }
 
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexLevelSaveNeverSavedTest,
+    "Cortex.Level.Streaming.SaveLevel.NeverSaved",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexLevelSaveNeverSavedTest::RunTest(const FString& Parameters)
+{
+    if (!TestNotNull(TEXT("Editor is available"), GEditor))
+    {
+        return false;
+    }
+
+    UWorld* OriginalWorld = GEditor->GetEditorWorldContext().World();
+    UWorld* TestWorld = UWorld::CreateWorld(EWorldType::Editor, false);
+    if (!TestNotNull(TEXT("Unsaved world created"), TestWorld))
+    {
+        return false;
+    }
+
+    GEditor->GetEditorWorldContext().SetCurrentWorld(TestWorld);
+    TestWorld->GetOutermost()->SetDirtyFlag(true);
+    TestTrue(TEXT("Fixture has no saved filename"), FEditorFileUtils::GetFilename(TestWorld).IsEmpty());
+
+    // Keep a regression from blocking automation on the engine's Save As modal.
+    // The unfixed implementation returns INVALID_OPERATION in this mode.
+    TGuardValue<bool> UnattendedGuard(GIsRunningUnattendedScript, true);
+    FCortexCommandRouter Router = CreateLevelRouterStreaming();
+    const FCortexCommandResult Result = Router.Execute(TEXT("level.save_level"), MakeShared<FJsonObject>());
+    TestFalse(TEXT("Unsaved level is rejected"), Result.bSuccess);
+    TestEqual(TEXT("Actionable error identifies a never-saved level"), Result.ErrorCode, TEXT("LEVEL_NOT_SAVED"));
+    TestTrue(TEXT("Error explains how to save first"), Result.ErrorMessage.Contains(TEXT("create_level")));
+    TestTrue(TEXT("Unsaved edits remain dirty"), TestWorld->GetOutermost()->IsDirty());
+    TestTrue(TEXT("Follow-up command still runs"), Router.Execute(TEXT("level.get_info"), MakeShared<FJsonObject>()).bSuccess);
+
+    GEditor->GetEditorWorldContext().SetCurrentWorld(OriginalWorld);
+    TestWorld->GetOutermost()->SetDirtyFlag(false);
+    TestWorld->DestroyWorld(false);
+    TestWorld->MarkAsGarbage();
     return true;
 }
