@@ -97,6 +97,10 @@ public:
 	 */
 	UPROPERTY(BlueprintReadWrite, Category = "CortexGraphMigrationTest")
 	TObjectPtr<UButton> RetireButtonTarget;
+
+	/** Pure, typed router stand-in for the closed orphan-component fixture. */
+	UFUNCTION(BlueprintPure, Category = "CortexGraphMigrationTest")
+	UButton* GetRetireButtonTarget() const { return RetireButtonTarget; }
 };
 
 UCLASS(Blueprintable)

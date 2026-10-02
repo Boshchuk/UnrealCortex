@@ -40,6 +40,12 @@ The detail AcceptButton branch also has an unexecuted `ShowQuestAssignCalendar` 
 
 After retaining the calendar's component-bound notifications and rewiring them to native handlers, their former visibility setter starts a disconnected execution tail. The old `UpdateMessageDisplay` custom event cannot be retired while that tail still calls it. `retire_entries` therefore admits an explicitly selected exact `UK2Node_VariableSet` as a `disconnected_setter_root` only if every execution input is unlinked, at least one execution output feeds the obsolete tail, and it owns no subgraph. The existing graph-wide unique-GUID check, reverse producer and fixed-point retained-consumer partition, full reviewed cut, stale fingerprint, validation hash, compile requirement, readback and rollback still apply. A linked setter or another node class is refused. Retire this detached tail first; only then can the now-unreferenced custom event pass its ordinary in-asset and foreign-caller checks. The regression extends the existing sandbox retirement fixture with a retained cosmetic hook and shared producer; it fails before admission and passes after.
 
+## Closed disconnected components
+
+`retire_entries` also accepts optional `source.orphan_component_node_guids`. This is the complete explicit inventory of one or more closed disconnected components, not a traversal seed. Every GUID must resolve uniquely in the same top-level ubergraph and differ from selected entries and additional nodes. Exact standard ordinary calls require resolved function ownership and supported metadata, or a selected retired generated-function proof. Exact knot, macro and delegate classes reuse their established removal semantics. Authored entries, graph owners, latent/async calls and unproved classes refuse. A bounded scan of all asset nodes and physical pins proves reciprocal internal links and zero execution, data or delegate boundary, including incoming links from other graphs. No omitted member is inferred.
+
+The durable preview publishes canonical `orphan_component_guids` and class/semantic `orphan_component_nodes` proofs. Only the final ownership partition plus proved closed components is removable. A generated-function caller may be exempted only if its unique identity is in that final set in the same graph; requested-but-retained, blocked, other-graph and external callers still refuse. External referencer completeness, exact approval, fingerprint/hash revalidation, compile requirements, preservation, rollback and post-removal reference checks remain mandatory. Shared macro graphs and independently authored events are never deleted implicitly.
+
 ## Isolated automation package lifetime (2026-10-01)
 
 The retirement `FFixture`, `FGuardedEntryFixture`, `FExternalCallerFixture` and rewire `FFixture` allocate packages through the shared private test-content helper. Each allocation uses `/Game/Temp/CortexGraphFixture_<full GUID>/<original asset leaf name>`. This preserves asset/class leaf names and dynamically captured paths while preventing reuse or deletion of a previous run's saved fixture package.
@@ -48,7 +54,10 @@ Disk cleanup belongs to the fixture destructor, not `Cleanup()`: existing persis
 
 The deterministic partially-loaded fixed-package save failure establishes the package-isolation requirement. Passing fresh normal-GC queues establishes current candidate acceptance evidence, not the cause or resolution of the retained historical GC access violations.
 
+The delivery `ClosedOrphanComponent` fixture uses this same package-owner lifetime with its original asset leaf name. The earlier child-only randomized leaf and separate file-delete scope guard are removed; shared destruction owns exact file cleanup, including early assertion returns.
+
 Independent Python test cases represent independent authoring tasks. Reset the operation-schema correction budget at the shared pytest case boundary, not between calls within a case; preserve the production budget and the exhaustion contract. Live raw-TCP Level fixture/test requests use the advertised `spawn_actor.class_name` contract without changing the distinct `class` parameters of other Level operations. These are test-state and caller corrections only.
+
 ## 2026-10-01 review safety clarification
 
 A matching foreign generated-function call or delegate whose owner cannot be proved makes caller evidence incomplete. Missing call owners and absent, multiply linked or non-object delegate scopes refuse retirement before approval; unrelated names and proved unrelated owners remain non-callers.

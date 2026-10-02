@@ -341,7 +341,8 @@ TArray<FCortexCommandInfo> FCortexBPCommandHandler::GetSupportedCommands() const
 		.Optional(TEXT("remove_variables"), TEXT("array"), TEXT("Variables to remove"))
 		.Optional(TEXT("remove_functions"), TEXT("array"), TEXT("Functions to remove"))
 		.Optional(TEXT("migrated_overrides"), TEXT("array"), TEXT("Overrides already migrated"))
-		.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after cleanup")));
+		.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after cleanup (default true)"))
+		.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the whole package, including pre-existing dirty edits (default true); false stages changes in memory. Compiler errors prevent saving.")));
 	Commands.Add(FCortexCommandInfo{TEXT("remove_scs_component"), TEXT("Remove an SCS component node from a Blueprint (use after migrating to C++ UPROPERTY)")}
 		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
 		.Required(TEXT("component_name"), TEXT("string"), TEXT("SCS component node name"))

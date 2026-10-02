@@ -43,6 +43,10 @@ FCortexCommandResult FCortexUMGCommandHandler::Execute(
     {
         return FCortexUMGWidgetTreeOps::AddWidget(Params);
     }
+    if (Command == TEXT("rename_widget"))
+    {
+        return FCortexUMGWidgetTreeOps::RenameWidget(Params);
+    }
     if (Command == TEXT("remove_widget"))
     {
         return FCortexUMGWidgetTreeOps::RemoveWidget(Params);
@@ -169,6 +173,11 @@ TArray<FCortexCommandInfo> FCortexUMGCommandHandler::GetSupportedCommands() cons
         FCortexCommandInfo{ TEXT("get_widget"), TEXT("Get single widget details") }
             .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
             .Required(TEXT("widget_name"), TEXT("string"), TEXT("Widget to inspect")),
+        FCortexCommandInfo{ TEXT("rename_widget"), TEXT("Guarded Unreal widget rename with structural/skeleton refresh; no explicit full compile or save") }
+            .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
+            .Required(TEXT("widget_name"), TEXT("string"), TEXT("Exact current widget name"))
+            .Required(TEXT("new_name"), TEXT("string"), TEXT("Literal identifier; no silent sanitizing or case-only rename"))
+            .Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Complete current UMG tree fingerprint, including compiled_signature_crc")),
         FCortexCommandInfo{ TEXT("set_widget_variable"), TEXT("Set whether a designer widget becomes a Blueprint variable") }
             .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
             .Required(TEXT("widget_name"), TEXT("string"), TEXT("Widget to modify"))

@@ -286,6 +286,18 @@ FCortexCommandResult FCortexBPCleanupOps::CleanupMigration(const TSharedPtr<FJso
 	{
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
 	}
+	bool bCompile = true;
+	bool bSave = true;
+	for (const TCHAR* Field : { TEXT("compile"), TEXT("save") })
+	{
+		if (Params->HasField(Field) && !Params->HasTypedField<EJson::Boolean>(Field))
+		{
+			return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+				FString::Printf(TEXT("%s must be a boolean"), Field));
+		}
+	}
+	Params->TryGetBoolField(TEXT("compile"), bCompile);
+	Params->TryGetBoolField(TEXT("save"), bSave);
 
 	FString LoadError;
 	UBlueprint* BP = FCortexBPAssetOps::LoadBlueprint(AssetPath, LoadError);
@@ -293,8 +305,6 @@ FCortexCommandResult FCortexBPCleanupOps::CleanupMigration(const TSharedPtr<FJso
 	{
 		return FCortexCommandRouter::Error(CortexErrorCodes::BlueprintNotFound, LoadError);
 	}
-
-	const bool bCompile = Params->HasField(TEXT("compile")) ? Params->GetBoolField(TEXT("compile")) : true;
 
 	TSharedPtr<FJsonObject> ResponseData = MakeShared<FJsonObject>();
 	TArray<TSharedPtr<FJsonValue>> Warnings;
@@ -435,6 +445,8 @@ FCortexCommandResult FCortexBPCleanupOps::CleanupMigration(const TSharedPtr<FJso
 		}
 	}
 	ResponseData->SetArrayField(TEXT("removed_functions"), RemovedFuncs);
+	ResponseData->SetArrayField(TEXT("warnings"), Warnings);
+	ResponseData->SetBoolField(TEXT("saved"), false);
 
 	// --- Finalize ---
 	// Note: BP->Modify() is omitted here — RemoveMemberVariable and RemoveGraph
@@ -451,10 +463,20 @@ FCortexCommandResult FCortexBPCleanupOps::CleanupMigration(const TSharedPtr<FJso
 	else
 	{
 		ResponseData->SetBoolField(TEXT("compiled"), false);
+		ResponseData->SetStringField(TEXT("compile_status"), TEXT("NotCompiled"));
+	}
+	ResponseData->SetBoolField(TEXT("is_dirty"), BP->GetPackage()->IsDirty());
+	const bool bCompileFailed = bCompile && BP->Status != BS_UpToDate && BP->Status != BS_UpToDateWithWarnings;
+	if (bCompileFailed || (bSave && BP->Status == BS_Error))
+	{
+		FCortexCommandResult Failure = FCortexCommandRouter::Error(CortexErrorCodes::CompileFailed,
+			TEXT("Cleanup left a Blueprint with compiler errors; the package was not saved"));
+		Failure.ErrorDetails = ResponseData;
+		return Failure;
 	}
 
 	// Persist to disk (skip transient packages used by tests)
-	if (!BP->GetPackage()->GetName().StartsWith(TEXT("/Engine/Transient")))
+	if (bSave && !BP->GetPackage()->GetName().StartsWith(TEXT("/Engine/Transient")))
 	{
 		FString PackageFilename;
 		if (FPackageName::TryConvertLongPackageNameToFilename(
@@ -465,20 +487,26 @@ FCortexCommandResult FCortexBPCleanupOps::CleanupMigration(const TSharedPtr<FJso
 			const bool bSaved = UPackage::SavePackage(BP->GetPackage(), BP, *PackageFilename, SaveArgs);
 			if (!bSaved)
 			{
-				return FCortexCommandRouter::Error(
+				ResponseData->SetBoolField(TEXT("is_dirty"), BP->GetPackage()->IsDirty());
+				FCortexCommandResult Failure = FCortexCommandRouter::Error(
 					CortexErrorCodes::SaveFailed,
 					FString::Printf(TEXT("Failed to save cleaned Blueprint package: %s"), *BP->GetPackage()->GetName()));
+				Failure.ErrorDetails = ResponseData;
+				return Failure;
 			}
+			ResponseData->SetBoolField(TEXT("saved"), true);
 		}
 		else
 		{
-			return FCortexCommandRouter::Error(
+			FCortexCommandResult Failure = FCortexCommandRouter::Error(
 				CortexErrorCodes::SaveFailed,
 				FString::Printf(TEXT("Failed to resolve package filename for: %s"), *BP->GetPackage()->GetName()));
+			Failure.ErrorDetails = ResponseData;
+			return Failure;
 		}
 	}
 
-	ResponseData->SetArrayField(TEXT("warnings"), Warnings);
+	ResponseData->SetBoolField(TEXT("is_dirty"), BP->GetPackage()->IsDirty());
 
 	UE_LOG(LogCortexBlueprint, Log, TEXT("Cleanup migration: %s — reparented=%d, removed %d vars, %d funcs"),
 		*BP->GetName(), bReparented, RemovedVars.Num(), RemovedFuncs.Num());

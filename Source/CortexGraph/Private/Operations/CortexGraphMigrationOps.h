@@ -295,6 +295,9 @@ struct FCortexGraphMigrationRetirePlan
 	TArray<FString> AdditionalNodeGuids;
 	/** Class-specific admission of every requested additional node, ordered by node GUID. */
 	TArray<FCortexGraphMigrationRetireAdditionalNode> AdditionalNodes;
+	/** Explicit, closed orphan inventory; never inferred from selected entry reachability. */
+	TArray<FString> OrphanComponentNodeGuids;
+	TArray<FCortexGraphMigrationRetireAdditionalNode> OrphanComponentNodes;
 	/**
 	 * True when an approved removal leaves a compiled artefact behind: an event node registers a
 	 * dynamic component delegate binding, a custom event compiles into a callable generated function,

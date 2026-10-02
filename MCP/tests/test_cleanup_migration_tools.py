@@ -49,7 +49,7 @@ def test_no_overrides_passes_compile_flag_directly():
 
     connection.send_command.assert_called_once_with(
         "blueprint.cleanup_migration",
-        {"asset_path": "/Game/BP_Test", "compile": True},
+        {"asset_path": "/Game/BP_Test", "compile": True, "save": True},
     )
 
 
@@ -81,6 +81,7 @@ def test_known_override_defers_compile_in_cleanup_migration():
         if c.args[0] == "blueprint.cleanup_migration"
     )
     assert cleanup_call.args[1]["compile"] is False
+    assert cleanup_call.args[1]["save"] is False
 
 
 def test_known_override_calls_list_nodes():
@@ -166,7 +167,7 @@ def test_known_override_calls_delete_orphaned_nodes():
 
     connection.send_command.assert_any_call(
         "blueprint.delete_orphaned_nodes",
-        {"asset_path": "/Game/BP_Test", "graph_name": "EventGraph", "compile": True},
+        {"asset_path": "/Game/BP_Test", "graph_name": "EventGraph", "compile": False},
     )
 
 
@@ -266,8 +267,8 @@ def test_unknown_override_still_compiles():
     )
 
     connection.send_command.assert_any_call(
-        "blueprint.compile",
-        {"asset_path": "/Game/BP_Test"},
+        "blueprint.cleanup_migration",
+        {"asset_path": "/Game/BP_Test", "compile": True, "save": True},
     )
 
 
@@ -291,8 +292,8 @@ def test_no_matching_node_still_compiles():
     )
 
     connection.send_command.assert_any_call(
-        "blueprint.compile",
-        {"asset_path": "/Game/BP_Test"},
+        "blueprint.cleanup_migration",
+        {"asset_path": "/Game/BP_Test", "compile": True, "save": True},
     )
 
 
@@ -526,4 +527,55 @@ def test_malformed_node_missing_node_id_is_skipped():
 
     calls = [c.args[0] for c in connection.send_command.call_args_list]
     assert "graph.remove_node" not in calls
+
+
+def test_save_false_is_forwarded_independently_of_compile():
+    mcp, connection = _setup()
+    connection.send_command.return_value = {"data": {"saved": False, "is_dirty": True}}
+    result = json.loads(mcp.tools["cleanup_blueprint_migration"](
+        asset_path="/Game/BP_Test", compile=True, save=False,
+    ))
+    connection.send_command.assert_called_once_with("blueprint.cleanup_migration", {
+        "asset_path": "/Game/BP_Test", "compile": True, "save": False,
+    })
+    assert result["saved"] is False and result["is_dirty"] is True
+
+
+def test_invalid_compile_or_save_flag_never_sends_command():
+    for flags in ({"save": "false"}, {"save": 0}, {"compile": None}):
+        mcp, connection = _setup()
+        result = json.loads(mcp.tools["cleanup_blueprint_migration"](
+            asset_path="/Game/BP_Test", **flags,
+        ))
+        assert "error" in result
+        connection.send_command.assert_not_called()
+
+
+def test_composite_cleanup_reports_final_state_and_keeps_initial_inventory():
+    mcp, connection = _setup()
+    connection.send_command.side_effect = [
+        {"data": {"removed_variables": ["Health"], "saved": False, "is_dirty": True}},
+        {"data": {"saved": True, "is_dirty": False, "compiled": True,
+                  "compile_status": "UpToDate", "removed_variables": []}},
+    ]
+    result = json.loads(mcp.tools["cleanup_blueprint_migration"](
+        asset_path="/Game/BP_Test", migrated_overrides=["Unknown"],
+    ))
+    assert result["removed_variables"] == ["Health"]
+    assert result["saved"] is True and result["is_dirty"] is False
+    assert result["compiled"] is True and result["compile_status"] == "UpToDate"
+    assert connection.send_command.call_args_list[0].args[1]["save"] is False
+
+
+def test_composite_compile_failure_does_not_claim_saved_result():
+    mcp, connection = _setup()
+    connection.send_command.side_effect = [
+        {"data": {"saved": False, "is_dirty": True}},
+        RuntimeError("CompileFailed: package was not saved"),
+    ]
+    result = json.loads(mcp.tools["cleanup_blueprint_migration"](
+        asset_path="/Game/BP_Test", migrated_overrides=["Unknown"],
+    ))
+    assert "error" in result
+    assert "saved" not in result
 
