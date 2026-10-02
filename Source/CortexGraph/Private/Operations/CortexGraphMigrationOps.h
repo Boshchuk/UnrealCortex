@@ -366,6 +366,13 @@ struct FCortexGraphMigrationCallOutputPlan
 	FString ReplacementPinSignature;
 	/** Canonical capture of the call node's surviving pins, the stale orphan pin excluded. */
 	FString Pins;
+	/**
+	 * Canonical capture of all surviving links on the call node, excluding the replacement output
+	 * pin's reviewed edges (which are already verified by the edge comparison above).  The stale
+	 * orphan pin carries no surviving links and is also excluded.  Readback compares this so that
+	 * unrelated execution, input-producer, and other output links cannot be silently dropped.
+	 */
+	FString CallLinks;
 	TArray<FCortexGraphCallOutputEdge> Edges;
 	FCortexGraphTransferPreservation Preservation;
 	FString BlueprintStatusBefore;
