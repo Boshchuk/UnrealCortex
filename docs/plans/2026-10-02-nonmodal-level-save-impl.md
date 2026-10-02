@@ -3,7 +3,8 @@
 1. Add `Cortex.Level.Streaming.SaveLevel.NeverSaved` before changing production
    behavior. Verify the old command returns the wrong error without blocking.
 2. Add `CortexErrorCodes::LevelNotSaved`. Guard the persistent package and editor
-   filename in `SaveLevel`, then scope unattended-script mode to the engine save.
+   filename in `SaveLevel`, then use native non-dialog `SavePackages` with scoped
+   unattended-script mode. Avoid `SaveLevel`'s dialog-enabled save output.
 3. Preserve the existing saved-map response. Change the existing save tests'
    exclusive-write probe to append mode so it does not truncate map content.
 4. Build and run rendering-enabled native Level automation, inspect raw logs,

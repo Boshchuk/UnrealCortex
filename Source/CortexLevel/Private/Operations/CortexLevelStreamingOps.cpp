@@ -374,9 +374,10 @@ FCortexCommandResult FCortexLevelStreamingOps::SaveLevel(const TSharedPtr<FJsonO
                  "or use level.create_level with an explicit path to create a new saved map."));
     }
 
-    // Save failures must return to the MCP caller without interactive dialogs.
+    // SavePackages uses the engine's non-dialog save path, including map data
+    // and external actor packages. Keep error reporting unattended as well.
     TGuardValue<bool> SuppressDialogs(GIsRunningUnattendedScript, true);
-    const bool bSaved = FEditorFileUtils::SaveLevel(PersistentLevel);
+    const bool bSaved = UEditorLoadingAndSavingUtils::SavePackages({Package}, /*bOnlyDirty*/false);
     if (!bSaved)
     {
         return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation, TEXT("Failed to save current level"));
