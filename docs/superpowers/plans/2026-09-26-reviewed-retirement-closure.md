@@ -76,9 +76,65 @@
 
 Check each spec section against Tasks 1-3: fixed-point ownership (1), optional class-specific selection and existing journal/save (2), complete approval and MCP bounds (3), with no new general deletion operation. Check old behavior when `additional_node_guids` is absent and distinct save-failure states. The user authorized subagent-driven implementation after plan review; plugin implementation proceeds only after resolving material reviewer findings, and Ripper asset mutation remains gated by the fresh real-page preview.
 
+## Fixture-isolation acceptance correction (2026-10-01)
+
+The prerequisite retains the original 30 commits ending at `fac9f808e9963a017dd6e47d2dfff3ef79b1c97e`; these commits are not attributed to RIP-48. The acceptance correction is limited to:
+
+- `Source/CortexGraph/Private/Tests/CortexGraphTestContentRoot.h`
+- `Source/CortexGraph/Private/Tests/CortexGraphMigrationRetireTest.cpp`
+- `Source/CortexGraph/Private/Tests/CortexGraphMigrationRewireTest.cpp`
+- `MCP/tests/conftest.py`
+- `MCP/tests/test_graph_authoring_contract.py`
+- `MCP/tests/test_operation_schema.py`
+- `MCP/tests/test_umg_animation_bindings.py`
+- `MCP/tests/test_level_e2e.py` (separately authorized test-only caller migration)
+
+Use a full-GUID package directory per fixture while preserving the asset leaf name. Capture ownership through explicit unload and remove only owned disk output at final destruction. Preserve the existing mid-test unload/reload semantics; remove obsolete fixed-path predeletes, duplicated end-of-test deletion and incidental file-cleanup assertions. No production operation, additional GC invocation or global editor teardown is introduced.
+
+Observed in `CortexSandboxMirror` on UE 5.8.3:
+
+- Isolation-only diagnostic processor: `Saved/Logs/RIP48-baseline-graph-debug-gc-20261001.log`, verified `gc.ForceEnableGCProcessor=true`, 312/312 Success, completed queue/status 0, no warnings/errors/fatals. Diagnostic only.
+- Isolation-only normal processor: `Saved/Logs/RIP48-baseline-graph-normal-gc-isolated-20261001.log`, 312/312 Success, completed queue/status 0, no warnings/errors/fatals.
+- Final ownership cleanup: native build succeeded (11 actions, 43.66 seconds); `Saved/Logs/RIP48-baseline-graph-owned-fixtures-final-20261001.log`, fresh normal processor, 312/312 Success, completed queue/status 0, no warnings/errors/fatals. All 50 GUID directories observed in this log were absent afterward.
+- Focused cleanup/retirement/rewire Python contracts: 47 passed. Non-live MCP suite: 930 passed, 265 deselected. Registered live retirement plus response-boundary checks: 23 passed, including both routes under asyncio and trio; native mirror PID 50652, port 8743, editor instance `AD3AE7FD47A4D99BA730E29AF80721C4`.
+
+The retained earlier GC access-violation dumps and wrapper-copy failure remain separate historical evidence. These fresh runs do not prove their root cause or claim a historical fix. A full MCP attempt was invalidated by a normal `QUIT_EDITOR` exit during the run and cancelled; it is not a passing full-suite gate.
+
+### Python task-state isolation and live persistence
+
+The first stable full MCP attempt stopped after 407 passes because independent pytest cases shared the operation-schema correction budget. One contract test consumed the first UMG correction, the asyncio scenario consumed the second, and the trio scenario received the intentional exhausted-budget response instead of a fresh-task policy response. A function-scoped autouse fixture now resets the budget before and after each test; the within-case exhaustion test remains intact. The ordered contract/live-adapter/budget/animation regression run passed all 37 cases. Production budget semantics are unchanged.
+
+The next full attempt stopped after 555 passes because existing raw-TCP Level tests used `class` for `level.spawn_actor`, whose live contract requires `class_name`. The operator authorized test-only caller migration. Update spawn requests in the Level E2E cases and shared actor fixture only; retain the valid `class` parameters for class description, component creation and actor filtering. The live Level suite passed 50 cases with its two existing skips. No native Level code or transport compatibility alias changes.
+
+The registered retirement persistence smoke used mirror PID 49904, port 8743, editor instance `CAD3BF344079E3E52349F895CB01968D`. It discovered the complete four-node removable set, reviewed that exact set, applied with one target compile and matched readback, explicitly saved, then reloaded without discarding changes. Removed GUIDs remained absent; the retained override/body/shared-producer GUIDs and execution/data edges survived reload. The saved hash matched after reload and the package was clean. The disposable asset was deleted through its declared ownership record. Raw calls and responses: `Saved/RIP48Validation/prerequisite-retirement-save-smoke.json`.
+
 ## 2026-10-01 follow-up safety regressions
 
 - Exercise matching foreign calls with unresolved owners and malformed delegate scopes; refuse approval without mutating the target.
 - Exercise empty and nonempty unrelated call-link baselines, missing/malformed prepared inventory, readback refusal and verified restoration.
 - After post-save verification failure, retain committed memory/disk and refuse a second public-route mutation; report the process-lifetime guard and Editor restart recovery.
 - See CortexSandbox docs/plans/2026-10-01-graph-retirement-review-fixes-design.md, its implementation guide and verification report for the follow-up evidence.
+
+### Intervening integration and complete pre-integration gate
+
+Remote readback found PR151 already merged at `86d45d2c4fb93b612e40a3ada036b6a56f6eb660`, including external safety corrections `93a8ee0d` and `8ef12cf2`; PR149 was closed without merging. Preserve those changes. The ten-path test correction was captured in `cfa43c27` and merged with actual upstream main in `7eaa8857ae10e5626c64a0658ecbca002754f9dd`. Earlier native queues and persistence smoke do not validate the externally updated production DLL.
+
+The complete 1,195-case pre-integration MCP run finished with 1,152 passed, two existing skips, seven failures and 34 setup errors (221.69 seconds). Setup errors all reported access denied to the Windows default `pytest-of-eugen` temporary root; use a fresh run-owned `--basetemp`, not permission changes or deletion of existing temporary artifacts. Failures were two remaining Level scenario spawn callers, two Graph stress pagination assertions, and three UMG live cases (status route, stale dirty fingerprint and invalid fixture compile). This is a failed full-suite gate, not an acceptance claim. Raw output: `Saved/RIP48Validation/prerequisite-full-mcp-pre-integration-20261002.log`.
+
+### Authorized complete-gate corrections (2026-10-02)
+
+The remaining direct Level scenario spawns now use canonical `level_cmd` envelopes; their unused legacy spawn adapter was removed. The actual Level/scenario/50-cycle lifecycle run passed 56 cases with two existing skips. Graph stress readback follows five-node cursor pages and checks every authored node identity rather than mistaking a 40,000-character truncated response for the complete graph. Both asyncio and trio stress cases passed.
+
+The operator also authorized the pre-existing native UMG animation-GUID correction. `remove_animation` removes only the found animation's GUID-map entry inside its existing transaction. Its new real compiled-Blueprint regression failed before the production correction with the retained deleted-GUID assertion and matching compiler ensure during redo; after the one-line correction, the full 65-case UMG queue passed with no warnings/errors/fatals. Raw RED and GREEN logs are `Saved/Logs/RIP48-remove-animation-variable-identity-red-20261002.log` and `Saved/Logs/RIP48-remove-animation-umg-green-20261002.log`.
+
+UMG live consumers now use the built-in status/capabilities routes and structured command exceptions. Rejection checks preserve the old token and verify no mutation. The duplicate and split fixtures perform actual compile/save/reload; whole-animation templates first remove only their obsolete playback consumer and retain sibling animations. Informational master-track presence is not a dangling binding, and persistence identity is compared after compilation/save rather than against a precompile token.
+
+The integrated prerequisite build succeeded (12 actions, 101.65 seconds). Its fresh normal-GC Graph queue completed 314/314 Success using `CortexGraph-0002.dll`: `Saved/Logs/RIP48-integrated-prerequisite-graph-normal-20261002.log`. That raw log also contains two pre-queue UE Dataflow struct-initialization error records; do not claim the whole log is error-free. The isolated-temp verification passed all 197 selected Python cases, including the earlier 34 temporary-root setup errors, without changing the default temporary root or its permissions. No Toolkit command/parameter/response contract changed.
+
+### Final follow-up candidate acceptance evidence
+
+Frozen source `70a588cec1da3778da253abf6ab4fef2eb4ddbe5` completed the full MCP run: 1,195 collected, 1,193 passed and two existing Level skips (DataLayer subsystem unavailable; pre-existing unattended `save_all` skip), 266.51 seconds. Raw output: `Saved/RIP48Validation/prerequisite-full-mcp-70a588ce-20261002.log`.
+
+Its fresh normal-GC `Cortex.Graph+` queue loaded `CortexGraph-0004.dll`, completed 314/314 Success, reached Queue Empty and exited with status zero; this final raw log contains no warnings/errors/fatals: `Saved/Logs/RIP48-prerequisite-70a588ce-graph-normal-20261002.log`. All 53 exact owned fixture directory candidates recovered from that run are absent after completion; no unrelated temporary files were deleted. Inventory: `Saved/RIP48Validation/prerequisite-70a588ce-owned-fixture-inventory.json`. This passes the current candidate gate without claiming a historical collector root-cause repair.
+
+The actual registered retirement smoke on the owned mirror Editor (PID 17208, port 8743, UE 5.8.3 build 58210709) passed reviewed exact retirement, one post-removal compile and matched readback, explicit save and actual clean reload. Retained node GUIDs/classes, execution/data edges and saved hash survived unchanged; the owned fixture was deleted. `Saved/RIP48Validation/retirement-persistence-70a588ce.json` records those calls, served operation schemas, status/capabilities and loaded Graph/UMG DLL SHA-256 identities. The throwaway runner was removed. All five UMG live cases also passed in the full gate, including owned split host/child/four-template compile/save/reload and sibling-animation retention. Independent native UMG, consumer and prerequisite source reviews found no actionable issues; final review binds the completed Graph queue separately.

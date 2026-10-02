@@ -87,6 +87,7 @@ enum class EFixtureSignature : uint8
 struct FFixture
 {
 	UPackage* Package = nullptr;
+	FString OwnedPackageName;
 	UWidgetBlueprint* Blueprint = nullptr;
 	UEdGraph* Graph = nullptr;
 	UK2Node_CallFunction* Call = nullptr;
@@ -157,8 +158,7 @@ struct FFixture
 	{
 		HistoricPinName = Signature == EFixtureSignature::SameNameInputParameter
 			? FName(SameNameHistoricPinName) : FName(StalePinName);
-		EnsureCortexGraphTestTempContentRoot();
-		Package = CreatePackage(*FString::Printf(TEXT("/Game/Temp/%s"), Name));
+		Package = CreateCortexGraphTestPackage(Name, OwnedPackageName);
 		Blueprint = Cast<UWidgetBlueprint>(FKismetEditorUtilities::CreateBlueprint(
 			UCortexGraphRewireFixtureWidget::StaticClass(), Package, FName(Name), BPTYPE_Normal,
 			UWidgetBlueprint::StaticClass(), UWidgetBlueprintGeneratedClass::StaticClass()));
@@ -357,6 +357,12 @@ struct FFixture
 		if (Blueprint) { Blueprint->ClearFlags(RF_Standalone); Blueprint->MarkAsGarbage(); Blueprint = nullptr; }
 		if (Package) { Package->ClearFlags(RF_Standalone); Package->MarkAsGarbage(); Package = nullptr; }
 		Graph = nullptr;
+	}
+
+	~FFixture()
+	{
+		DeleteCortexGraphTestPackageFile(Package, OwnedPackageName);
+		Cleanup();
 	}
 };
 
@@ -1717,7 +1723,6 @@ bool FCortexGraphMigrationRewireCompiledRepairTest::RunTest(const FString& Param
 	// The compiler-invalid fixture is persisted first: a non-persisting repair must leave the disk
 	// file byte-identical instead of only claiming it saved nothing.
 	const FString Filename = Fixture.Filename();
-	IFileManager::Get().Delete(*Filename, false, true, true);
 	TestTrue(TEXT("the compiler-invalid fixture is persisted as the disk baseline"), Fixture.SaveToDisk());
 	const TArray<uint8> DiskBefore = ReadBytes(Filename);
 	TestTrue(TEXT("the disk baseline really exists"), DiskBefore.Num() > 0);
@@ -1788,7 +1793,6 @@ bool FCortexGraphMigrationRewireCompiledRepairTest::RunTest(const FString& Param
 		SameBytes(DiskBefore, ReadBytes(Filename)));
 
 	Fixture.Cleanup();
-	IFileManager::Get().Delete(*Filename, false, true, true);
 	return true;
 }
 
@@ -1830,7 +1834,6 @@ bool FCortexGraphMigrationRewireSavedRepairTest::RunTest(const FString& Paramete
 	// A save=true apply requires a clean starting package, so the compiler-invalid fixture is persisted
 	// first: that file is the real baseline and the reviewed starting state.
 	const FString Filename = Fixture.Filename();
-	IFileManager::Get().Delete(*Filename, false, true, true);
 	TestTrue(TEXT("the compiler-invalid fixture is persisted as a clean starting package"), Fixture.SaveToDisk());
 	const TArray<uint8> DiskBefore = ReadBytes(Filename);
 	TestTrue(TEXT("the disk baseline really exists"), DiskBefore.Num() > 0);
@@ -1941,8 +1944,6 @@ bool FCortexGraphMigrationRewireSavedRepairTest::RunTest(const FString& Paramete
 	Fixture.Blueprint = nullptr;
 	FlushAsyncLoading();
 	CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
-	TestTrue(TEXT("the saved repair fixture file is removed"),
-		IFileManager::Get().Delete(*Filename, false, true, true));
 	return true;
 }
 

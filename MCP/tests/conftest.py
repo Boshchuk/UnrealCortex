@@ -13,6 +13,7 @@ import pytest
 
 from mcp.server.fastmcp import FastMCP
 from cortex_mcp.server import _register_explicit_tools
+from cortex_mcp.operation_schema import reset_operation_schema_budget
 from cortex_mcp.tcp_client import UEConnection
 from tools.level.composites import _build_level_batch_commands, _validate_level_batch_spec
 
@@ -28,6 +29,14 @@ for path in (_SRC_DIR, _TOOLS_DIR, _EDITOR_TOOLS_DIR):
     path_str = str(path)
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_operation_schema_budget():
+    """Each pytest case is an independent authoring task, including anyio backends."""
+    reset_operation_schema_budget()
+    yield
+    reset_operation_schema_budget()
 
 
 def _uniq(prefix: str) -> str:
@@ -53,7 +62,7 @@ def _normalize_data_args(command: str, args: dict) -> dict:
 
 def _normalize_level_args(command: str, args: dict) -> dict:
     normalized = dict(args)
-    if command in {"spawn_actor", "add_component", "describe_class"}:
+    if command in {"add_component", "describe_class"}:
         class_name = normalized.pop("class_name", None)
         if class_name and "class" not in normalized:
             normalized["class"] = class_name
@@ -217,7 +226,7 @@ def actors_for_test(tcp_connection, cleanup_actors):
     for key, spec in specs.items():
         resp = tcp_connection.send_command(
             "level.spawn_actor",
-            {"class": spec["class"], "label": spec["label"]},
+            {"class_name": spec["class"], "label": spec["label"]},
         )
         cleanup_actors.append(spec["label"])
         actors[key] = spec["label"]
@@ -284,7 +293,7 @@ def _map_tool_call(name: str, args: dict) -> tuple[str, dict]:
         return "data_cmd", {"command": name, "params": _normalize_data_args(name, args)}
 
     level_names = {
-        "list_actor_classes", "list_component_classes", "describe_class", "spawn_actor", "delete_actor",
+        "list_actor_classes", "list_component_classes", "describe_class", "delete_actor",
         "duplicate_actor", "rename_actor", "get_actor", "set_transform", "set_actor_property",
         "get_actor_property", "list_components", "add_component", "remove_component",
         "get_component_property", "set_component_property", "list_actors", "find_actors",

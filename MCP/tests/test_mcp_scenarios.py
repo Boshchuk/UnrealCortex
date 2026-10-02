@@ -646,18 +646,18 @@ async def test_scenario_level_scene(mcp_client):
 
         # Step 3: spawn PointLight
         light_label = _uniq("MCPScenario_light")
-        data = await call_tool(mcp_client, "spawn_actor", {
-            "class_name": "PointLight",
-            "label": light_label,
+        data = await call_tool(mcp_client, "level_cmd", {
+            "command": "spawn_actor",
+            "params": {"class_name": "PointLight", "label": light_label},
         })
         assert "name" in data
         light_name = data["name"]
 
         # Step 4: spawn StaticMeshActor
         mesh_label = _uniq("MCPScenario_mesh")
-        data = await call_tool(mcp_client, "spawn_actor", {
-            "class_name": "StaticMeshActor",
-            "label": mesh_label,
+        data = await call_tool(mcp_client, "level_cmd", {
+            "command": "spawn_actor",
+            "params": {"class_name": "StaticMeshActor", "label": mesh_label},
         })
         assert "name" in data
         mesh_name = data["name"]
@@ -912,11 +912,18 @@ async def test_stress_many_graph_nodes(mcp_client):
             except Exception:
                 break
 
-        data = await call_tool(mcp_client, "graph_get_subgraph", {
-            "asset_path": asset_path,
-            "graph_name": "EventGraph",
+        data = await call_tool(mcp_client, "graph_cmd", {
+            "command": "get_subgraph",
+            "params": {"asset_path": asset_path, "graph_name": "EventGraph", "limit": 5},
         })
-        assert len(data["nodes"]) >= 30
+        nodes = list(data["nodes"])
+        while data["_pagination"]["has_more"]:
+            data = await call_tool(mcp_client, "graph_cmd", {
+                "command": "get_subgraph",
+                "params": {"cursor": data["_pagination"]["next_cursor"]},
+            })
+            nodes.extend(data["nodes"])
+        assert set(node_ids) <= {node["node_id"] for node in nodes}
 
     finally:
         if asset_path:
@@ -1096,9 +1103,9 @@ async def test_stress_rapid_actor_lifecycle(mcp_client):
         for i in range(50):
             label = _uniq(f"MCPStress_actor_{i:03d}")
             try:
-                data = await call_tool(mcp_client, "spawn_actor", {
-                    "class_name": "PointLight",
-                    "label": label,
+                data = await call_tool(mcp_client, "level_cmd", {
+                    "command": "spawn_actor",
+                    "params": {"class_name": "PointLight", "label": label},
                 })
                 name = data.get("name", "")
                 spawned_not_deleted.append(name)
