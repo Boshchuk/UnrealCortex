@@ -148,6 +148,7 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::RemoveAnimation(
         FString::Printf(TEXT("Cortex: Remove Animation %s"), *AnimName)));
     WBP->Modify();
 
+    WBP->WidgetVariableNameToGuidMap.Remove(WBP->Animations[FoundIndex]->GetFName());
     WBP->Animations.RemoveAt(FoundIndex);
     FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
 
