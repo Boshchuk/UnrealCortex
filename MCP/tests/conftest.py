@@ -133,14 +133,13 @@ def _format_level_batch_response(batch_data: dict, total_steps: int) -> dict:
 
 @pytest.fixture(scope="session")
 def tcp_connection():
-    old_project_dir = os.environ.get("CORTEX_PROJECT_DIR")
-    os.environ["CORTEX_PROJECT_DIR"] = str(_PROJECT_ROOT)
-    conn = UEConnection()
-    conn.connect()
-    if old_project_dir is None:
-        os.environ.pop("CORTEX_PROJECT_DIR", None)
-    else:
-        os.environ["CORTEX_PROJECT_DIR"] = old_project_dir
+    # Use the workspace default only when the caller has not selected a project.
+    # Restore temporary discovery state even if construction or connection fails.
+    with pytest.MonkeyPatch.context() as discovery_env:
+        if "CORTEX_PROJECT_DIR" not in os.environ:
+            discovery_env.setenv("CORTEX_PROJECT_DIR", str(_PROJECT_ROOT))
+        conn = UEConnection()
+        conn.connect()
     try:
         yield conn
     finally:

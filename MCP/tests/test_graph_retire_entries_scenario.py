@@ -37,7 +37,7 @@ import uuid
 
 import pytest
 
-pytestmark = pytest.mark.scenario
+pytestmark = [pytest.mark.scenario, pytest.mark.e2e]
 
 LEGACY_PARENT = "/Script/CortexGraph.CortexGraphRetireLegacyWidget"
 TARGET_PARENT = "/Script/CortexGraph.CortexGraphRetireTargetWidget"

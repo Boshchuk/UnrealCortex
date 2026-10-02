@@ -24,7 +24,7 @@ import pytest
 from cortex_mcp.capabilities import load_capabilities_cache
 from cortex_mcp.operation_schema import build_profile_operation_schema
 
-pytestmark = pytest.mark.scenario
+pytestmark = [pytest.mark.scenario, pytest.mark.e2e]
 
 RUN_ROOT_PREFIX = "/Game/Temp/CortexGraphAuthoring_"
 
