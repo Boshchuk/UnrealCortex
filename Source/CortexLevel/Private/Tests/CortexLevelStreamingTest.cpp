@@ -4,9 +4,14 @@
 #include "Editor.h"
 #include "Engine/World.h"
 #include "FileHelpers.h"
+#include "HAL/FileManager.h"
 #include "HAL/PlatformFileManager.h"
+#include "Misc/Guid.h"
 #include "Misc/PackageName.h"
+#include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
 #include "UObject/Package.h"
+#include "UObject/SavePackage.h"
 
 namespace
 {
@@ -97,17 +102,49 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexLevelSaveLevelTest::RunTest(const FString& Parameters)
 {
-    FCortexCommandRouter Router = CreateLevelRouterStreaming();
-
-    FString LevelFilename;
-    if (TryGetCurrentLevelFilename(Router, LevelFilename) && !CanOpenForExclusiveWrite(LevelFilename))
+    if (!TestNotNull(TEXT("Editor is available"), GEditor))
     {
-        AddInfo(FString::Printf(TEXT("Skipping save_level: map file is locked by another process (%s)"), *LevelFilename));
-        return true;
+        return false;
     }
 
+    const FString PackagePath = TEXT("/Game/Temp/CortexLevelSave_") + FGuid::NewGuid().ToString(EGuidFormats::Digits) + TEXT("/Map");
+    const FString Filename = FPackageName::LongPackageNameToFilename(PackagePath, FPackageName::GetMapPackageExtension());
+    UPackage* Package = CreatePackage(*PackagePath);
+    UWorld* TestWorld = UWorld::CreateWorld(EWorldType::Editor, false, TEXT("Map"), Package);
+    if (!TestNotNull(TEXT("Saved-map fixture created"), TestWorld))
+    {
+        Package->MarkAsGarbage();
+        return false;
+    }
+
+    UWorld* OriginalWorld = GEditor->GetEditorWorldContext().World();
+    ON_SCOPE_EXIT
+    {
+        GEditor->GetEditorWorldContext().SetCurrentWorld(OriginalWorld);
+        Package->SetDirtyFlag(false);
+        TestWorld->DestroyWorld(false);
+        TestWorld->MarkAsGarbage();
+        Package->MarkAsGarbage();
+        IFileManager::Get().Delete(*Filename, false, true);
+        IFileManager::Get().DeleteDirectory(*FPaths::GetPath(Filename), false, false);
+    };
+
+    TestWorld->SetFlags(RF_Standalone);
+    IFileManager::Get().MakeDirectory(*FPaths::GetPath(Filename), true);
+    FSavePackageArgs SaveArgs;
+    SaveArgs.TopLevelFlags = RF_Standalone;
+    if (!TestTrue(TEXT("Fixture has an existing map file"), UPackage::SavePackage(Package, TestWorld, *Filename, SaveArgs)))
+    {
+        return false;
+    }
+
+    GEditor->GetEditorWorldContext().SetCurrentWorld(TestWorld);
+    Package->SetDirtyFlag(true);
+    FCortexCommandRouter Router = CreateLevelRouterStreaming();
     FCortexCommandResult Result = Router.Execute(TEXT("level.save_level"), MakeShared<FJsonObject>());
     TestTrue(TEXT("save_level should succeed"), Result.bSuccess);
+    TestFalse(TEXT("Saved package is no longer dirty"), Package->IsDirty());
+    TestTrue(TEXT("Map file remains nonempty"), IFileManager::Get().FileSize(*Filename) > 0);
 
     if (Result.bSuccess && Result.Data.IsValid())
     {
@@ -149,7 +186,7 @@ bool FCortexLevelSaveAllTest::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FCortexLevelSaveNeverSavedTest,
-    "Cortex.Level.Streaming.SaveLevel.NeverSaved",
+    "Cortex.Level.Streaming.SaveNeverSavedLevel",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
