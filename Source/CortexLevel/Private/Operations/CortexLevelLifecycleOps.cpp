@@ -244,7 +244,16 @@ FCortexCommandResult FCortexLevelLifecycleOps::CreateLevel(const TSharedPtr<FJso
 			SaveArgs.TopLevelFlags = RF_Standalone;
 			const bool bSaved = UPackage::SavePackage(DestPackage, NewWorld, *FilePath, SaveArgs);
 
-			NewWorld->DestroyWorld(false);
+			// Loaded template duplicates have no initialized world resources to tear down.
+			if (NewWorld->IsInitialized())
+			{
+				NewWorld->DestroyWorld(false);
+			}
+			else
+			{
+				NewWorld->RemoveFromRoot();
+				NewWorld->ClearFlags(RF_Standalone);
+			}
 
 			if (!bSaved)
 			{
