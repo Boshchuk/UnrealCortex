@@ -14,6 +14,10 @@
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include <bcrypt.h>
 #include "Windows/HideWindowsPlatformTypes.h"
+#elif CORTEX_SHA256_OPENSSL
+THIRD_PARTY_INCLUDES_START
+#include <openssl/sha.h>
+THIRD_PARTY_INCLUDES_END
 #endif
 
 namespace
@@ -592,6 +596,23 @@ bool FCortexSafeFileContract::HashFileBytesSha256(
 	for (const uint8 Byte : Digest)
 	{
 		OutHash += FString::Printf(TEXT("%02x"), static_cast<int32>(Byte));
+	}
+	return true;
+#elif CORTEX_SHA256_OPENSSL
+	uint8 Digest[SHA256_DIGEST_LENGTH];
+	if (SHA256(Bytes.GetData(), static_cast<size_t>(Bytes.Num()), Digest) == nullptr)
+	{
+		OutErrorCode = CortexErrorCodes::InvalidOperation;
+		OutErrorMessage = FString::Printf(TEXT("Failed to hash file: %s"), *VerifiedPath.AbsolutePath);
+		return false;
+	}
+
+	OutHash.Reset(static_cast<int32>(sizeof(Digest)) * 2);
+	constexpr TCHAR HexDigits[] = TEXT("0123456789abcdef");
+	for (const uint8 Byte : Digest)
+	{
+		OutHash.AppendChar(HexDigits[Byte >> 4]);
+		OutHash.AppendChar(HexDigits[Byte & 0x0f]);
 	}
 	return true;
 #else
