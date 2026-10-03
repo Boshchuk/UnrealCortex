@@ -606,7 +606,7 @@ bool FCortexLevelDuplicateLevelTest::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexLevelRenameLevelTest,
-	"Cortex.Level.Lifecycle.RenameLevel",
+	"Cortex.Level.Lifecycle.RenameLevel.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
@@ -708,7 +708,7 @@ bool FCortexLevelRenameLevelInUseTest::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexLevelDeleteLevelTest,
-	"Cortex.Level.Lifecycle.DeleteLevel",
+	"Cortex.Level.Lifecycle.DeleteLevel.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
