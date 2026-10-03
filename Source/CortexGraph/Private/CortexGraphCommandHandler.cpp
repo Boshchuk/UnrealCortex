@@ -179,7 +179,7 @@ TSharedPtr<FJsonObject> MakePatchResultJson(
 	// consumer edge set, so the caller approves the exact rewired edges from the response.
 	if (Outcome.RewireInventory.IsValid())
 	{
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Outcome.RewireInventory->Values)
+		for (const auto& Pair : Outcome.RewireInventory->Values)
 		{
 			Data->SetField(Pair.Key, Pair.Value);
 		}

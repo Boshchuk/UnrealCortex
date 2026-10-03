@@ -9025,7 +9025,7 @@ void CountJsonNumbers(const TSharedPtr<FJsonValue>& Value, int32& InOutCount)
 		for (const TSharedPtr<FJsonValue>& Element : Value->AsArray()) CountJsonNumbers(Element, InOutCount);
 		break;
 	case EJson::Object:
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Value->AsObject()->Values) CountJsonNumbers(Pair.Value, InOutCount);
+		for (const auto& Pair : Value->AsObject()->Values) CountJsonNumbers(Pair.Value, InOutCount);
 		break;
 	default:
 		break;
@@ -9053,7 +9053,7 @@ bool FCortexGraphMigrationOps::EncodedResponseChars(const TSharedPtr<FJsonObject
 	// credited with those two characters; a non-integral number is written by the engine long enough
 	// (17 significant digits) that the allowance only ever adds headroom.
 	int32 NumberCount = 0;
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Object->Values)
+	for (const auto& Pair : Object->Values)
 	{
 		CountJsonNumbers(Pair.Value, NumberCount);
 	}
