@@ -5,6 +5,14 @@
 #include "Materials/Material.h"
 #include "MaterialDomain.h"
 #include "Materials/MaterialInstanceConstant.h"
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "HAL/FileManager.h"
+#include "Misc/PackageName.h"
+#include "Misc/Paths.h"
+#include "Modules/ModuleManager.h"
+#include "UObject/Package.h"
+#include "UObject/UObjectGlobals.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexMaterialCreateTest,
@@ -431,6 +439,146 @@ bool FCortexMaterialGetNotFoundTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+namespace
+{
+	/**
+	 * Drives the DeleteMaterial.Basic fixture across engine frames.
+	 *
+	 * create_material saves the package to disk, so the content-directory watcher queues an
+	 * add/modify event for the new .uasset. Deleting the material in the same tick destroys the
+	 * package before that event is processed, and the AssetRegistry then warns that the package
+	 * "was marked as deleted in editor, but has been modified on disk". Each phase below yields
+	 * one engine frame so the queued watcher event is consumed before the destructive step, and
+	 * pending registry gather is drained before deletion.
+	 */
+	class FDeleteMaterialFixtureCommand : public IAutomationLatentCommand
+	{
+	public:
+		FDeleteMaterialFixtureCommand(FAutomationTestBase* InTest, FString InAssetPath)
+			: Test(InTest)
+			, AssetPath(MoveTemp(InAssetPath))
+			, AssetDir(FPaths::GetPath(AssetPath))
+			, AssetName(FPaths::GetCleanFilename(AssetPath))
+		{
+		}
+
+		virtual bool Update() override
+		{
+			switch (Phase)
+			{
+			case 0:
+			{
+				TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+				Params->SetStringField(TEXT("asset_path"), AssetDir);
+				Params->SetStringField(TEXT("name"), AssetName);
+				const FCortexCommandResult Created = Handler.Execute(TEXT("create_material"), Params);
+				bCreated = Test->TestTrue(
+					FString::Printf(TEXT("create_material should succeed: %s"), *Created.ErrorMessage),
+					Created.bSuccess);
+				if (bCreated && Created.Data.IsValid())
+				{
+					Test->TestEqual(TEXT("create asset_path should match"),
+						Created.Data->GetStringField(TEXT("asset_path")), AssetPath);
+					bool bCreatedFlag = false;
+					Created.Data->TryGetBoolField(TEXT("created"), bCreatedFlag);
+					Test->TestTrue(TEXT("created should be true"), bCreatedFlag);
+				}
+				break;
+			}
+			case 1:
+			{
+				if (bCreated)
+				{
+					// The saved .uasset's add event was consumed by the watcher tick that ran during
+					// the frame yielded by phase 0; drain the gather before deleting the package.
+					IAssetRegistry& AssetRegistry =
+						FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+					AssetRegistry.WaitForCompletion();
+					FlushAsyncLoading();
+					AssetRegistry.Tick(-1.0f);
+
+					TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+					Params->SetStringField(TEXT("asset_path"), AssetPath);
+					const FCortexCommandResult Deleted = Handler.Execute(TEXT("delete_material"), Params);
+					bDeleted = Test->TestTrue(
+						FString::Printf(TEXT("delete_material should succeed: %s"), *Deleted.ErrorMessage),
+						Deleted.bSuccess);
+					if (bDeleted && Deleted.Data.IsValid())
+					{
+						Test->TestEqual(TEXT("delete asset_path should match"),
+							Deleted.Data->GetStringField(TEXT("asset_path")), AssetPath);
+						bool bDeletedFlag = false;
+						Deleted.Data->TryGetBoolField(TEXT("deleted"), bDeletedFlag);
+						Test->TestTrue(TEXT("deleted should be true"), bDeletedFlag);
+					}
+				}
+				break;
+			}
+			case 2:
+			{
+				if (bDeleted)
+				{
+					const FString PackageFile = FPackageName::LongPackageNameToFilename(
+						AssetPath, FPackageName::GetAssetPackageExtension());
+					Test->TestFalse(TEXT("Material .uasset should be removed from disk"),
+						IFileManager::Get().FileExists(*PackageFile));
+
+					IAssetRegistry& AssetRegistry =
+						FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+					AssetRegistry.WaitForCompletion();
+					FlushAsyncLoading();
+					AssetRegistry.Tick(-1.0f);
+					TArray<FAssetData> Remaining;
+					AssetRegistry.GetAssetsByPackageName(FName(*AssetPath), Remaining);
+					Test->TestEqual(TEXT("Material should be gone from the AssetRegistry"), Remaining.Num(), 0);
+				}
+				break;
+			}
+			case 3:
+			{
+				// Retire only this fixture's own object, package, and file.
+				const FString PackageFile = FPackageName::LongPackageNameToFilename(
+					AssetPath, FPackageName::GetAssetPackageExtension());
+				if (UPackage* Package = FindPackage(nullptr, *AssetPath))
+				{
+					if (UObject* Asset = FindObject<UObject>(Package, *AssetName))
+					{
+						FAssetRegistryModule::AssetDeleted(Asset);
+						Asset->ClearFlags(RF_Public | RF_Standalone);
+						Asset->MarkAsGarbage();
+					}
+					Package->SetDirtyFlag(false);
+					Package->MarkAsGarbage();
+				}
+				IFileManager::Get().Delete(*PackageFile, false, true);
+				break;
+			}
+			case 4:
+			{
+				// Yield one frame before removing this fixture's own directory so no deferred
+				// filesystem event still targets it.
+				const FString TestDir = FPackageName::LongPackageNameToFilename(AssetDir + TEXT("/"));
+				IFileManager::Get().DeleteDirectory(*TestDir, false, false);
+				return true;
+			}
+			}
+
+			++Phase;
+			return false;
+		}
+
+	private:
+		FAutomationTestBase* Test;
+		FString AssetPath;
+		FString AssetDir;
+		FString AssetName;
+		FCortexMaterialCommandHandler Handler;
+		int32 Phase = 0;
+		bool bCreated = false;
+		bool bDeleted = false;
+	};
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexMaterialDeleteTest,
 	"Cortex.Material.Asset.DeleteMaterial.Basic",
@@ -444,28 +592,7 @@ bool FCortexMaterialDeleteTest::RunTest(const FString& Parameters)
 	const FString MatDir = FString::Printf(TEXT("/Game/Temp/CortexMatTest_Del_%s"), *Suffix);
 	const FString MatPath = FString::Printf(TEXT("%s/%s"), *MatDir, *MatName);
 
-	FCortexMaterialCommandHandler Handler;
-
-	// Create
-	TSharedPtr<FJsonObject> CreateParams = MakeShared<FJsonObject>();
-	CreateParams->SetStringField(TEXT("asset_path"), MatDir);
-	CreateParams->SetStringField(TEXT("name"), MatName);
-	Handler.Execute(TEXT("create_material"), CreateParams);
-
-	// Delete
-	TSharedPtr<FJsonObject> DeleteParams = MakeShared<FJsonObject>();
-	DeleteParams->SetStringField(TEXT("asset_path"), MatPath);
-	FCortexCommandResult Result = Handler.Execute(TEXT("delete_material"), DeleteParams);
-
-	TestTrue(TEXT("delete_material should succeed"), Result.bSuccess);
-
-	if (Result.Data.IsValid())
-	{
-		bool bDeleted = false;
-		Result.Data->TryGetBoolField(TEXT("deleted"), bDeleted);
-		TestTrue(TEXT("deleted should be true"), bDeleted);
-	}
-
+	ADD_LATENT_AUTOMATION_COMMAND(FDeleteMaterialFixtureCommand(this, MatPath));
 	return true;
 }
 
