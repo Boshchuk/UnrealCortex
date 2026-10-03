@@ -152,7 +152,7 @@ TSharedPtr<FJsonObject> MakePatchResultJson(
 	// the removal set) with the compact result, so no caller has to read the durable plan.
 	if (Outcome.TransferInventory.IsValid())
 	{
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Outcome.TransferInventory->Values)
+		for (const auto& Pair : Outcome.TransferInventory->Values)
 		{
 			Data->SetField(Pair.Key, Pair.Value);
 		}
@@ -162,7 +162,7 @@ TSharedPtr<FJsonObject> MakePatchResultJson(
 	// response, never from a private plan.
 	if (Outcome.PruneInventory.IsValid())
 	{
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Outcome.PruneInventory->Values)
+		for (const auto& Pair : Outcome.PruneInventory->Values)
 		{
 			Data->SetField(Pair.Key, Pair.Value);
 		}
@@ -170,7 +170,7 @@ TSharedPtr<FJsonObject> MakePatchResultJson(
 	// Retirement publishes the selected entries, approval set and safety partitions as one bounded inventory.
 	if (Outcome.RetirementInventory.IsValid())
 	{
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Outcome.RetirementInventory->Values)
+		for (const auto& Pair : Outcome.RetirementInventory->Values)
 		{
 			Data->SetField(Pair.Key, Pair.Value);
 		}

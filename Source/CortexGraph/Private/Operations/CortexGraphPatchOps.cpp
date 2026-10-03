@@ -3684,9 +3684,9 @@ bool ComparePlannedDefaults(
 	{
 		return true;
 	}
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*DefaultsPtr)->Values)
+	for (const auto& Pair : (*DefaultsPtr)->Values)
 	{
-		const FString PinName = Pair.Key;
+		const FString PinName = CortexEngineCompat::JsonKeyToString(Pair.Key);
 		const TSharedPtr<FJsonObject> Literal = Pair.Value.IsValid() ? Pair.Value->AsObject() : nullptr;
 		UEdGraphPin* Pin = Live ? Live->FindPin(FName(*PinName)) : nullptr;
 		FString Expected;
@@ -5119,9 +5119,9 @@ bool ApplyPrepared(
 		const TSharedPtr<FJsonObject>* DefaultsPtr = nullptr;
 		if (NodeJson->TryGetObjectField(TEXT("defaults"), DefaultsPtr) && DefaultsPtr && DefaultsPtr->IsValid())
 		{
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*DefaultsPtr)->Values)
+			for (const auto& Pair : (*DefaultsPtr)->Values)
 			{
-				UEdGraphPin* Pin = Node->FindPin(FName(*Pair.Key));
+				UEdGraphPin* Pin = Node->FindPin(FName(*CortexEngineCompat::JsonKeyToString(Pair.Key)));
 				const TSharedPtr<FJsonObject> Literal = Pair.Value->AsObject();
 				if (!Pin || !Literal.IsValid()) return Fail(TEXT("Prepared node default no longer resolves"));
 				FCortexCommandResult DefaultError;
