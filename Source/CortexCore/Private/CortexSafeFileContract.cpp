@@ -608,9 +608,11 @@ bool FCortexSafeFileContract::HashFileBytesSha256(
 	}
 
 	OutHash.Reset(static_cast<int32>(sizeof(Digest)) * 2);
+	constexpr TCHAR HexDigits[] = TEXT("0123456789abcdef");
 	for (const uint8 Byte : Digest)
 	{
-		OutHash += FString::Printf(TEXT("%02x"), static_cast<int32>(Byte));
+		OutHash.AppendChar(HexDigits[Byte >> 4]);
+		OutHash.AppendChar(HexDigits[Byte & 0x0f]);
 	}
 	return true;
 #else

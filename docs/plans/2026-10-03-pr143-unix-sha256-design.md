@@ -8,7 +8,7 @@ The engine's OpenSSL build rules select Unix headers/libraries with the same `Un
 
 ## Candidate
 
-Sequential local branch `maintainer/pr143-unix-sha256` is based on the verified PR #142 candidate `026b89f`, not remote main. Preserve contributor commit history through a merge. Increment plugin version 16 / 0.3.4 to 17 / 0.3.5. Keep both branches local; do not publish on the start-working instruction.
+Initial branch `maintainer/pr143-unix-sha256` is based on the verified PR #142 candidate `026b89f`. Final publication branch `maintainer/pr143-final` preserves the same contributor merge and restored maintainer correction. Increment plugin version 16 / 0.3.4 to 17 / 0.3.5. The initial start-working instruction kept candidates local; subsequent explicit authorization selects merge and closure of both PRs, with native Linux review/testing requested in #143's comment.
 
 ## Implementation decision
 
