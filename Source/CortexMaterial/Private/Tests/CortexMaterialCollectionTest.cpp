@@ -49,7 +49,7 @@ bool FCortexMaterialCreateCollectionTest::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexMaterialGetCollectionTest,
-	"Cortex.Material.Collection.GetCollection",
+	"Cortex.Material.Collection.GetCollection.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
