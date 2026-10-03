@@ -128,9 +128,9 @@ Every mutation wrapped in `FScopedTransaction`. Large responses auto-truncate wi
 
 **PIE lifecycle:** Start, stop, pause, resume, and restart Play-In-Editor sessions.
 
-**Viewport:** Get and set camera position/rotation, capture screenshots, switch render modes.
+**Viewport:** Get and set editor-client camera position/rotation, capture the active viewport with explicit source/provenance, and switch render modes (including Lit + MeshEdges wire overlay). Possessed PIE rejects editor-camera movement by default; `allow_during_pie: true` changes only the transient editor client, not the game camera. Game captures do not invent camera poses; ejected/SIE editor views remain controllable.
 
-**Input injection:** Press keys, run multi-step input sequences with configurable timing.
+**Input injection:** Press keys or inject typed Enhanced Input values using canonical `action_name` and a scalar or `{x,y,z}`. Single-shot and timed sequences share validation. `inject_input_continuous` supports immediate start/update/stop and deferred positive `duration_ms` starts. Ownership follows the actual subsystem/action pair; stop, PIE teardown, owner destruction, and any client disconnect cancel Cortex-owned runs. Ownership is session-wide, not per-client isolation; game-managed injection is not stopped by an unowned Cortex stop, and already queued input may drain afterward.
 
 **Editor management:** Execute console commands. Adjust time dilation. Shutdown/restart editor.
 
