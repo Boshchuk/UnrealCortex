@@ -63,8 +63,8 @@ TestTrue(TEXT("New body has requested separation"), New.X >= Fixed.X + A.Width +
 - [x] Declare already-supported options using adjacent native command parameter patterns. Update generated/fallback surface with authoritative tooling, not duplicated routers. Verify live schema returns these options and caller can invoke incremental/spacing through MCP.
 - [x] Run applicable Python checks and actual routed smoke. Final Python stages:1205 passed/2 existing fixture skips; benchmark12 passed/1 no-reference fixture skip with actual visuals. Toolkit PR64 and CortexSandbox docs-only PR115 publish approved synchronization; parent gitlinks/content/cdb excluded.
 - [x] Independent whole-candidate review against the acceptance matrix; fix supported consequential findings and refresh affected evidence. Round3 has no remaining findings; all corrected native tests and fresh real MCP first-reload proof pass.
-- [ ] Commit scoped candidate normally; publish PR linked to #164. Verify remote head/base/checks, merge with full expected-head protection, confirm merge SHA and issue state. Do not close issue until all acceptance rows are proven.
-- [ ] Fast-forward affected default branches only safely; retain task branches if normal deletion refuses. Report exact reviewed/tested/merged revisions, reporter credit, limitations and preserved parent dirtiness.
+- [x] Commit scoped candidate normally; publish PR linked to #164. PR165 head308831de8aadd4511f82049c87d7ac76019d1e93 merged with full expected-head protection as1bc54a240160c679feedced6b034a35e260e7766; issue164 closed only after all acceptance rows passed. ToolkitPR64 and CortexSandboxPR115 also merged.
+- [x] Fast-forward affected default branches only safely; normal branches, no reset/clean/stash/worktrees. All three defaults fast-forwarded to confirmed merges; pre-existing parent gitlinks/cdb and observed content/map dirtiness preserved. Post-merge Source/MCP diff is empty, source/DLL SHA256s match tested identity, and actual root/child/incremental layouts plus real stdio MCP report unchanged.
 
 ## Plan self-review
 
