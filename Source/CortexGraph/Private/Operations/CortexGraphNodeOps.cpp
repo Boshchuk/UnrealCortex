@@ -53,6 +53,8 @@
 #include "Engine/LevelScriptBlueprint.h"
 #include "UObject/SavePackage.h"
 #include "UObject/UObjectIterator.h"
+#include "NodeFactory.h"
+#include "SGraphNode.h"
 
 namespace
 {
@@ -2274,6 +2276,11 @@ FCortexCommandResult FCortexGraphNodeOps::AutoLayout(const TSharedPtr<FJsonObjec
 
 	FString SubgraphPath;
 	Params->TryGetStringField(TEXT("subgraph_path"), SubgraphPath);
+	if (!SubgraphPath.IsEmpty() && GraphFilter.IsEmpty())
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+			TEXT("subgraph_path requires graph_name"));
+	}
 
 	// Collect graphs to process
 	TArray<UEdGraph*> Graphs;
@@ -2311,13 +2318,9 @@ FCortexCommandResult FCortexGraphNodeOps::AutoLayout(const TSharedPtr<FJsonObjec
 	}
 
 	int32 TotalNodesProcessed = 0;
+	int32 ChangedNodeCount = 0;
 
 	TUniquePtr<FScopedTransaction> Transaction;
-	if (!FCortexCommandRouter::IsInBatch())
-	{
-		Transaction = MakeUnique<FScopedTransaction>(
-			FText::FromString(TEXT("Cortex: Auto-Layout Blueprint Graphs")));
-	}
 
 	for (UEdGraph* Graph : Graphs)
 	{
@@ -2340,8 +2343,6 @@ FCortexCommandResult FCortexGraphNodeOps::AutoLayout(const TSharedPtr<FJsonObjec
 
 			bool bHasExecInput = false;
 			bool bHasExecOutput = false;
-			int32 InputPinCount = 0;
-			int32 OutputPinCount = 0;
 
 			for (UEdGraphPin* Pin : Node->Pins)
 			{
@@ -2349,21 +2350,26 @@ FCortexCommandResult FCortexGraphNodeOps::AutoLayout(const TSharedPtr<FJsonObjec
 				bool bIsExec = (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec);
 				if (Pin->Direction == EGPD_Input)
 				{
-					InputPinCount++;
 					if (bIsExec) bHasExecInput = true;
 				}
 				else
 				{
-					OutputPinCount++;
 					if (bIsExec) bHasExecOutput = true;
 				}
 			}
 
 			LN.bIsEntryPoint = (!bHasExecInput && bHasExecOutput);
 			LN.bIsExecNode = (bHasExecInput || bHasExecOutput);
-			int32 PinRows = FMath::Max(InputPinCount, OutputPinCount);
-			LN.Width = 200;
-			LN.Height = FMath::Max(100, PinRows * 28 + 40);
+			const TSharedPtr<SGraphNode> Widget = FNodeFactory::CreateNodeWidget(Node);
+			if (!Widget.IsValid())
+			{
+				return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+					FString::Printf(TEXT("Cannot measure graph node: %s"), *Node->GetName()));
+			}
+			Widget->SlatePrepass(1.0f);
+			const FVector2D BodySize = Widget->GetDesiredSize();
+			LN.Width = FMath::Max(1, FMath::CeilToInt(BodySize.X));
+			LN.Height = FMath::Max(1, FMath::CeilToInt(BodySize.Y));
 
 			for (UEdGraphPin* Pin : Node->Pins)
 			{
@@ -2399,18 +2405,32 @@ FCortexCommandResult FCortexGraphNodeOps::AutoLayout(const TSharedPtr<FJsonObjec
 		FCortexLayoutResult LayoutResult = FCortexGraphLayoutOps::CalculateLayout(
 			LayoutNodes, Config, ExistingPositions);
 
+		bool bGraphChanged = false;
 		for (const auto& Pair : LayoutResult.Positions)
 		{
 			UEdGraphNode** NodePtr = IdToNode.Find(Pair.Key);
-			if (NodePtr && *NodePtr)
+			if (NodePtr && *NodePtr &&
+				((*NodePtr)->NodePosX != Pair.Value.X || (*NodePtr)->NodePosY != Pair.Value.Y))
 			{
+				if (!bGraphChanged)
+				{
+					if (!Transaction && !FCortexCommandRouter::IsInBatch())
+					{
+						Transaction = MakeUnique<FScopedTransaction>(
+							FText::FromString(TEXT("Cortex: Auto-Layout Blueprint Graphs")));
+					}
+					Blueprint->Modify();
+					Graph->Modify();
+					bGraphChanged = true;
+				}
 				(*NodePtr)->Modify();
 				(*NodePtr)->NodePosX = Pair.Value.X;
 				(*NodePtr)->NodePosY = Pair.Value.Y;
+				++ChangedNodeCount;
 			}
 		}
 
-		if (FCortexCommandRouter::IsInBatch())
+		if (bGraphChanged && FCortexCommandRouter::IsInBatch())
 		{
 			FString GraphKey = FString::Printf(TEXT("graph.notify.%s"), *Graph->GetPathName());
 			FCortexBatchScope::AddCleanupAction(GraphKey,
@@ -2419,7 +2439,7 @@ FCortexCommandResult FCortexGraphNodeOps::AutoLayout(const TSharedPtr<FJsonObjec
 					if (UEdGraph* G = WeakGraph.Get()) G->NotifyGraphChanged();
 				});
 		}
-		else
+		else if (bGraphChanged)
 		{
 			Graph->NotifyGraphChanged();
 		}
@@ -2427,28 +2447,33 @@ FCortexCommandResult FCortexGraphNodeOps::AutoLayout(const TSharedPtr<FJsonObjec
 		TotalNodesProcessed += LayoutResult.Positions.Num();
 	}
 
-	if (FCortexCommandRouter::IsInBatch())
+	if (ChangedNodeCount > 0)
 	{
-		FString BPKey = FString::Printf(TEXT("blueprint.modified.%s"), *Blueprint->GetPathName());
-		FCortexBatchScope::AddCleanupAction(BPKey,
-			[WeakBP = TWeakObjectPtr<UBlueprint>(Blueprint)]()
-			{
-				if (UBlueprint* BP = WeakBP.Get())
+		if (FCortexCommandRouter::IsInBatch())
+		{
+			FString BPKey = FString::Printf(TEXT("blueprint.modified.%s"), *Blueprint->GetPathName());
+			FCortexBatchScope::AddCleanupAction(BPKey,
+				[WeakBP = TWeakObjectPtr<UBlueprint>(Blueprint)]()
 				{
-					FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
-				}
-			});
+					if (UBlueprint* BP = WeakBP.Get())
+					{
+						FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
+					}
+				});
+		}
+		else
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+		}
+		Blueprint->MarkPackageDirty();
 	}
-	else
-	{
-		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
-	}
-	Blueprint->MarkPackageDirty();
 
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetStringField(TEXT("asset_path"), AssetPath);
 	Data->SetNumberField(TEXT("node_count"), TotalNodesProcessed);
 	Data->SetNumberField(TEXT("graphs_processed"), Graphs.Num());
+	Data->SetNumberField(TEXT("changed_node_count"), ChangedNodeCount);
+	Data->SetBoolField(TEXT("unchanged"), ChangedNodeCount == 0);
 
 	UE_LOG(LogCortexGraph, Log, TEXT("Auto-layout completed: %d nodes across %d graphs in %s"),
 		TotalNodesProcessed, Graphs.Num(), *AssetPath);
