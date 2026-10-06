@@ -133,3 +133,12 @@ Every original issue criterion is mapped in Task1/Task3; expanded authoring and 
 - [x] Simplicity first — existing read surfaces/router, one private native owner, narrow response handling, no generic CRUD/schema framework.
 - [x] Surgical changes — exact binding behavior, required integration/docs/tests; unrelated user work preserved.
 - [ ] Goal-driven execution — plan only; all red/green/runtime/review/integration evidence remains pending.
+
+## Implementation observations
+
+- Engine UWidgetBlueprint::GetRelevantSettings selects UUMGEditorProjectSettings; policy tests configure the effective settings, not the base settings CDO.
+- Whole-array identity uses engine OpenSSL SHA256 through a private UMG dependency. Generic FPlatformMisc SHA256 is not implemented on this installed Windows engine; the existing Core safe-file helper hashes files only.
+- Blueprint fingerprints include compiled_signature_crc when available. Required native guard fields use exact JSON types before comparison; Unreal JSON convenience getters otherwise coerce numbers/booleans and can admit a destructive clear.
+- Validate native NAME_SIZE bounds before any name conversion or mutation-guard path lookup. The setter owns this ordering; the domain dispatcher enters it before the generic guard. Raw orphan ObjectName strings remain fully inspectable through the existing exact string widget lookup.
+- Native readback compares full serialized records before notification. Explicit compile/reload can normalize source-path owner classes; lifecycle assertions compare retained records to the current compiled/saved baseline, not an earlier pre-compile representation.
+- No-op/refused requests must not consume an undo step. The undo regression places both after a real clear and verifies one undo restores the complete original array.

@@ -3,6 +3,7 @@
 #include "Operations/CortexUMGWidgetTreeOps.h"
 #include "Operations/CortexUMGWidgetPropertyOps.h"
 #include "Operations/CortexUMGWidgetAnimationOps.h"
+#include "Operations/CortexUMGPropertyBindingOps.h"
 #include "CortexAssetMutationGuard.h"
 #include "Engine/Blueprint.h"
 
@@ -29,6 +30,11 @@ FCortexCommandResult FCortexUMGCommandHandler::Execute(
     FDeferredResponseCallback DeferredCallback)
 {
     (void)DeferredCallback;
+    // This setter validates native name bounds before resolving its own mutation guard.
+    if (Command == TEXT("set_property_binding"))
+    {
+        return FCortexUMGPropertyBindingOps::SetPropertyBinding(Params);
+    }
 
     const bool bReadOnly = Command == TEXT("get_tree") || Command == TEXT("get_widget")
         || Command == TEXT("list_widget_classes") || Command == TEXT("get_property")
@@ -169,10 +175,18 @@ TArray<FCortexCommandInfo> FCortexUMGCommandHandler::GetSupportedCommands() cons
             .Required(TEXT("new_parent"), TEXT("string"), TEXT("Destination parent widget"))
             .Optional(TEXT("slot_index"), TEXT("number"), TEXT("Insertion index within the new parent")),
         FCortexCommandInfo{ TEXT("get_tree"), TEXT("Get full widget hierarchy") }
-            .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path")),
+            .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
+            .Optional(TEXT("include_property_bindings"), TEXT("boolean"), TEXT("Read complete serialized Designer bindings including orphan targets and guard fingerprint")),
         FCortexCommandInfo{ TEXT("get_widget"), TEXT("Get single widget details") }
             .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
-            .Required(TEXT("widget_name"), TEXT("string"), TEXT("Widget to inspect")),
+            .Required(TEXT("widget_name"), TEXT("string"), TEXT("Widget to inspect"))
+            .Optional(TEXT("include_property_bindings"), TEXT("boolean"), TEXT("Read serialized Designer bindings for this widget with whole-asset guard fingerprint")),
+        FCortexCommandInfo{ TEXT("set_property_binding"), TEXT("Create/replace a Designer attribute binding, or clear with explicit null; no compile or save") }
+            .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
+            .Required(TEXT("widget_name"), TEXT("string"), TEXT("Exact Designer widget name"))
+            .Required(TEXT("property_name"), TEXT("string"), TEXT("Bindable attribute property"))
+            .Required(TEXT("binding"), TEXT("any"), TEXT("Required object {kind:property,source_path:[names]} or {kind:function,function_name:name}; explicit null clears. Empty/omitted refuses."))
+            .Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Complete serialized binding fingerprint from opted-in get_tree/get_widget")),
         FCortexCommandInfo{ TEXT("rename_widget"), TEXT("Guarded Unreal widget rename with structural/skeleton refresh; no explicit full compile or save") }
             .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
             .Required(TEXT("widget_name"), TEXT("string"), TEXT("Exact current widget name"))
