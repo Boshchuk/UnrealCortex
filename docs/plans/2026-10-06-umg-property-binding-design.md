@@ -36,7 +36,7 @@ When true, add a property_binding_state object:
 - fingerprint: package fingerprint plus versioned deterministic domain signature over the complete asset-level binding array, preserving record order and every serialized source identity field. Both reads return the same asset guard, even when get_widget filters records.
 - diagnostics: unresolved sources/targets remain visible. get_tree includes records targeting missing widgets, including bindings when the Designer tree is empty.
 
-Do not paginate initially. No artificial binding count limit; transport truncation must mark binding data incomplete and direct callers to retry an appropriate smaller read rather than silently fabricate completeness. An oversized asset-wide response cannot be presented as fully inspected. Fingerprint and outcome metadata must remain intact.
+Do not paginate initially. No artificial native binding count limit. Oversized MCP inspection returns an explicit RESPONSE_TOO_LARGE refusal preserving fingerprint, counts, and reader_complete=false; do not claim a complete empty list. Widget-scoped retry is suggested only for existing widget targets; oversized orphan inspection has an honest terminal size refusal, not an impossible retry promise. Reject presence of limit, offset, or cursor on binding writes and opted-in binding reads (including explicit null) before generic MCP pagination interception.
 
 Use one internal reader for both reads, mutation preflight, fingerprinting, and readback. Public binding fields are read directly. For private reflected path-segment fields, use typed native Unreal property metadata with exact field/type validation, read-only. No offset assumptions, access casts, Python protection bypass, or generated-class-only approximation. Missing expected metadata fails closed. Serialized field names and types must be checked against supported engine contracts before claiming compatibility.
 
@@ -47,7 +47,7 @@ Required params: asset_path, widget_name, property_name, binding (object or expl
 - Omitted binding, empty object, strings, arrays, and malformed fields return INVALID_FIELD before mutation.
 - binding=null clears an existing exact target. A valid widget with no record returns changed=false and serialized absence. Missing widget returns WIDGET_NOT_FOUND; do not silently clear arbitrary orphan targets.
 - binding object supports kind=property with an ordered source_path of member names, or kind=function with function_name. Sources are self-context members of the Widget Blueprint and nested reflected property chains. Do not accept raw serialized struct addresses or arbitrary owner-object mutation.
-- Creation validates the target bindable property/delegate, the complete source chain, and Unreal binding compatibility before mutation. Function binding must reference a compatible existing function; no function graph creation. Constructors/native validation populate canonical source identities/GUIDs.
+- Creation validates an attribute property and its PropertyNameDelegate, never an event-delegate fallback. Walk source names from self through reflected object/struct property types; reject unsupported intermediate shapes rather than flattening names against self. Use native terminal compatibility validation and explicitly require pure/const functions. Refuse non-null authoring when ArePropertyBindingsAllowed() is false; null clearing remains permitted. Construct a fresh FDelegateEditorBinding for replacement, initialize all kind-dependent fields, and leave no legacy SourceProperty on function records. Resolve an existing function graph GUID when available; no graph creation.
 - Zero matching records creates; one replaces; more than one returns PROPERTY_BINDING_AMBIGUOUS without mutation. No occurrence/index override to bypass ambiguity.
 - expected_fingerprint is mandatory. Missing/malformed guard refuses; mismatches return STALE_PRECONDITION and current fingerprint. Unsaved changes to any binding invalidate an earlier guard. Run mutation-block guards before side effects.
 - Identical canonical binding is a no-op (changed=false). Equality must cover every serialized field, not FDelegateEditorBinding::operator==.
@@ -58,7 +58,7 @@ Response: asset_path, widget_name, property_name, changed, before_binding (objec
 
 All UObject reads/writes occur on Game Thread through existing command routing. Validate all input, source/target compatibility, duplicates, reader availability, and fingerprint before opening the transaction or marking dirty.
 
-Use one FScopedTransaction and WBP->Modify(). Change only the selected Bindings entry (or append a new record), mark Blueprint modified without implicit structural compilation, and read back. Preserve unrelated order. No widget defaults are cleared; Designer extension callbacks are outside this serialized contract. A readback failure restores the original binding array and dirty state, cancels the transaction, and reports failure; failed restoration uses existing mutation-block policy rather than pretending success.
+Use one FScopedTransaction and WBP->Modify(). Change only the selected Bindings entry (or append a new record), then verify serialized post-state before modification notification. Preserve unrelated order. No widget defaults are cleared; Designer extension callbacks are outside this serialized contract. A readback failure restores the original binding array and dirty state, cancels the transaction, and reports failure; failed restoration uses existing mutation-block policy rather than pretending success. After successful readback, call MarkBlueprintAsModified (not MarkBlueprintAsStructurallyModified, which compiles the skeleton). Notification is the success boundary; perform no fallible identity validation afterward. Capture verified post-state for response and refresh its package fingerprint after notification.
 
 Explicit blueprint.compile and core asset save operations remain responsible for lifecycle. Tests must establish that the supported binding mutations survive explicit compilation and save/reload without relying on compiler sanitization to remove a stale source. No implicit dependent saves/reloads.
 
@@ -93,3 +93,15 @@ Synchronize affected toolkit documentation/capabilities through cortex-sync-tool
 - [x] Simplicity first — existing umg_cmd and opt-in reads; one coherent domain setter, no new tool/list/remove surface.
 - [x] Surgical changes — CortexUMG binding owner plus required contracts/docs; no literal property behavior changes or unrelated cleanup.
 - [ ] Goal-driven execution — design only; build, runtime, persistence, and integration evidence still required.
+
+## Elicitation Findings
+
+### Failure Mode Analysis (2026-10-06)
+
+**Engine Architect findings:** Native modification notifications alter compile status/caches; verify before notification. Native path validation does not establish adjacent-owner connectivity or attribute function purity; walk reflected types and enforce purity. Honor ArePropertyBindingsAllowed for authoring while retaining null repair. Fresh replacement records prevent legacy SourceProperty from changing a function binding during compile.
+
+**AI Coding Expert findings:** Nested binding arrays require an explicit size-refusal envelope preserving fingerprint and false completeness; get_widget cannot recover orphan-target records. Binding operations must reject pagination fields before generic MCP cursor interception.
+
+**Cross-domain risks:** Immediate serialized success is not lifecycle proof: compile can reinterpret stale kind-dependent fields. Generic response/cursor handling can falsely represent inspection or mutation without native execution.
+
+**Resolution:** Accepted by user. Remedies incorporated into read, write, and transaction contracts. Add regression coverage for legacy property-to-function replacement, impure/incompatible sources, disabled binding policy, oversized orphan read, and cursor-bearing mutation.
