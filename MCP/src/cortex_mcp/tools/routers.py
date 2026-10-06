@@ -240,6 +240,22 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
                     tool_name="graph_cmd",
                 )
 
+            # Property-binding reads/writes must never be interpreted as cached pagination.
+            property_binding_write = domain == "umg" and command == "set_property_binding"
+            property_binding_read = (
+                domain == "umg"
+                and command in {"get_tree", "get_widget"}
+                and route_params.get("include_property_bindings") is True
+            )
+            if property_binding_write or property_binding_read:
+                if any(key in route_params for key in ("limit", "cursor", "offset")):
+                    return json.dumps({
+                        "_error": "INVALID_FIELD",
+                        "_message": "Pagination fields are unsupported for property binding operations.",
+                    })
+                response = connection.send_command(qualified, route_params)
+                return format_response(response.get("data", {}), f"{domain}_cmd")
+
             # UMG animation binding inspection and guarded removal
             if domain == "umg" and command in {"remove_animation_binding", "list_animation_bindings"}:
                 if command == "remove_animation_binding":
