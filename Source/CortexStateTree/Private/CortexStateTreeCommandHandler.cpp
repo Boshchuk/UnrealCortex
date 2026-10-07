@@ -112,7 +112,11 @@ TArray<FCortexCommandInfo> FCortexStateTreeCommandHandler::GetSupportedCommands(
 		FCortexCommandInfo{ TEXT("dump_tree"), TEXT("Serialize a StateTree") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path"))
 			.Optional(TEXT("include_transitions"), TEXT("boolean"), TEXT("Include transitions"))
-			.Optional(TEXT("include_nodes"), TEXT("boolean"), TEXT("Include read-only node metadata")),
+			.Optional(TEXT("include_nodes"), TEXT("boolean"), TEXT("Include read-only node metadata"))
+			.Optional(TEXT("inspect_instances"), TEXT("boolean"), TEXT("Opt-in stored editor instance inspection; no compile/save. For MCP use named sections with inspect_count=1 to avoid oversized responses."))
+			.Optional(TEXT("inspect_section"), TEXT("string"), TEXT("Opt-in page section: root, states, nodes or bindings; all sections required for complete capture"))
+			.Optional(TEXT("inspect_offset"), TEXT("number"), TEXT("Zero-based section offset, default 0"))
+			.Optional(TEXT("inspect_count"), TEXT("number"), TEXT("Section entry count 1..100, default 1; total/returned_count/has_more explicit")),
 		FCortexCommandInfo{ TEXT("get_state"), TEXT("Get one StateTree state") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path"))
 			.Optional(TEXT("state_id"), TEXT("string"), TEXT("State GUID"))
