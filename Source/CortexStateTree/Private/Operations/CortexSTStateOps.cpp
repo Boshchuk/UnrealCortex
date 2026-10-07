@@ -122,12 +122,20 @@ bool TryParseEnumValue(
 
 void CollectAllStates(const FCortexSTAssetContext& Context, TArray<FCortexSTStateRef>& OutStates)
 {
-	if (Context.EditorData == nullptr || Context.EditorData->SubTrees.Num() == 0 || Context.EditorData->SubTrees[0] == nullptr)
+	if (Context.EditorData == nullptr || Context.EditorData->SubTrees.Num() == 0)
 	{
 		return;
 	}
 
-	CortexST::CollectStates(Context.EditorData->SubTrees[0], OutStates);
+	// A StateTree asset may declare more than one subtree root. Selectors must be able to
+	// address a state in any of them, not only the first root.
+	for (UStateTreeState* SubTreeRoot : Context.EditorData->SubTrees)
+	{
+		if (SubTreeRoot != nullptr)
+		{
+			CortexST::CollectStates(SubTreeRoot, OutStates);
+		}
+	}
 }
 
 bool ResolveStateBySelector(
