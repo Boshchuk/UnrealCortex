@@ -2027,3 +2027,266 @@ bool FCortexSTStoredInspectFixtureOwnershipTest::RunTest(const FString& Paramete
 	}
 	return true;
 }
+
+// A definition-invalid single task can still own real native storage: inline
+// instance data, an instance object and (5.7+) execution runtime struct/object.
+// The paged nodes section must expose each such body exactly like the unpaged
+// state single_task and count its slot, while a truly empty single task (real
+// identity, no body) must stay absent. This pins the SingleTask paging predicate
+// to actual stored bodies instead of definition validity.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexSTStoredInspectDefinitionlessSingleTaskTest,
+	"Cortex.StateTree.StoredInspect.Paging.DefinitionlessSingleTaskBodies",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexSTStoredInspectDefinitionlessSingleTaskTest::RunTest(const FString& Parameters)
+{
+	FFixture Fixture;
+	if (!Fixture.Initialize(*this)) { return false; }
+	const auto NodeId = [](uint32 Marker)
+	{
+		return FGuid(0xF1234567U, 0x89ABCDEFU, 0xFEDCBA98U, Marker);
+	};
+	// Every single task starts with an invalid definition and no stored body so
+	// that each lone case observes exactly one body kind.
+	const auto ClearSingleTask = [](FStateTreeEditorNode& Node)
+	{
+		Node.Node.Reset();
+		Node.Instance.Reset();
+		Node.InstanceObject = nullptr;
+#if !UE_VERSION_OLDER_THAN(5, 7, 0)
+		Node.ExecutionRuntimeData.Reset();
+		Node.ExecutionRuntimeDataObject = nullptr;
+#endif
+	};
+	// All-body case: keep the builder's inline instance and add a real editor
+	// owned instance object plus (5.7+) execution runtime struct/object while the
+	// definition stays invalid.
+	FStateTreeEditorNode& Single = Fixture.Root->SingleTask;
+	Single.Node.Reset();
+	Single.InstanceObject = NewObject<UStateTreeState>(Fixture.Context.EditorData);
+#if !UE_VERSION_OLDER_THAN(5, 7, 0)
+	Single.ExecutionRuntimeData.InitializeAs<FCortexSTStoredInspectSamples>();
+	Single.ExecutionRuntimeDataObject = NewObject<UStateTreeState>(Fixture.Context.EditorData);
+#endif
+	// Lone-body cases: one state per storage slot kind, definition invalid.
+	UStateTreeState& InstanceOnly = Fixture.LaterRoot->AddChildState(TEXT("InstanceOnly"));
+	ClearSingleTask(InstanceOnly.SingleTask);
+	InstanceOnly.SingleTask.ID = NodeId(311);
+	InstanceOnly.SingleTask.Instance.InitializeAs<FCortexSTStoredInspectInstance>();
+	const int32 InstanceOnlyMarker = 311;
+	InstanceOnly.SingleTask.Instance.GetMutable<FCortexSTStoredInspectInstance>().Marker = InstanceOnlyMarker;
+	UStateTreeState& ObjectOnly = Fixture.LaterRoot->AddChildState(TEXT("ObjectOnly"));
+	ClearSingleTask(ObjectOnly.SingleTask);
+	ObjectOnly.SingleTask.ID = NodeId(312);
+	UStateTreeState* const ObjectPayload = NewObject<UStateTreeState>(Fixture.Context.EditorData);
+	ObjectOnly.SingleTask.InstanceObject = ObjectPayload;
+#if !UE_VERSION_OLDER_THAN(5, 7, 0)
+	UStateTreeState& RuntimeStructOnly = Fixture.LaterRoot->AddChildState(TEXT("RuntimeStructOnly"));
+	ClearSingleTask(RuntimeStructOnly.SingleTask);
+	RuntimeStructOnly.SingleTask.ID = NodeId(313);
+	RuntimeStructOnly.SingleTask.ExecutionRuntimeData.InitializeAs<FCortexSTStoredInspectSamples>();
+	UStateTreeState& RuntimeObjectOnly = Fixture.LaterRoot->AddChildState(TEXT("RuntimeObjectOnly"));
+	ClearSingleTask(RuntimeObjectOnly.SingleTask);
+	RuntimeObjectOnly.SingleTask.ID = NodeId(314);
+	UStateTreeState* const RuntimePayload = NewObject<UStateTreeState>(Fixture.Context.EditorData);
+	RuntimeObjectOnly.SingleTask.ExecutionRuntimeDataObject = RuntimePayload;
+#endif
+	// A single task with an explicit identity but no stored body is not a slot.
+	const FGuid EmptyId = NodeId(303);
+	Fixture.LaterRoot->SingleTask.ID = EmptyId;
+
+	const FStateTreeEditorNode* Native = Fixture.FindNativeNode(Single.ID);
+	if (!TestNotNull(TEXT("all-body single task stays in native storage"), Native)) { return false; }
+	const FCortexSTStoredInspectInstance* NativeInstance = Native->Instance.GetPtr<FCortexSTStoredInspectInstance>();
+	TestFalse(TEXT("all-body single task definition is actually invalid"), Native->Node.IsValid());
+	TestTrue(TEXT("all-body single task still holds a real stored body"), StoredNodeBody(*Native));
+	if (!TestNotNull(TEXT("all-body single task keeps its inline instance data"), NativeInstance)) { return false; }
+	TestTrue(TEXT("all-body single task still owns its instance object"), Native->InstanceObject != nullptr);
+#if !UE_VERSION_OLDER_THAN(5, 7, 0)
+	TestTrue(TEXT("all-body single task still holds execution runtime data"), Native->ExecutionRuntimeData.IsValid());
+	TestTrue(TEXT("all-body single task still owns its execution runtime object"), Native->ExecutionRuntimeDataObject != nullptr);
+#endif
+	TestFalse(TEXT("empty single task has no stored body"), StoredNodeBody(Fixture.LaterRoot->SingleTask));
+	TestTrue(TEXT("instance-only single task stores exactly one instance body"),
+		StoredNodeBody(InstanceOnly.SingleTask) && !InstanceOnly.SingleTask.Node.IsValid()
+		&& InstanceOnly.SingleTask.Instance.IsValid() && InstanceOnly.SingleTask.InstanceObject == nullptr);
+	TestTrue(TEXT("object-only single task stores exactly one object body"),
+		StoredNodeBody(ObjectOnly.SingleTask) && !ObjectOnly.SingleTask.Node.IsValid()
+		&& !ObjectOnly.SingleTask.Instance.IsValid() && ObjectOnly.SingleTask.InstanceObject != nullptr);
+#if !UE_VERSION_OLDER_THAN(5, 7, 0)
+	TestTrue(TEXT("runtime-struct-only single task stores exactly one runtime struct body"),
+		StoredNodeBody(RuntimeStructOnly.SingleTask) && !RuntimeStructOnly.SingleTask.Node.IsValid()
+		&& !RuntimeStructOnly.SingleTask.Instance.IsValid() && RuntimeStructOnly.SingleTask.InstanceObject == nullptr
+		&& RuntimeStructOnly.SingleTask.ExecutionRuntimeData.IsValid()
+		&& RuntimeStructOnly.SingleTask.ExecutionRuntimeDataObject == nullptr);
+	TestTrue(TEXT("runtime-object-only single task stores exactly one runtime object body"),
+		StoredNodeBody(RuntimeObjectOnly.SingleTask) && !RuntimeObjectOnly.SingleTask.Node.IsValid()
+		&& !RuntimeObjectOnly.SingleTask.Instance.IsValid() && RuntimeObjectOnly.SingleTask.InstanceObject == nullptr
+		&& !RuntimeObjectOnly.SingleTask.ExecutionRuntimeData.IsValid()
+		&& RuntimeObjectOnly.SingleTask.ExecutionRuntimeDataObject != nullptr);
+#endif
+
+	// Independent native slot count mirroring the production node groups: array
+	// groups keep every slot, the single task counts only when it stores a body.
+	TArray<const UStateTreeState*> Pending;
+	for (const UStateTreeState* Root : Fixture.Context.EditorData->SubTrees) { if (Root) { Pending.Add(Root); } }
+	TSet<const UStateTreeState*> Seen;
+	int32 ExpectedTotal = Fixture.Context.EditorData->Evaluators.Num() + Fixture.Context.EditorData->GlobalTasks.Num();
+	while (!Pending.IsEmpty())
+	{
+		const UStateTreeState* State = Pending.Pop(EAllowShrinking::No);
+		bool bSeen = false;
+		Seen.Add(State, &bSeen);
+		if (bSeen) { continue; }
+		ExpectedTotal += State->Tasks.Num() + State->EnterConditions.Num() + State->Considerations.Num();
+		if (StoredNodeBody(State->SingleTask)) { ++ExpectedTotal; }
+		for (const FStateTreeTransition& Transition : State->Transitions) { ExpectedTotal += Transition.Conditions.Num(); }
+		for (const UStateTreeState* Child : State->Children) { if (Child) { Pending.Add(Child); } }
+	}
+#if UE_VERSION_OLDER_THAN(5, 7, 0)
+	constexpr int32 LoneBodies = 2;
+#else
+	constexpr int32 LoneBodies = 4;
+#endif
+	TestEqual(TEXT("fixture stores eight array/global slots plus one all-body and every lone-body single task"),
+		ExpectedTotal, 9 + LoneBodies);
+
+	TSharedPtr<FJsonObject> Unpaged = SuccessfulData(*this, Fixture.Dump(Fixture.Params()));
+	if (!Unpaged.IsValid()) { return false; }
+	const TArray<TSharedPtr<FJsonValue>>* UnpagedStates = Array(*this, Unpaged, TEXT("states"));
+	const auto UnpagedSingleTask = [&](const UStateTreeState& State) -> TSharedPtr<FJsonObject>
+	{
+		if (!UnpagedStates) { return nullptr; }
+		TSharedPtr<FJsonObject> StateEntry = FindById(*this, *UnpagedStates, State.ID);
+		return StateEntry.IsValid() ? Object(*this, StateEntry, TEXT("single_task")) : nullptr;
+	};
+	TSharedPtr<FJsonObject> UnpagedRootSingle = UnpagedSingleTask(*Fixture.Root);
+	if (!UnpagedRootSingle.IsValid()) { return false; }
+	Boolean(*this, Object(*this, UnpagedRootSingle, TEXT("definition")), TEXT("available"), false);
+	TSharedPtr<FJsonObject> UnpagedInstance = Object(*this, UnpagedRootSingle, TEXT("instance_struct"));
+	Boolean(*this, UnpagedInstance, TEXT("available"), true);
+	String(*this, UnpagedInstance, TEXT("type_path"), FCortexSTStoredInspectInstance::StaticStruct()->GetPathName());
+	Number(*this, Field(*this, UnpagedInstance, TEXT("Marker")), TEXT("value"), NativeInstance->Marker);
+	String(*this, Object(*this, UnpagedRootSingle, TEXT("instance_object")), TEXT("object_path"),
+		Single.InstanceObject->GetPathName());
+#if !UE_VERSION_OLDER_THAN(5, 7, 0)
+	String(*this, Object(*this, UnpagedRootSingle, TEXT("execution_runtime_struct")), TEXT("type_path"),
+		FCortexSTStoredInspectSamples::StaticStruct()->GetPathName());
+	String(*this, Object(*this, UnpagedRootSingle, TEXT("execution_runtime_object")), TEXT("object_path"),
+		Single.ExecutionRuntimeDataObject->GetPathName());
+#endif
+
+	// Paged nodes must reconstruct every body-bearing single task as its own slot
+	// carrying the real payloads and the same owner/kind identity.
+	const TArray<TSharedPtr<FJsonValue>> Nodes = Reconstruct(*this, Fixture, TEXT("nodes"), ExpectedTotal);
+	const auto PagedSingleTask = [&](const UStateTreeState& State) -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Entry = FindById(*this, Nodes, State.ID);
+		if (!Entry.IsValid()) { return nullptr; }
+		String(*this, Entry, TEXT("kind"), TEXT("single_task"));
+		Number(*this, Entry, TEXT("index"), 0);
+		String(*this, Entry, TEXT("owner_state_id"), State.ID.ToString(EGuidFormats::DigitsWithHyphens));
+		TestFalse(TEXT("single task page has no transition owner"), Entry->HasField(TEXT("owner_transition_index")));
+		return Entry;
+	};
+	TSharedPtr<FJsonObject> PagedRoot = PagedSingleTask(*Fixture.Root);
+	if (PagedRoot.IsValid())
+	{
+		TSharedPtr<FJsonObject> Comparable = CopyObject(PagedRoot);
+		Comparable->RemoveField(TEXT("owner_state_id"));
+		EqualObjects(*this, TEXT("paged all-body single task equals explicit unpaged single_task body"),
+			Comparable, UnpagedRootSingle);
+	}
+
+	enum class ELoneBody { InstanceStruct, InstanceObject, RuntimeStruct, RuntimeObject };
+	struct FLoneCase
+	{
+		const UStateTreeState* State = nullptr;
+		ELoneBody Body = ELoneBody::InstanceStruct;
+		int32 Marker = 0;
+		FString PayloadPath;
+	};
+	TArray<FLoneCase> LoneCases;
+	const auto AddCase = [&LoneCases](const UStateTreeState& State, ELoneBody Body, int32 Marker,
+		const FString& PayloadPath)
+	{
+		FLoneCase Case;
+		Case.State = &State;
+		Case.Body = Body;
+		Case.Marker = Marker;
+		Case.PayloadPath = PayloadPath;
+		LoneCases.Add(Case);
+	};
+	AddCase(InstanceOnly, ELoneBody::InstanceStruct, InstanceOnlyMarker, FString());
+	AddCase(ObjectOnly, ELoneBody::InstanceObject, 0, ObjectPayload->GetPathName());
+#if !UE_VERSION_OLDER_THAN(5, 7, 0)
+	AddCase(RuntimeStructOnly, ELoneBody::RuntimeStruct, 0,
+		FCortexSTStoredInspectSamples::StaticStruct()->GetPathName());
+	AddCase(RuntimeObjectOnly, ELoneBody::RuntimeObject, 0, RuntimePayload->GetPathName());
+#endif
+	for (const FLoneCase& Case : LoneCases)
+	{
+		if (!Case.State) { AddError(TEXT("lone-body single task state is missing")); continue; }
+		TSharedPtr<FJsonObject> UnpagedEntry = UnpagedSingleTask(*Case.State);
+		TSharedPtr<FJsonObject> Paged = PagedSingleTask(*Case.State);
+		if (!UnpagedEntry.IsValid() || !Paged.IsValid()) { continue; }
+		Boolean(*this, Object(*this, Paged, TEXT("definition")), TEXT("available"), false);
+		Boolean(*this, Object(*this, Paged, TEXT("instance_struct")), TEXT("available"),
+			Case.Body == ELoneBody::InstanceStruct);
+		Boolean(*this, Object(*this, Paged, TEXT("instance_object")), TEXT("available"),
+			Case.Body == ELoneBody::InstanceObject);
+#if UE_VERSION_OLDER_THAN(5, 7, 0)
+		TestTrue(TEXT("pre-5.7 lone cases never claim execution runtime storage"),
+			Case.Body != ELoneBody::RuntimeStruct && Case.Body != ELoneBody::RuntimeObject);
+		Boolean(*this, Object(*this, Paged, TEXT("execution_runtime_struct")), TEXT("engine_member_available"), false);
+		Boolean(*this, Object(*this, Paged, TEXT("execution_runtime_object")), TEXT("engine_member_available"), false);
+#else
+		Boolean(*this, Object(*this, Paged, TEXT("execution_runtime_struct")), TEXT("available"),
+			Case.Body == ELoneBody::RuntimeStruct);
+		Boolean(*this, Object(*this, Paged, TEXT("execution_runtime_object")), TEXT("available"),
+			Case.Body == ELoneBody::RuntimeObject);
+#endif
+		switch (Case.Body)
+		{
+		case ELoneBody::InstanceStruct:
+		{
+			TSharedPtr<FJsonObject> Instance = Object(*this, Paged, TEXT("instance_struct"));
+			String(*this, Instance, TEXT("type_path"), FCortexSTStoredInspectInstance::StaticStruct()->GetPathName());
+			Number(*this, Field(*this, Instance, TEXT("Marker")), TEXT("value"), Case.Marker);
+			break;
+		}
+		case ELoneBody::InstanceObject:
+			String(*this, Object(*this, Paged, TEXT("instance_object")), TEXT("object_path"), Case.PayloadPath);
+			break;
+		case ELoneBody::RuntimeStruct:
+			String(*this, Object(*this, Paged, TEXT("execution_runtime_struct")), TEXT("type_path"), Case.PayloadPath);
+			break;
+		case ELoneBody::RuntimeObject:
+			String(*this, Object(*this, Paged, TEXT("execution_runtime_object")), TEXT("object_path"), Case.PayloadPath);
+			break;
+		}
+		TSharedPtr<FJsonObject> Comparable = CopyObject(Paged);
+		Comparable->RemoveField(TEXT("owner_state_id"));
+		EqualObjects(*this, TEXT("paged lone-body single task equals explicit unpaged single_task body"),
+			Comparable, UnpagedEntry);
+	}
+
+	int32 EmptyMatches = 0;
+	const FString EmptyIdText = EmptyId.ToString(EGuidFormats::DigitsWithHyphens);
+	for (const TSharedPtr<FJsonValue>& Value : Nodes)
+	{
+		TSharedPtr<FJsonObject> Entry = AsObject(*this, Value);
+		FString Id;
+		if (Entry.IsValid() && Entry->TryGetStringField(TEXT("id"), Id) && Id == EmptyIdText) { ++EmptyMatches; }
+	}
+	TestEqual(TEXT("truly empty single task never becomes a paged node"), EmptyMatches, 0);
+
+	TSharedPtr<FJsonObject> TerminalParams = Fixture.Params(TEXT("nodes"));
+	TerminalParams->SetNumberField(TEXT("inspect_offset"), ExpectedTotal);
+	TSharedPtr<FJsonObject> Terminal = SuccessfulData(*this, Fixture.Dump(TerminalParams));
+	if (Terminal.IsValid())
+	{
+		PageMetadata(*this, Terminal, TEXT("nodes"), ExpectedTotal, ExpectedTotal, 0, false);
+	}
+	return true;
+}

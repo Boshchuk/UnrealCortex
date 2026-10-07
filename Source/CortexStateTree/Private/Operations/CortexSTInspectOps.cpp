@@ -545,7 +545,16 @@ FCortexCommandResult InspectPage(const FCortexSTAssetContext& Context, const FIn
 			AppendNodeRefs(State.State->Tasks, TEXT("task"), State.State, Nodes);
 			AppendNodeRefs(State.State->EnterConditions, TEXT("enter_condition"), State.State, Nodes);
 			AppendNodeRefs(State.State->Considerations, TEXT("consideration"), State.State, Nodes);
-			if (State.State->SingleTask.Node.IsValid())
+			// A single task is a real stored slot whenever any of its body slots
+			// holds actual data, even if its definition is missing.
+			const FStateTreeEditorNode& SingleTask = State.State->SingleTask;
+			bool bSingleTaskBody = SingleTask.Node.IsValid() || SingleTask.Instance.IsValid()
+				|| SingleTask.InstanceObject != nullptr;
+#if !UE_VERSION_OLDER_THAN(5, 7, 0)
+			bSingleTaskBody = bSingleTaskBody || SingleTask.ExecutionRuntimeData.IsValid()
+				|| SingleTask.ExecutionRuntimeDataObject != nullptr;
+#endif
+			if (bSingleTaskBody)
 			{
 				Nodes.Add({&State.State->SingleTask, TEXT("single_task"), State.State, 0, INDEX_NONE});
 			}
