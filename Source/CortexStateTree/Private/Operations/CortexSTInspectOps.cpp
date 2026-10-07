@@ -6,93 +6,235 @@
 #include "StateTreeState.h"
 #include "StateTree.h"
 #include "CortexSerializer.h"
+#include "GameplayTagContainer.h"
+#include "Misc/EngineVersionComparison.h"
 #include "StructUtils/PropertyBag.h"
 #include "UObject/Package.h"
 #include "UObject/UnrealType.h"
 #include "UObject/PropertyOptional.h"
+#include <algorithm>
+#include <initializer_list>
 
 namespace
 {
-// Supplement the pinned shared reader's missing small-integer/optional coverage
-// locally; do not change serialization contracts for other provider domains.
-void CompleteStoredValue(const FProperty* Property, const void* Memory, const FString& Path,
-	TSharedPtr<FJsonValue>& Json, TArray<FCortexSerializationIssue>& Issues, int32 Depth = 0)
+// Compound branches own their diagnostics until append. Raw map keys can
+// contain dots/brackets, so flattened diagnostic prefixes are not ownership.
+// Walk stored compounds once; shared leaf policies retain text/object/issue
+// semantics without first traversing the same complete reflected value twice.
+FCortexPropertySerializationResult ReadStoredValue(const FProperty* Property, const void* Memory,
+	const FString& Path, int32 Depth = 0);
+
+void AppendStoredIssues(FCortexPropertySerializationResult& Result, FCortexPropertySerializationResult& Branch)
 {
-	if (Depth > 32)
+	Result.bPartial |= Branch.bPartial;
+	Result.Issues.Append(MoveTemp(Branch.Issues));
+}
+
+FCortexPropertySerializationResult ReadStoredStruct(const UStruct* Type, const void* Memory,
+	const FString& Path, int32 Depth)
+{
+	FCortexPropertySerializationResult Result;
+	if (Type == FInstancedStruct::StaticStruct() && Memory)
 	{
-		return;
+		const FInstancedStruct& Instance = *static_cast<const FInstancedStruct*>(Memory);
+		if (Instance.IsValid())
+		{
+			Result = ReadStoredStruct(Instance.GetScriptStruct(), Instance.GetMemory(), Path, Depth + 1);
+			Result.JsonValue->AsObject()->SetStringField(TEXT("_struct_type"), Instance.GetScriptStruct()->GetName());
+			return Result;
+		}
 	}
-	bool bCompleted = false;
-	if (const FInt8Property* Number = CastField<FInt8Property>(Property))
+	TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+	Result.JsonValue = MakeShared<FJsonValueObject>(Object);
+	if (!Type || !Memory || Type == FInstancedStruct::StaticStruct()) { return Result; }
+	for (TFieldIterator<FProperty> It(Type); It; ++It)
 	{
-		Json = MakeShared<FJsonValueNumber>(Number->GetPropertyValue(Memory));
-		bCompleted = true;
+		const FProperty* Member = *It;
+		const FString MemberPath = Path + TEXT(".") + Member->GetName();
+		if (Member->ArrayDim == 1)
+		{
+			FCortexPropertySerializationResult Value = ReadStoredValue(Member,
+				Member->ContainerPtrToValuePtr<void>(Memory), MemberPath, Depth);
+			Object->SetField(Member->GetName(), Value.JsonValue);
+			AppendStoredIssues(Result, Value);
+		}
+		else
+		{
+			TArray<TSharedPtr<FJsonValue>> Values;
+			Values.Reserve(Member->ArrayDim);
+			for (int32 Index = 0; Index < Member->ArrayDim; ++Index)
+			{
+				FCortexPropertySerializationResult Value = ReadStoredValue(Member,
+					Member->ContainerPtrToValuePtr<void>(Memory, Index),
+					FString::Printf(TEXT("%s[%d]"), *MemberPath, Index), Depth);
+				Values.Add(MoveTemp(Value.JsonValue));
+				AppendStoredIssues(Result, Value);
+			}
+			Object->SetField(Member->GetName(), MakeShared<FJsonValueArray>(MoveTemp(Values)));
+		}
 	}
-	else if (const FUInt16Property* UnsignedNumber = CastField<FUInt16Property>(Property))
+	return Result;
+}
+
+FCortexPropertySerializationResult ReadStoredValue(const FProperty* Property, const void* Memory,
+	const FString& Path, int32 Depth)
+{
+	FCortexSerializationPolicy Policy;
+	Policy.MaxDepth = 32 - Depth;
+	Policy.bExpandInstancedSubobjects = false;
+	if (!Property || !Memory || Depth > 32)
 	{
-		Json = MakeShared<FJsonValueNumber>(UnsignedNumber->GetPropertyValue(Memory));
-		bCompleted = true;
+		return FCortexSerializer::PropertyToJsonDeep(Property, Memory, Policy, Path);
+	}
+	FCortexPropertySerializationResult Result;
+	if (const FInt8Property* SignedByte = CastField<FInt8Property>(Property))
+	{
+		Result.JsonValue = MakeShared<FJsonValueNumber>(SignedByte->GetPropertyValue(Memory));
+	}
+	else if (const FUInt16Property* UnsignedShort = CastField<FUInt16Property>(Property))
+	{
+		Result.JsonValue = MakeShared<FJsonValueNumber>(UnsignedShort->GetPropertyValue(Memory));
+	}
+	else if (const FUInt32Property* UnsignedInteger = CastField<FUInt32Property>(Property))
+	{
+		Result.JsonValue = MakeShared<FJsonValueNumber>(static_cast<double>(UnsignedInteger->GetPropertyValue(Memory)));
+	}
+	else if (const FInt64Property* SignedInteger = CastField<FInt64Property>(Property))
+	{
+		const int64 Value = SignedInteger->GetPropertyValue(Memory);
+		constexpr int64 SafeInteger = 9007199254740991LL;
+		if (Value < -SafeInteger || Value > SafeInteger)
+		{
+			Result.JsonValue = MakeShared<FJsonValueString>(FString::Printf(TEXT("%lld"), static_cast<long long>(Value)));
+		}
+		else { Result.JsonValue = MakeShared<FJsonValueNumber>(static_cast<double>(Value)); }
 	}
 	else if (const FOptionalProperty* Optional = CastField<FOptionalProperty>(Property))
 	{
-		TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+		TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
 		const void* Stored = Optional->GetValuePointerForReadIfSet(Memory);
-		Value->SetBoolField(TEXT("is_set"), Stored != nullptr);
+		Object->SetBoolField(TEXT("is_set"), Stored != nullptr);
 		if (Stored)
 		{
-			FCortexSerializationPolicy Policy;
-			Policy.MaxDepth = 32 - Depth;
-			FCortexPropertySerializationResult Inner = FCortexSerializer::PropertyToJsonDeep(Optional->GetValueProperty(), Stored, Policy, Path + TEXT(".value"));
-			CompleteStoredValue(Optional->GetValueProperty(), Stored, Path + TEXT(".value"), Inner.JsonValue, Inner.Issues, Depth + 1);
-			Value->SetField(TEXT("value"), Inner.JsonValue);
-			Issues.Append(Inner.Issues);
+			FCortexPropertySerializationResult Value = ReadStoredValue(
+				Optional->GetValueProperty(), Stored, Path + TEXT(".value"), Depth + 1);
+			Object->SetField(TEXT("value"), Value.JsonValue);
+			AppendStoredIssues(Result, Value);
 		}
-		Json = MakeShared<FJsonValueObject>(Value);
-		bCompleted = true;
+		Result.JsonValue = MakeShared<FJsonValueObject>(Object);
 	}
 	else if (const FStructProperty* Struct = CastField<FStructProperty>(Property))
 	{
-		const UStruct* Type = Struct->Struct;
+		if (Struct->Struct == FGameplayTag::StaticStruct() || Struct->Struct == FGameplayTagContainer::StaticStruct()
+			|| Struct->Struct == TBaseStructure<FSoftObjectPath>::Get())
+		{
+			return FCortexSerializer::PropertyToJsonDeep(Property, Memory, Policy, Path);
+		}
 		if (Struct->Struct == FInstancedStruct::StaticStruct())
 		{
-			const FInstancedStruct* Instance = static_cast<const FInstancedStruct*>(Memory);
-			Type = Instance->GetScriptStruct();
-			Memory = Instance->GetMemory();
+			const FInstancedStruct& Instance = *static_cast<const FInstancedStruct*>(Memory);
+			if (!Instance.IsValid()) { Result.JsonValue = MakeShared<FJsonValueNull>(); return Result; }
+			Result = ReadStoredStruct(Instance.GetScriptStruct(), Instance.GetMemory(), Path, Depth + 1);
+			Result.JsonValue->AsObject()->SetStringField(TEXT("_struct_type"), Instance.GetScriptStruct()->GetName());
 		}
-		if (Type && Memory && Json.IsValid() && Json->Type == EJson::Object)
-		{
-			for (TFieldIterator<FProperty> It(Type); It; ++It)
-			{
-				const FString FieldName = (*It)->GetName();
-				TSharedPtr<FJsonValue> Child = Json->AsObject()->TryGetField(FieldName);
-				if (Child.IsValid())
-				{
-					CompleteStoredValue(*It, (*It)->ContainerPtrToValuePtr<void>(Memory), Path + TEXT(".") + FieldName, Child, Issues, Depth + 1);
-					Json->AsObject()->SetField(FieldName, Child);
-				}
-			}
-		}
+		else { Result = ReadStoredStruct(Struct->Struct, Memory, Path, Depth + 1); }
 	}
 	else if (const FArrayProperty* Array = CastField<FArrayProperty>(Property))
 	{
-		if (Json.IsValid() && Json->Type == EJson::Array)
+		FScriptArrayHelper Helper(Array, Memory);
+		TArray<TSharedPtr<FJsonValue>> Values;
+		Values.Reserve(Helper.Num());
+		for (int32 Index = 0; Index < Helper.Num(); ++Index)
 		{
-			FScriptArrayHelper Helper(Array, Memory);
-			TArray<TSharedPtr<FJsonValue>> Values = Json->AsArray();
-			for (int32 Index = 0; Index < Helper.Num() && Index < Values.Num(); ++Index)
-			{
-				CompleteStoredValue(Array->Inner, Helper.GetRawPtr(Index), FString::Printf(TEXT("%s[%d]"), *Path, Index), Values[Index], Issues, Depth + 1);
-			}
-			Json = MakeShared<FJsonValueArray>(Values);
+			FCortexPropertySerializationResult Value = ReadStoredValue(Array->Inner, Helper.GetRawPtr(Index),
+				FString::Printf(TEXT("%s[%d]"), *Path, Index), Depth + 1);
+			Values.Add(MoveTemp(Value.JsonValue));
+			AppendStoredIssues(Result, Value);
 		}
+		Result.JsonValue = MakeShared<FJsonValueArray>(MoveTemp(Values));
 	}
-	if (bCompleted)
+	else if (const FSetProperty* Set = CastField<FSetProperty>(Property))
 	{
-		Issues.RemoveAll([&Path](const FCortexSerializationIssue& Issue) { return Issue.Field == Path && Issue.Code == TEXT("UNSUPPORTED_PROPERTY_TYPE"); });
+		FScriptSetHelper Helper(Set, Memory);
+		TArray<TSharedPtr<FJsonValue>> Values;
+		Values.Reserve(Helper.Num());
+		for (int32 SparseIndex = 0; SparseIndex < Helper.GetMaxIndex(); ++SparseIndex)
+		{
+			if (!Helper.IsValidIndex(SparseIndex)) { continue; }
+			FCortexPropertySerializationResult Value = ReadStoredValue(Set->ElementProp, Helper.GetElementPtr(SparseIndex),
+				FString::Printf(TEXT("%s[%d]"), *Path, Values.Num()), Depth + 1);
+			Values.Add(MoveTemp(Value.JsonValue));
+			AppendStoredIssues(Result, Value);
+		}
+		if (!Values.IsEmpty())
+		{
+			Result.Issues.Add({Path, TEXT("Set order follows Unreal set iteration order"),
+				TEXT("NON_DETERMINISTIC_SET_ORDER"), ECortexSerializationSeverity::Warning, true, false});
+			Result.bPartial = true;
+		}
+		Result.JsonValue = MakeShared<FJsonValueArray>(MoveTemp(Values));
 	}
+	else if (const FMapProperty* Map = CastField<FMapProperty>(Property))
+	{
+		FScriptMapHelper Helper(Map, Memory);
+		const bool bStringKeys = CastField<FStrProperty>(Map->KeyProp) || CastField<FNameProperty>(Map->KeyProp);
+		TArray<TPair<FString, int32>> Keys;
+		bool bCollision = false;
+		if (bStringKeys)
+		{
+			Keys.Reserve(Helper.Num());
+			TSet<FString> Seen;
+			Seen.Reserve(Helper.Num());
+			for (int32 SparseIndex = 0; SparseIndex < Helper.GetMaxIndex(); ++SparseIndex)
+			{
+				if (!Helper.IsValidIndex(SparseIndex)) { continue; }
+				FString Key;
+				Map->KeyProp->ExportTextItem_Direct(Key, Helper.GetKeyPtr(SparseIndex), nullptr, nullptr, PPF_None);
+				bool bAlreadySeen = false;
+				Seen.Add(Key, &bAlreadySeen);
+				bCollision |= bAlreadySeen;
+				Keys.Emplace(MoveTemp(Key), SparseIndex);
+			}
+		}
+		TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+		if (bStringKeys && !bCollision)
+		{
+			for (const TPair<FString, int32>& Key : Keys)
+			{
+				FCortexPropertySerializationResult Value = ReadStoredValue(Map->ValueProp,
+					Helper.GetValuePtr(Key.Value), Path + TEXT(".") + Key.Key, Depth + 1);
+				Object->SetField(Key.Key, Value.JsonValue);
+				AppendStoredIssues(Result, Value);
+			}
+		}
+		else
+		{
+			TArray<TSharedPtr<FJsonValue>> Entries;
+			Entries.Reserve(Helper.Num());
+			for (int32 SparseIndex = 0; SparseIndex < Helper.GetMaxIndex(); ++SparseIndex)
+			{
+				if (!Helper.IsValidIndex(SparseIndex)) { continue; }
+				const FString EntryPath = FString::Printf(TEXT("%s[%d]"), *Path, Entries.Num());
+				FCortexPropertySerializationResult Key = ReadStoredValue(Map->KeyProp,
+					Helper.GetKeyPtr(SparseIndex), EntryPath + TEXT(".key"), Depth + 1);
+				FCortexPropertySerializationResult Value = ReadStoredValue(Map->ValueProp,
+					Helper.GetValuePtr(SparseIndex), EntryPath + TEXT(".value"), Depth + 1);
+				TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+				Entry->SetField(TEXT("key"), Key.JsonValue);
+				Entry->SetField(TEXT("value"), Value.JsonValue);
+				AppendStoredIssues(Result, Key);
+				AppendStoredIssues(Result, Value);
+				Entries.Add(MakeShared<FJsonValueObject>(Entry));
+			}
+			Object->SetField(TEXT("entries"), MakeShared<FJsonValueArray>(MoveTemp(Entries)));
+		}
+		Result.JsonValue = MakeShared<FJsonValueObject>(Object);
+	}
+	else { return FCortexSerializer::PropertyToJsonDeep(Property, Memory, Policy, Path); }
+	return Result;
 }
 
-TSharedPtr<FJsonObject> InspectFields(const UStruct* Type, const void* Memory, const TSet<FName>& Excluded = {})
+TSharedPtr<FJsonObject> InspectFields(const UStruct* Type, const void* Memory, std::initializer_list<FName> Excluded = {})
 {
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	if (Type == nullptr || Memory == nullptr)
@@ -106,7 +248,7 @@ TSharedPtr<FJsonObject> InspectFields(const UStruct* Type, const void* Memory, c
 	for (TFieldIterator<FProperty> It(Type); It; ++It)
 	{
 		const FProperty* Property = *It;
-		if (Excluded.Contains(Property->GetFName()))
+		if (std::find(Excluded.begin(), Excluded.end(), Property->GetFName()) != Excluded.end())
 		{
 			continue;
 		}
@@ -115,23 +257,29 @@ TSharedPtr<FJsonObject> InspectFields(const UStruct* Type, const void* Memory, c
 		Field->SetStringField(TEXT("cpp_type"), Property->GetCPPType());
 		Field->SetStringField(TEXT("origin"), Property->GetOwnerStruct()->GetPathName());
 		Field->SetStringField(TEXT("property_flags"), FString::Printf(TEXT("%llu"), static_cast<unsigned long long>(Property->GetPropertyFlags())));
-		FCortexSerializationPolicy Policy;
-		Policy.MaxDepth = 32;
-		Policy.bExpandInstancedSubobjects = false;
-		TArray<TSharedPtr<FJsonValue>> Values;
 		TArray<FCortexSerializationIssue> Issues;
-		bool bPartial = false;
-		for (int32 Index = 0; Index < Property->ArrayDim; ++Index)
+		if (Property->ArrayDim == 1)
 		{
-			FCortexPropertySerializationResult Value = FCortexSerializer::PropertyToJsonDeep(
-				Property, Property->ContainerPtrToValuePtr<void>(Memory, Index), Policy, Property->GetName());
-			CompleteStoredValue(Property, Property->ContainerPtrToValuePtr<void>(Memory, Index), Property->GetName(), Value.JsonValue, Value.Issues);
-			Values.Add(Value.JsonValue.IsValid() ? Value.JsonValue : MakeShared<FJsonValueNull>());
-			Issues.Append(Value.Issues);
-			bPartial |= !Value.Issues.IsEmpty();
+			FCortexPropertySerializationResult Value = ReadStoredValue(
+				Property, Property->ContainerPtrToValuePtr<void>(Memory), Property->GetName());
+			Field->SetField(TEXT("value"), Value.JsonValue);
+			Issues = MoveTemp(Value.Issues);
 		}
-		Field->SetField(TEXT("value"), Property->ArrayDim == 1 ? Values[0] : MakeShared<FJsonValueArray>(Values));
-		Field->SetBoolField(TEXT("partial"), bPartial);
+		else
+		{
+			TArray<TSharedPtr<FJsonValue>> Values;
+			Values.Reserve(Property->ArrayDim);
+			for (int32 Index = 0; Index < Property->ArrayDim; ++Index)
+			{
+				FCortexPropertySerializationResult Value = ReadStoredValue(Property,
+					Property->ContainerPtrToValuePtr<void>(Memory, Index),
+					FString::Printf(TEXT("%s[%d]"), *Property->GetName(), Index));
+				Values.Add(Value.JsonValue);
+				Issues.Append(Value.Issues);
+			}
+			Field->SetField(TEXT("value"), MakeShared<FJsonValueArray>(MoveTemp(Values)));
+		}
+		Field->SetBoolField(TEXT("partial"), !Issues.IsEmpty());
 		Field->SetArrayField(TEXT("issues"), FCortexSerializer::SerializationIssuesToJson(Issues));
 		Fields.Add(MakeShared<FJsonValueObject>(Field));
 	}
@@ -145,34 +293,50 @@ TSharedPtr<FJsonObject> InspectBag(const FInstancedPropertyBag& Bag)
 	return InspectFields(View.GetScriptStruct(), View.GetMemory());
 }
 
-TSharedPtr<FJsonObject> InspectNode(const FStateTreeEditorNode& Node, const FString& Kind, int32 Index)
+TSharedPtr<FJsonObject> InspectStoredObject(const UObject* Object)
+{
+	TSharedPtr<FJsonObject> Values = InspectFields(Object ? Object->GetClass() : nullptr, Object);
+	if (Object) { Values->SetStringField(TEXT("object_path"), Object->GetPathName()); }
+	return Values;
+}
+
+TSharedPtr<FJsonObject> InspectNode(const FStateTreeEditorNode& Node, const TCHAR* Kind, int32 Index)
 {
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("id"), Node.ID.ToString(EGuidFormats::DigitsWithHyphens));
+#if UE_VERSION_OLDER_THAN(5, 7, 0)
+	Result->SetBoolField(TEXT("definition_id_available"), false);
+#else
+	Result->SetBoolField(TEXT("definition_id_available"), true);
 	Result->SetStringField(TEXT("definition_id"), Node.GetNodeID().ToString(EGuidFormats::DigitsWithHyphens));
+#endif
 	Result->SetStringField(TEXT("kind"), Kind);
 	Result->SetNumberField(TEXT("index"), Index);
 	Result->SetObjectField(TEXT("editor_node"), InspectFields(FStateTreeEditorNode::StaticStruct(), &Node,
 		{TEXT("Node"), TEXT("Instance"), TEXT("InstanceObject"), TEXT("ExecutionRuntimeData"), TEXT("ExecutionRuntimeDataObject")}));
 	Result->SetObjectField(TEXT("definition"), InspectFields(Node.Node.GetScriptStruct(), Node.Node.GetMemory()));
 	Result->SetObjectField(TEXT("instance_struct"), InspectFields(Node.Instance.GetScriptStruct(), Node.Instance.GetMemory()));
-	Result->SetObjectField(TEXT("execution_runtime_struct"), InspectFields(Node.ExecutionRuntimeData.GetScriptStruct(), Node.ExecutionRuntimeData.GetMemory()));
-	for (const TPair<FString, const UObject*>& Object : TArray<TPair<FString, const UObject*>>{
-		{TEXT("instance_object"), Node.InstanceObject.Get()}, {TEXT("execution_runtime_object"), Node.ExecutionRuntimeDataObject.Get()}})
-	{
-		TSharedPtr<FJsonObject> Values = InspectFields(Object.Value ? Object.Value->GetClass() : nullptr, Object.Value);
-		if (Object.Value)
-		{
-			Values->SetStringField(TEXT("object_path"), Object.Value->GetPathName());
-		}
-		Result->SetObjectField(Object.Key, Values);
-	}
+	Result->SetObjectField(TEXT("instance_object"), InspectStoredObject(Node.InstanceObject.Get()));
+#if UE_VERSION_OLDER_THAN(5, 7, 0)
+	constexpr bool bRuntimeMemberAvailable = false;
+	TSharedPtr<FJsonObject> RuntimeStruct = InspectFields(nullptr, nullptr);
+	TSharedPtr<FJsonObject> RuntimeObject = InspectStoredObject(nullptr);
+#else
+	constexpr bool bRuntimeMemberAvailable = true;
+	TSharedPtr<FJsonObject> RuntimeStruct = InspectFields(Node.ExecutionRuntimeData.GetScriptStruct(), Node.ExecutionRuntimeData.GetMemory());
+	TSharedPtr<FJsonObject> RuntimeObject = InspectStoredObject(Node.ExecutionRuntimeDataObject.Get());
+#endif
+	RuntimeStruct->SetBoolField(TEXT("engine_member_available"), bRuntimeMemberAvailable);
+	RuntimeObject->SetBoolField(TEXT("engine_member_available"), bRuntimeMemberAvailable);
+	Result->SetObjectField(TEXT("execution_runtime_struct"), RuntimeStruct);
+	Result->SetObjectField(TEXT("execution_runtime_object"), RuntimeObject);
 	return Result;
 }
 
-TArray<TSharedPtr<FJsonValue>> InspectNodes(const TArray<FStateTreeEditorNode>& Nodes, const FString& Kind)
+TArray<TSharedPtr<FJsonValue>> InspectNodes(const TArray<FStateTreeEditorNode>& Nodes, const TCHAR* Kind)
 {
 	TArray<TSharedPtr<FJsonValue>> Result;
+	Result.Reserve(Nodes.Num());
 	for (int32 Index = 0; Index < Nodes.Num(); ++Index)
 	{
 		Result.Add(MakeShared<FJsonValueObject>(InspectNode(Nodes[Index], Kind, Index)));
@@ -180,28 +344,28 @@ TArray<TSharedPtr<FJsonValue>> InspectNodes(const TArray<FStateTreeEditorNode>& 
 	return Result;
 }
 
-TSharedPtr<FJsonObject> InspectTree(const FCortexSTAssetContext& Context)
+constexpr const TCHAR* InspectionCompleteness = TEXT("Reflected stored fields with per-field partial/issues. UObject references identity-only; instance objects expanded one explicit level. Depth limit 32, no array count truncation. Signed64 outside +/-9007199254740991 uses lossless decimal strings; cpp_type retains the stored type. definition_id_available and runtime engine_member_available disclose engine-version API availability, distinct from a present but empty stored slot. Non-reflected engine caches not captured.");
+
+void AddInspectionMetadata(const FCortexSTAssetContext& Context, const TSharedPtr<FJsonObject>& Result)
 {
-	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("schema"), TEXT("cortex.stored-editor-inspection.v1"));
 	Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
 	Result->SetStringField(TEXT("scope"), TEXT("All stored editor subtrees; external linked assets are identity references only. No runtime execution or class-default substitution."));
 	Result->SetStringField(TEXT("enabled_origin"), TEXT("definition.fields.bTaskEnabled where present; other node types have only their actual reflected flags, no synthetic enabled default"));
-	Result->SetStringField(TEXT("completeness"), TEXT("Reflected stored fields with per-field partial/issues. UObject references identity-only; instance objects expanded one explicit level. Depth limit 32 reported by serializer, no array count truncation. Non-reflected engine caches not captured."));
+	Result->SetStringField(TEXT("completeness"), InspectionCompleteness);
 	Result->SetBoolField(TEXT("package_dirty_before"), Context.StateTree->GetOutermost()->IsDirty());
+}
+
+void AddRootInspection(const FCortexSTAssetContext& Context, const TSharedPtr<FJsonObject>& Result)
+{
 	Result->SetObjectField(TEXT("root"), InspectFields(Context.EditorData->GetClass(), Context.EditorData,
 		{TEXT("SubTrees"), TEXT("Evaluators"), TEXT("GlobalTasks"), TEXT("EditorBindings"), TEXT("RootParameterPropertyBag"), TEXT("RootParameters")}));
 	Result->SetStringField(TEXT("root_parameters_id"), Context.EditorData->GetRootParametersGuid().ToString(EGuidFormats::DigitsWithHyphens));
 	Result->SetObjectField(TEXT("root_parameters"), InspectBag(Context.EditorData->GetRootParametersPropertyBag()));
-	Result->SetArrayField(TEXT("evaluators"), InspectNodes(Context.EditorData->Evaluators, TEXT("evaluator")));
-	Result->SetArrayField(TEXT("global_tasks"), InspectNodes(Context.EditorData->GlobalTasks, TEXT("global_task")));
-	Result->SetObjectField(TEXT("bindings"), InspectFields(FStateTreeEditorPropertyBindings::StaticStruct(), &Context.EditorData->EditorBindings));
-	TArray<TSharedPtr<FJsonValue>> States;
 	TArray<TSharedPtr<FJsonValue>> Roots;
-	TSet<const UStateTreeState*> Visited;
-	for (int32 RootIndex = 0; RootIndex < Context.EditorData->SubTrees.Num(); ++RootIndex)
+	Roots.Reserve(Context.EditorData->SubTrees.Num());
+	for (const UStateTreeState* Root : Context.EditorData->SubTrees)
 	{
-		const UStateTreeState* Root = Context.EditorData->SubTrees[RootIndex];
 		if (Root)
 		{
 			Roots.Add(MakeShared<FJsonValueString>(Root->ID.ToString(EGuidFormats::DigitsWithHyphens)));
@@ -210,57 +374,254 @@ TSharedPtr<FJsonObject> InspectTree(const FCortexSTAssetContext& Context)
 		{
 			Roots.Add(MakeShared<FJsonValueNull>());
 		}
-		TArray<const UStateTreeState*> Pending;
-		Pending.Add(Root);
-		while (!Pending.IsEmpty())
-		{
-			const UStateTreeState* State = Pending.Pop(EAllowShrinking::No);
-			if (State == nullptr || Visited.Contains(State))
-			{
-				continue;
-			}
-			Visited.Add(State);
-			TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
-			Item->SetStringField(TEXT("id"), State->ID.ToString(EGuidFormats::DigitsWithHyphens));
-			Item->SetStringField(TEXT("object_path"), State->GetPathName());
-			Item->SetNumberField(TEXT("subtree_index"), RootIndex);
-			Item->SetObjectField(TEXT("properties"), InspectFields(State->GetClass(), State,
-				{TEXT("Tasks"), TEXT("SingleTask"), TEXT("EnterConditions"), TEXT("Considerations"), TEXT("Transitions"), TEXT("Parameters")}));
-			Item->SetObjectField(TEXT("parameters_metadata"), InspectFields(FStateTreeStateParameters::StaticStruct(), &State->Parameters, {TEXT("Parameters")}));
-			Item->SetObjectField(TEXT("parameters"), InspectBag(State->Parameters.Parameters));
-			Item->SetArrayField(TEXT("tasks"), InspectNodes(State->Tasks, TEXT("task")));
-			Item->SetObjectField(TEXT("single_task"), InspectNode(State->SingleTask, TEXT("single_task"), 0));
-			Item->SetArrayField(TEXT("enter_conditions"), InspectNodes(State->EnterConditions, TEXT("enter_condition")));
-			Item->SetArrayField(TEXT("considerations"), InspectNodes(State->Considerations, TEXT("consideration")));
-			TArray<TSharedPtr<FJsonValue>> Transitions;
-			for (int32 Index = 0; Index < State->Transitions.Num(); ++Index)
-			{
-				const FStateTreeTransition& Transition = State->Transitions[Index];
-				TSharedPtr<FJsonObject> Value = InspectFields(FStateTreeTransition::StaticStruct(), &Transition, {TEXT("Conditions")});
-				Value->SetNumberField(TEXT("index"), Index);
-				Value->SetArrayField(TEXT("conditions"), InspectNodes(Transition.Conditions, TEXT("transition_condition")));
-				Transitions.Add(MakeShared<FJsonValueObject>(Value));
-			}
-			Item->SetArrayField(TEXT("transitions"), Transitions);
-			States.Add(MakeShared<FJsonValueObject>(Item));
-			for (int32 Index = State->Children.Num() - 1; Index >= 0; --Index)
-			{
-				Pending.Add(State->Children[Index]);
-			}
-		}
 	}
-	Result->SetArrayField(TEXT("subtree_roots"), Roots);
-	Result->SetArrayField(TEXT("states"), States);
+	Result->SetArrayField(TEXT("subtree_roots"), MoveTemp(Roots));
+}
+
+TSharedPtr<FJsonObject> InspectState(const UStateTreeState& State, int32 RootIndex, bool bIncludeNodes)
+{
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("id"), State.ID.ToString(EGuidFormats::DigitsWithHyphens));
+	Result->SetStringField(TEXT("object_path"), State.GetPathName());
+	Result->SetNumberField(TEXT("subtree_index"), RootIndex);
+	Result->SetObjectField(TEXT("properties"), InspectFields(State.GetClass(), &State,
+		{TEXT("Tasks"), TEXT("SingleTask"), TEXT("EnterConditions"), TEXT("Considerations"), TEXT("Transitions"), TEXT("Parameters")}));
+	Result->SetObjectField(TEXT("parameters_metadata"), InspectFields(FStateTreeStateParameters::StaticStruct(), &State.Parameters, {TEXT("Parameters")}));
+	Result->SetObjectField(TEXT("parameters"), InspectBag(State.Parameters.Parameters));
+	if (bIncludeNodes)
+	{
+		Result->SetArrayField(TEXT("tasks"), InspectNodes(State.Tasks, TEXT("task")));
+		Result->SetObjectField(TEXT("single_task"), InspectNode(State.SingleTask, TEXT("single_task"), 0));
+		Result->SetArrayField(TEXT("enter_conditions"), InspectNodes(State.EnterConditions, TEXT("enter_condition")));
+		Result->SetArrayField(TEXT("considerations"), InspectNodes(State.Considerations, TEXT("consideration")));
+	}
+	TArray<TSharedPtr<FJsonValue>> Transitions;
+	Transitions.Reserve(State.Transitions.Num());
+	for (int32 Index = 0; Index < State.Transitions.Num(); ++Index)
+	{
+		const FStateTreeTransition& Transition = State.Transitions[Index];
+		TSharedPtr<FJsonObject> Value = InspectFields(FStateTreeTransition::StaticStruct(), &Transition, {TEXT("Conditions")});
+		Value->SetNumberField(TEXT("index"), Index);
+		if (bIncludeNodes)
+		{
+			Value->SetArrayField(TEXT("conditions"), InspectNodes(Transition.Conditions, TEXT("transition_condition")));
+		}
+		Transitions.Add(MakeShared<FJsonValueObject>(Value));
+	}
+	Result->SetArrayField(TEXT("transitions"), MoveTemp(Transitions));
+	return Result;
+}
+
+TSharedPtr<FJsonObject> InspectTree(const FCortexSTAssetContext& Context)
+{
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	AddInspectionMetadata(Context, Result);
+	AddRootInspection(Context, Result);
+	Result->SetArrayField(TEXT("evaluators"), InspectNodes(Context.EditorData->Evaluators, TEXT("evaluator")));
+	Result->SetArrayField(TEXT("global_tasks"), InspectNodes(Context.EditorData->GlobalTasks, TEXT("global_task")));
+	Result->SetObjectField(TEXT("bindings"), InspectFields(FStateTreeEditorPropertyBindings::StaticStruct(), &Context.EditorData->EditorBindings));
+	TArray<FCortexSTStateRef> States;
+	CortexST::CollectAllStates(Context, States, false);
+	TArray<TSharedPtr<FJsonValue>> Values;
+	Values.Reserve(States.Num());
+	int32 RootIndex = INDEX_NONE;
+	for (const FCortexSTStateRef& State : States)
+	{
+		if (State.Parent == nullptr)
+		{
+			RootIndex = Context.EditorData->SubTrees.IndexOfByKey(State.State);
+		}
+		Values.Add(MakeShared<FJsonValueObject>(InspectState(*State.State, RootIndex, true)));
+	}
+	Result->SetArrayField(TEXT("states"), MoveTemp(Values));
 	Result->SetBoolField(TEXT("package_dirty_after"), Context.StateTree->GetOutermost()->IsDirty());
 	return Result;
 }
+
+struct FInspectionRequest
+{
+	bool bEnabled = false;
+	FString Section;
+	int32 Offset = 0;
+	int32 Count = 1;
+};
+
+bool ParseInspectionRequest(const TSharedPtr<FJsonObject>& Params, FInspectionRequest& Request, FCortexCommandResult& Error)
+{
+	auto Invalid = [&Error](const TCHAR* Message)
+	{
+		Error = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, Message);
+		return false;
+	};
+	if (Params->HasField(TEXT("inspect_instances")))
+	{
+		if (!Params->HasTypedField<EJson::Boolean>(TEXT("inspect_instances"))
+			|| !Params->TryGetBoolField(TEXT("inspect_instances"), Request.bEnabled))
+		{
+			return Invalid(TEXT("inspect_instances must be a boolean"));
+		}
+	}
+	const bool bSection = Params->HasField(TEXT("inspect_section"));
+	if (bSection)
+	{
+		if (!Params->HasTypedField<EJson::String>(TEXT("inspect_section"))
+			|| !Params->TryGetStringField(TEXT("inspect_section"), Request.Section)
+			|| (Request.Section != TEXT("root") && Request.Section != TEXT("states")
+				&& Request.Section != TEXT("nodes") && Request.Section != TEXT("bindings")))
+		{
+			return Invalid(TEXT("inspect_section must be root, states, nodes or bindings"));
+		}
+	}
+	for (const bool bCount : {false, true})
+	{
+		const TCHAR* Name = bCount ? TEXT("inspect_count") : TEXT("inspect_offset");
+		if (Params->HasField(Name))
+		{
+			double Value = 0;
+			if (!Params->HasTypedField<EJson::Number>(Name) || !Params->TryGetNumberField(Name, Value)
+				|| !FMath::IsFinite(Value) || Value != FMath::FloorToDouble(Value)
+				|| Value < (bCount ? 1 : 0) || Value > (bCount ? 100 : MAX_int32))
+			{
+				return Invalid(TEXT("Inspection offset/count must be bounded nonnegative/positive integer JSON numbers"));
+			}
+			(bCount ? Request.Count : Request.Offset) = static_cast<int32>(Value);
+		}
+	}
+	if ((bSection || Params->HasField(TEXT("inspect_offset")) || Params->HasField(TEXT("inspect_count")))
+		&& (!Request.bEnabled || !bSection))
+	{
+		return Invalid(TEXT("Inspection paging controls require inspect_instances=true and a named inspect_section"));
+	}
+	return true;
 }
+
+struct FStoredNodeRef
+{
+	const FStateTreeEditorNode* Node;
+	const TCHAR* Kind;
+	const UStateTreeState* Owner;
+	int32 Index;
+	int32 TransitionIndex;
+};
+
+void AppendNodeRefs(const TArray<FStateTreeEditorNode>& Nodes, const TCHAR* Kind, const UStateTreeState* Owner,
+	TArray<FStoredNodeRef>& Result, int32 TransitionIndex = INDEX_NONE)
+{
+	for (int32 Index = 0; Index < Nodes.Num(); ++Index)
+	{
+		Result.Add({&Nodes[Index], Kind, Owner, Index, TransitionIndex});
+	}
+}
+
+FCortexCommandResult InspectPage(const FCortexSTAssetContext& Context, const FInspectionRequest& Request)
+{
+	TArray<FCortexSTStateRef> States;
+	TArray<FStoredNodeRef> Nodes;
+	const bool bStates = Request.Section == TEXT("states");
+	const bool bNodes = Request.Section == TEXT("nodes");
+	const bool bBindings = Request.Section == TEXT("bindings");
+	if (bStates || bNodes)
+	{
+		CortexST::CollectAllStates(Context, States, false);
+	}
+	if (bNodes)
+	{
+		for (const FCortexSTStateRef& State : States)
+		{
+			AppendNodeRefs(State.State->Tasks, TEXT("task"), State.State, Nodes);
+			AppendNodeRefs(State.State->EnterConditions, TEXT("enter_condition"), State.State, Nodes);
+			AppendNodeRefs(State.State->Considerations, TEXT("consideration"), State.State, Nodes);
+			if (State.State->SingleTask.Node.IsValid())
+			{
+				Nodes.Add({&State.State->SingleTask, TEXT("single_task"), State.State, 0, INDEX_NONE});
+			}
+			for (int32 Index = 0; Index < State.State->Transitions.Num(); ++Index)
+			{
+				AppendNodeRefs(State.State->Transitions[Index].Conditions, TEXT("transition_condition"), State.State, Nodes, Index);
+			}
+		}
+		AppendNodeRefs(Context.EditorData->Evaluators, TEXT("evaluator"), nullptr, Nodes);
+		AppendNodeRefs(Context.EditorData->GlobalTasks, TEXT("global_task"), nullptr, Nodes);
+	}
+	const auto Bindings = Context.EditorData->EditorBindings.GetBindings();
+	const int32 Total = bStates ? States.Num() : bNodes ? Nodes.Num() : bBindings ? Bindings.Num() : 1;
+	if (Request.Offset > Total)
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("inspect_offset exceeds the section total"));
+	}
+	const int32 Returned = FMath::Min(Request.Count, Total - Request.Offset);
+	const int32 End = Request.Offset + Returned;
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	AddInspectionMetadata(Context, Result);
+	TArray<TSharedPtr<FJsonValue>> Entries;
+	Entries.Reserve(Returned);
+	if (bStates)
+	{
+		int32 RootIndex = INDEX_NONE;
+		for (int32 Index = 0; Index < End; ++Index)
+		{
+			const FCortexSTStateRef& State = States[Index];
+			if (State.Parent == nullptr)
+			{
+				RootIndex = Context.EditorData->SubTrees.IndexOfByKey(State.State);
+			}
+			if (Index >= Request.Offset)
+			{
+				Entries.Add(MakeShared<FJsonValueObject>(InspectState(*State.State, RootIndex, false)));
+			}
+		}
+	}
+	else
+	{
+		for (int32 Index = Request.Offset; Index < End; ++Index)
+		{
+			TSharedPtr<FJsonObject> Entry;
+			if (bNodes)
+			{
+				const FStoredNodeRef& Node = Nodes[Index];
+				Entry = InspectNode(*Node.Node, Node.Kind, Node.Index);
+				if (Node.Owner)
+				{
+					Entry->SetStringField(TEXT("owner_state_id"), Node.Owner->ID.ToString(EGuidFormats::DigitsWithHyphens));
+				}
+				if (Node.TransitionIndex != INDEX_NONE)
+				{
+					Entry->SetNumberField(TEXT("owner_transition_index"), Node.TransitionIndex);
+				}
+			}
+			else if (bBindings)
+			{
+				Entry = InspectFields(FStateTreePropertyPathBinding::StaticStruct(), &Bindings[Index]);
+			}
+			else
+			{
+				Entry = MakeShared<FJsonObject>();
+				AddRootInspection(Context, Entry);
+			}
+			Entries.Add(MakeShared<FJsonValueObject>(Entry));
+		}
+	}
+	Result->SetStringField(TEXT("section"), Request.Section);
+	Result->SetNumberField(TEXT("total"), Total);
+	Result->SetNumberField(TEXT("offset"), Request.Offset);
+	Result->SetNumberField(TEXT("returned_count"), Returned);
+	Result->SetBoolField(TEXT("has_more"), End < Total);
+	Result->SetArrayField(TEXT("entries"), MoveTemp(Entries));
+	Result->SetBoolField(TEXT("package_dirty_after"), Context.StateTree->GetOutermost()->IsDirty());
+	return FCortexCommandRouter::Success(Result);
+}
+} // namespace
 
 FCortexCommandResult FCortexSTInspectOps::DumpTree(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
 	FCortexCommandResult Error;
 	if (!CortexST::GetRequiredString(Params, TEXT("asset_path"), AssetPath, Error))
+	{
+		return Error;
+	}
+	FInspectionRequest Inspection;
+	if (!ParseInspectionRequest(Params, Inspection, Error))
 	{
 		return Error;
 	}
@@ -271,112 +632,11 @@ FCortexCommandResult FCortexSTInspectOps::DumpTree(const TSharedPtr<FJsonObject>
 		return Error;
 	}
 
-	if (CortexST::GetOptionalBool(Params, TEXT("inspect_instances"), false))
+	if (Inspection.bEnabled)
 	{
-		TSharedPtr<FJsonObject> Inspection = InspectTree(Context);
-		FString Section;
-		if (Params->TryGetStringField(TEXT("inspect_section"), Section))
-		{
-			TArray<TSharedPtr<FJsonValue>> Entries;
-			if (Section == TEXT("root"))
-			{
-				TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-				Root->SetObjectField(TEXT("root"), Inspection->GetObjectField(TEXT("root")));
-				Root->SetObjectField(TEXT("root_parameters"), Inspection->GetObjectField(TEXT("root_parameters")));
-				Root->SetStringField(TEXT("root_parameters_id"), Inspection->GetStringField(TEXT("root_parameters_id")));
-				Root->SetArrayField(TEXT("subtree_roots"), Inspection->GetArrayField(TEXT("subtree_roots")));
-				Entries.Add(MakeShared<FJsonValueObject>(Root));
-			}
-			else if (Section == TEXT("bindings"))
-			{
-				for (const FStateTreePropertyPathBinding& Binding : Context.EditorData->EditorBindings.GetBindings())
-				{
-					Entries.Add(MakeShared<FJsonValueObject>(InspectFields(FStateTreePropertyPathBinding::StaticStruct(), &Binding)));
-				}
-			}
-			else if (Section == TEXT("states") || Section == TEXT("nodes"))
-			{
-				for (const TSharedPtr<FJsonValue>& StateValue : Inspection->GetArrayField(TEXT("states")))
-				{
-					TSharedPtr<FJsonObject> State = StateValue->AsObject();
-					if (Section == TEXT("nodes"))
-					{
-						for (const TCHAR* Kind : {TEXT("tasks"), TEXT("enter_conditions"), TEXT("considerations")})
-						{
-							for (const TSharedPtr<FJsonValue>& Node : State->GetArrayField(Kind))
-							{
-								Node->AsObject()->SetStringField(TEXT("owner_state_id"), State->GetStringField(TEXT("id")));
-								Entries.Add(Node);
-							}
-						}
-						const TSharedPtr<FJsonObject> Single = State->GetObjectField(TEXT("single_task"));
-						if (Single->GetObjectField(TEXT("definition"))->GetBoolField(TEXT("available")))
-						{
-							Single->SetStringField(TEXT("owner_state_id"), State->GetStringField(TEXT("id")));
-							Entries.Add(MakeShared<FJsonValueObject>(Single));
-						}
-						for (const TSharedPtr<FJsonValue>& Transition : State->GetArrayField(TEXT("transitions")))
-						{
-							for (const TSharedPtr<FJsonValue>& Node : Transition->AsObject()->GetArrayField(TEXT("conditions")))
-							{
-								Node->AsObject()->SetStringField(TEXT("owner_state_id"), State->GetStringField(TEXT("id")));
-								Node->AsObject()->SetNumberField(TEXT("owner_transition_index"), Transition->AsObject()->GetNumberField(TEXT("index")));
-								Entries.Add(Node);
-							}
-						}
-						continue;
-					}
-					for (const TCHAR* Kind : {TEXT("tasks"), TEXT("enter_conditions"), TEXT("considerations"), TEXT("single_task")})
-					{
-						State->RemoveField(Kind);
-					}
-					for (const TSharedPtr<FJsonValue>& Transition : State->GetArrayField(TEXT("transitions")))
-					{
-						Transition->AsObject()->RemoveField(TEXT("conditions"));
-					}
-					Entries.Add(StateValue);
-				}
-				if (Section == TEXT("nodes"))
-				{
-					Entries.Append(Inspection->GetArrayField(TEXT("evaluators")));
-					Entries.Append(Inspection->GetArrayField(TEXT("global_tasks")));
-				}
-			}
-			else
-			{
-				return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("inspect_section must be root, states, nodes or bindings"));
-			}
-			double OffsetValue = 0;
-			double CountValue = 1;
-			Params->TryGetNumberField(TEXT("inspect_offset"), OffsetValue);
-			Params->TryGetNumberField(TEXT("inspect_count"), CountValue);
-			if (!FMath::IsFinite(OffsetValue) || !FMath::IsFinite(CountValue) || OffsetValue < 0 || OffsetValue > Entries.Num()
-				|| CountValue < 1 || CountValue > 100 || OffsetValue != FMath::FloorToDouble(OffsetValue) || CountValue != FMath::FloorToDouble(CountValue))
-			{
-				return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("Inspection offset/count must be bounded nonnegative/positive integers"));
-			}
-			const int32 Offset = static_cast<int32>(OffsetValue);
-			const int32 End = FMath::Min(Entries.Num(), Offset + static_cast<int32>(CountValue));
-			TArray<TSharedPtr<FJsonValue>> Page;
-			for (int32 Index = Offset; Index < End; ++Index)
-			{
-				Page.Add(Entries[Index]);
-			}
-			TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
-			Data->SetStringField(TEXT("asset_path"), Context.AssetPath);
-			Data->SetStringField(TEXT("schema"), Inspection->GetStringField(TEXT("schema")));
-			Data->SetStringField(TEXT("section"), Section);
-			Data->SetStringField(TEXT("completeness"), Inspection->GetStringField(TEXT("completeness")));
-			Data->SetNumberField(TEXT("total"), Entries.Num());
-			Data->SetNumberField(TEXT("offset"), Offset);
-			Data->SetNumberField(TEXT("returned_count"), Page.Num());
-			Data->SetBoolField(TEXT("has_more"), End < Entries.Num());
-			Data->SetBoolField(TEXT("package_dirty_before"), Inspection->GetBoolField(TEXT("package_dirty_before")));
-			Data->SetBoolField(TEXT("package_dirty_after"), Inspection->GetBoolField(TEXT("package_dirty_after")));
-			Data->SetArrayField(TEXT("entries"), Page);
-			return FCortexCommandRouter::Success(Data);
-		}
-		return FCortexCommandRouter::Success(Inspection);
+		return Inspection.Section.IsEmpty()
+			? FCortexCommandRouter::Success(InspectTree(Context))
+			: InspectPage(Context, Inspection);
 	}
 
 	const bool bIncludeTransitions = CortexST::GetOptionalBool(Params, TEXT("include_transitions"), true);

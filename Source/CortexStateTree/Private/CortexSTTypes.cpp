@@ -60,6 +60,41 @@ FString GetSerializedTransitionId(const FCortexSTStateRef& StateRef, const FStat
 	return MakeTransitionToken(StateRef.Id, TransitionIndex);
 }
 
+TSet<UStateTreeState*> MakeVisitedStates(const TArray<FCortexSTStateRef>& States)
+{
+	TSet<UStateTreeState*> Visited;
+	Visited.Reserve(States.Num());
+	for (const FCortexSTStateRef& State : States)
+	{
+		if (State.State) { Visited.Add(State.State); }
+	}
+	return Visited;
+}
+
+void CollectStoredStates(UStateTreeState* State, UStateTreeState* Parent, int32 Index,
+	TArray<FCortexSTStateRef>& OutStates, TSet<UStateTreeState*>& Visited, bool bIncludeSelectorFields)
+{
+	if (!State) { return; }
+	bool bAlreadyVisited = false;
+	Visited.Add(State, &bAlreadyVisited);
+	if (bAlreadyVisited) { return; }
+
+	FCortexSTStateRef Ref;
+	Ref.State = State;
+	Ref.Parent = Parent;
+	if (bIncludeSelectorFields)
+	{
+		Ref.Id = State->ID.ToString(EGuidFormats::DigitsWithHyphens);
+		Ref.Path = CortexSTCompat::GetStatePath(State);
+	}
+	Ref.Index = Index;
+	OutStates.Add(MoveTemp(Ref));
+	for (int32 ChildIndex = 0; ChildIndex < State->Children.Num(); ++ChildIndex)
+	{
+		CollectStoredStates(State->Children[ChildIndex], State, ChildIndex, OutStates, Visited, bIncludeSelectorFields);
+	}
+}
+
 void AppendNodeArray(
 	const TArray<FStateTreeEditorNode>& SourceNodes,
 	const TCHAR* Kind,
@@ -389,49 +424,22 @@ TSharedPtr<FJsonObject> BuildValidationPayload(UStateTree* StateTree)
 
 void CollectStates(UStateTreeState* Root, TArray<FCortexSTStateRef>& OutStates)
 {
-	if (Root == nullptr)
-	{
-		return;
-	}
-
-	TFunction<void(UStateTreeState*, UStateTreeState*)> Visit =
-		[&OutStates, &Visit](UStateTreeState* State, UStateTreeState* Parent)
-		{
-			if (State == nullptr)
-			{
-				return;
-			}
-
-			FCortexSTStateRef StateRef;
-			StateRef.State = State;
-			StateRef.Parent = Parent;
-			StateRef.Id = State->ID.ToString(EGuidFormats::DigitsWithHyphens);
-			StateRef.Path = CortexSTCompat::GetStatePath(State);
-			StateRef.Index = Parent != nullptr ? Parent->Children.IndexOfByKey(State) : 0;
-			OutStates.Add(StateRef);
-
-			for (UStateTreeState* ChildState : State->Children)
-			{
-				Visit(ChildState, State);
-			}
-		};
-
-	Visit(Root, nullptr);
+	if (!Root) { return; }
+	TSet<UStateTreeState*> Visited = MakeVisitedStates(OutStates);
+	CollectStoredStates(Root, nullptr, 0, OutStates, Visited, true);
 }
 
-void CollectAllStates(const FCortexSTAssetContext& Context, TArray<FCortexSTStateRef>& OutStates)
+void CollectAllStates(const FCortexSTAssetContext& Context, TArray<FCortexSTStateRef>& OutStates, bool bIncludeSelectorFields)
 {
 	if (Context.EditorData == nullptr)
 	{
 		return;
 	}
 
+	TSet<UStateTreeState*> Visited = MakeVisitedStates(OutStates);
 	for (UStateTreeState* SubTreeRoot : Context.EditorData->SubTrees)
 	{
-		if (SubTreeRoot != nullptr)
-		{
-			CollectStates(SubTreeRoot, OutStates);
-		}
+		CollectStoredStates(SubTreeRoot, nullptr, 0, OutStates, Visited, bIncludeSelectorFields);
 	}
 }
 
