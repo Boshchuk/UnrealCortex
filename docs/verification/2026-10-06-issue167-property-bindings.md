@@ -11,7 +11,7 @@
 - Scoped documentation candidates: toolkit `58a6ab572db048924eb173c1102e8b8ca3f302a2`; CortexSandbox systems-only `d5ea6e2401cfcbd990d491e8fba05deca5b1743b` (base `033a2f4b465f081dc373596c369678da0eb46e5e`).
 - Prior runtime source identities (`4610abd`): Source tree `ec6348f3767f8d5e59aad739180abbb1eb59f003`, MCP tree `76bc8bd36e651f34664bae917cd9d0d61cbe5907`, uplugin blob `baf99366d84d3a09ead256639f04e779806df0bc`. An exit0 diff bound documentation candidate `54f7f550cab3c0e5dcea24161b33dce65665b7da` to unchanged prior implementation.
 - Environment: Windows x64, installed UE 5.8.3 build 58210709, supported MSVC 14.44, project `CortexSandbox`. Verification builds use `-NoLiveCoding -NoHotReloadFromIDE`.
-- Delivery status: all feature acceptance, the one independent review and one supported correction pass are exercised; exact plugin publication remains the integration gate. The optional all-domain native failure is separately tracked in #168, not claimed green.
+- Delivery: [UnrealCortex PR169](https://github.com/etelyatn/UnrealCortex/pull/169) confirmed MERGED as `8f6012a5536b880912f59eadd4e06ad8be7549d0`; issue167 confirmed CLOSED/COMPLETED. Full expected-head protection used on `562373b4fcb4a234655dc4f0ab104dc3199c6a1f`, unchanged base `c05e89bd8aaae5b21af7078ab1a4dfbbeeb8490e`, empty check rollup. Exit0 Source/MCP/uplugin diff against tested `3801aaa80d23419757e7999aca3923959c1d1b81` and verified ancestry bind shipped behavior to acceptance. Optional all-domain native failure stays open in #168, not claimed green.
 
 ## Change record
 
