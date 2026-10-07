@@ -9,10 +9,10 @@
 DEFINE_LOG_CATEGORY(LogCortex);
 
 // POC: in-editor HTTP/SSE MCP transport. Port > 0 enables it alongside the TCP server.
-// Defaults ON (8127) on this isolated POC branch; production would default to 0 (off).
+// Off by default; set cortex.http.port (e.g. 8127 in [ConsoleVariables]) to enable it.
 static TAutoConsoleVariable<int32> CVarCortexHttpPort(
 	TEXT("cortex.http.port"),
-	8127,
+	0,
 	TEXT("Port for the experimental in-editor MCP-over-HTTP server (0 = disabled)."),
 	ECVF_Default);
 
