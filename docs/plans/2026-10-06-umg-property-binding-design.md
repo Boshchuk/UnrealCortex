@@ -92,7 +92,7 @@ Synchronize affected toolkit documentation/capabilities through cortex-sync-tool
 - [x] Think before acting — issue, native owner, existing reads, and user-selected inspect/set direction inspected.
 - [x] Simplicity first — existing umg_cmd and opt-in reads; one coherent domain setter, no new tool/list/remove surface.
 - [x] Surgical changes — CortexUMG binding owner plus required contracts/docs; no literal property behavior changes or unrelated cleanup.
-- [ ] Goal-driven execution — design only; build, runtime, persistence, and integration evidence still required.
+- [x] Goal-driven execution — native and actual MCP authoring/clear/persistence acceptance exercised; evidence and remaining review/publication gates are recorded in docs/verification/2026-10-06-issue167-property-bindings.md.
 
 ## Elicitation Findings
 
