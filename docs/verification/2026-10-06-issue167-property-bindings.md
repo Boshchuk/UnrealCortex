@@ -9,9 +9,9 @@
 - MCP implementation/runtime candidate: `4610abdb355f5f4241e7e6557bc9a42c4d7ef8bc`.
 - Toolkit base: `425166b18d66849eb9af6430dd2e3fe4e9f1f365`; scoped binding guidance is on `docs/issue-167-property-bindings`.
 - Scoped documentation candidates: toolkit `58a6ab572db048924eb173c1102e8b8ca3f302a2`; CortexSandbox systems-only `d5ea6e2401cfcbd990d491e8fba05deca5b1743b` (base `033a2f4b465f081dc373596c369678da0eb46e5e`).
-- Verified source identities: Source tree `ec6348f3767f8d5e59aad739180abbb1eb59f003`, MCP tree `76bc8bd36e651f34664bae917cd9d0d61cbe5907`, uplugin blob `baf99366d84d3a09ead256639f04e779806df0bc`. An exit0 diff against runtime candidate bound the later documentation commit to unchanged implementation.
+- Prior runtime source identities (`4610abd`): Source tree `ec6348f3767f8d5e59aad739180abbb1eb59f003`, MCP tree `76bc8bd36e651f34664bae917cd9d0d61cbe5907`, uplugin blob `baf99366d84d3a09ead256639f04e779806df0bc`. An exit0 diff bound documentation candidate `54f7f550cab3c0e5dcea24161b33dce65665b7da` to unchanged prior implementation.
 - Environment: Windows x64, installed UE 5.8.3 build 58210709, supported MSVC 14.44, project `CortexSandbox`. Verification builds use `-NoLiveCoding -NoHotReloadFromIDE`.
-- Delivery status: feature acceptance below is exercised; final independent review and publication remain gates. The optional all-domain native run failed as recorded below; it is not a green release gate.
+- Delivery status: all feature acceptance, the one independent review and one supported correction pass are exercised; exact plugin publication remains the integration gate. The optional all-domain native failure is separately tracked in #168, not claimed green.
 
 ## Change record
 
@@ -52,7 +52,18 @@ Fixture corrections were root fixes, not suppression: duplicate records copied b
 
 The queue had not reached UMG feature tests. This establishes the observed boundary, not the cause or an independently proven baseline defect. No GC mode was disabled, warning suppressed, or unrelated production code changed to obtain a pass. Investigation and release disposition remain explicit.
 
-Isolated Blueprint diagnosis passed **242/242** (`075637.log`) with one unrelated Google connectivity timeout warning. Early-attached CodeLLDB reached the exact initial compile breakpoint, then passed that boundary without reproducing the GC crash; debugger overhead later produced PIE timing failures. This is not release proof or a root-cause diagnosis. Safe detach timed out; API shutdown was unreachable after native test transport changes, so only the identity-verified debugger-owned PID29200 was terminated. The user requires task-caused failures fixed here and unrelated failures filed separately; relation assessment remains a review/integration gate.
+Isolated Blueprint diagnosis passed **242/242** (`075637.log`) with one unrelated Google connectivity timeout warning. Early-attached CodeLLDB reached the exact initial compile breakpoint, then passed that boundary without reproducing the GC crash; debugger overhead later produced PIE timing failures. This is not release proof or a root-cause diagnosis. Safe detach timed out; API shutdown was unreachable after native test transport changes, so only the identity-verified debugger-owned PID29200 was terminated. The user's task-caused-versus-separate-issue instruction is applied below.
+
+Controller and the independent reviewer found no reachable changed UObject mutation/global-GC path before that boundary: affected crash-domain sources are unchanged, UMG startup only registers the handler, new fixtures construct inside RunTest, the opt-in reader exits before reflection/hash, and OpenSSL is an external static-link dependency. Structural independence is strong evidence, not proof of the unknown cause. Per the user's conditional instruction, the separate investigation is [UnrealCortex #168](https://github.com/etelyatn/UnrealCortex/issues/168), confirmed OPEN.
+
+## Final review and one correction pass
+
+One fresh-context independent reviewer (`openai-codex/gpt-6.1-sol:high`) reviewed plugin `54f7f550cab3c0e5dcea24161b33dce65665b7da`, toolkit and systems documentation. Two Important/P2 findings; no Critical or Minor findings. Controller inspected the cited sources and confirmed both defects:
+
+1. Prior `CortexUMGPropertyBindingOps.cpp:481-487,510` used the existing case-insensitive lookup/string matching, so lowercase `progressdisplay` could clear `ProgressDisplay`. Native RED `085553.log`: the expected WIDGET_NOT_FOUND was empty because mutation succeeded. The existing lookup now accepts an explicit case policy; the new binding owner selects case-sensitive lookup, matching, filtering and orphan diagnostics without a second traversal or extra name-copy. Other widget operations retain their existing case-tolerant lookup policy.
+2. Prior `MCP/src/cortex_mcp/tools/routers.py:244-248` recognized only literal True before generic cursor routing. Twelve actual PaginationCache regressions returned cached DataTable pages for malformed flags instead of INVALID_FIELD. The router now rejects present non-boolean inspection flags before cached pagination, preserving absent/false behavior.
+
+Correction/runtime candidate: `3801aaa80d23419757e7999aca3923959c1d1b81`. Source tree `072da439eaf1fbc4e7de8bf67cb1cabb826503f1`, MCP tree `6c279e4116e68f383360f90b47ad396deb7b3d5d`; uplugin unchanged. Supported build succeeded. Complete native UMG **81/81** (`090047.log`), zero raw diagnostics; complete non-live MCP **970 passed, 265 deselected**. Actual stdio MCP in owned Editor37208 verified two case-mismatched clear refusals, exact unchanged state/guard, twelve malformed flag refusals against a real cached DataTable cursor, and the complete author/replace/clear/compile/save/reload/source-retirement lifecycle. Complete refreshed live suite **263 passed, two same explicit skips, 970 deselected**, 170.89s. Editor37208 clean shutdown exit0; fresh Editor73256 verified persisted source absence and retained raw bindings/tree/defaults/style/animation plus strict guard refusals. Physical saved file30682bytes SHA256 `5cc484dd107eaee2ea0f36032e00fb03b6cc914983eea057cf5569f24edb49ab` matched after the live suite and first process exit. Exact smoke asset then deleted through actual MCP; file absent, Editor73256 clean shutdown exit0. Durable [post-review evidence](assets/issue167/review-fix-evidence.json):69 create records/checks,18 fresh-reload records/checks.
 
 ## Python contract and live suites
 
@@ -60,10 +71,12 @@ Isolated Blueprint diagnosis passed **242/242** (`075637.log`) with one unrelate
 |---|---|
 | Focused affected contract/router/response suite | **114 passed** |
 | Non-live complete suite and Task-2 gate | **958 passed, 265 deselected** |
-| Final actual live E2E (`-v -rs`, port8743) | **263 passed, 2 skipped, 958 deselected**, 234.94s |
+| Prior actual live E2E (`-v -rs`, port8743) | **263 passed, 2 skipped, 958 deselected**, 234.94s |
 | Scenario stage | **59 passed** |
 | Stress stage | **14 passed** |
 | Generated fallback consistency check | Up-to-date |
+| Final post-review non-live complete suite | **970 passed, 265 deselected** |
+| Final post-review actual E2E/scenario/stress selection (`-v -rs`, port8742) | **263 passed, 2 skipped, 970 deselected**, 170.89s |
 
 Markers overlap: these are stage totals, not additive unique tests. Final E2E skips: `DataLayerEditorSubsystem unavailable in current editor context` and `save_all is unstable in unattended e2e (can block on asset save workflows)`. Existing pytest failure cache contains stale/non-current node IDs; current full command output is authoritative. Coverage percentage was not measured.
 
@@ -116,7 +129,9 @@ Windows refused owned-window activation. Orca returned occluded unrelated foregr
 
 Scoped toolkit guidance: `resources/umg-patterns.md`, `resources/ui-development.md`, `resources/mcp-tool-reference.md`, `templates/domains/umg.md`. Project-side system references: `docs/systems/cortex-umg.md`, `docs/systems/INDEX.md` in CortexSandbox. Adapter inventories/README tool counts remain unchanged because no new MCP tool exists. No matching request or tech-debt entry was completed by this issue.
 
-UE5.6–5.7 and non-Windows builds were not exercised. Native schema validation fails closed; that is not proof of those platform builds. Native restore helper was exercised directly because no public failure-injection API was added solely to manufacture post-write reader failure. Final reviewer must inspect success-boundary ordering and recovery failure blocking.
+Owning documentation merged with full expected-head protection: [cortex-toolkit PR66](https://github.com/etelyatn/cortex-toolkit/pull/66), merge `660a3e9cd3a4936ca672f8e3af7dfbf87d1fd780`; [CortexSandbox PR116](https://github.com/etelyatn/CortexSandbox/pull/116), systems-only merge `af9e6aaaddbb373b5bea7aab152e57e5316abd51`. Both remote states confirmed MERGED; neither closes the implementation issue alone.
+
+UE5.6–5.7 and non-Windows builds were not exercised. Native schema validation fails closed; that is not proof of those platform builds. Native restore helper was exercised directly because no public failure-injection API was added solely to manufacture post-write reader failure. The final reviewer inspected success-boundary ordering and recovery failure blocking; no additional finding was submitted.
 
 Rulings, in order:
 1. Explicit Windows Git Bash for skill scripts; default bash is another environment. Cost if wrong: execution environment mismatch.
@@ -127,3 +142,7 @@ Rulings, in order:
 6. User-approved API-only graph evidence after visual activation refusal. Cost: graph readability not visually proven.
 7. User-approved exact task fixture cleanup. Cost: disposable inspection assets unavailable; evidence retained.
 8. Task3 implementation/runtime/docs gate precedes the one whole-branch review/publication, resolving the brief/skill task-boundary conflict. Cost: administrative boundary differs, not release acceptance.
+9. User's conditional broad-failure disposition applied using source-backed structural independence and independent review; unresolved root cause tracked in #168. Cost: an unobserved causal link could require revised task attribution; no baseline or broad-green claim.
+10. Extend the existing private widget lookup with an explicit case policy for the binding owner; preserve other operations' lookup policy and avoid a duplicate traversal/name-copy. Cost: case-policy misuse at a future caller; exact-target regression exercises refusals, filtering, orphan diagnosis and retained raw identity.
+
+Deferred review minors: **none**. The two unrelated benchmark semantic mismatches and #168 are separately recorded diagnostic limits, not silently dropped issue167 acceptance.
