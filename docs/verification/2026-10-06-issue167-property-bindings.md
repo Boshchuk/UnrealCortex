@@ -8,6 +8,8 @@
 - Native implementation: `9f8d6de1315beff3c48e3fb181e1f689a546ffc8`.
 - MCP implementation/runtime candidate: `4610abdb355f5f4241e7e6557bc9a42c4d7ef8bc`.
 - Toolkit base: `425166b18d66849eb9af6430dd2e3fe4e9f1f365`; scoped binding guidance is on `docs/issue-167-property-bindings`.
+- Scoped documentation candidates: toolkit `58a6ab572db048924eb173c1102e8b8ca3f302a2`; CortexSandbox systems-only `d5ea6e2401cfcbd990d491e8fba05deca5b1743b` (base `033a2f4b465f081dc373596c369678da0eb46e5e`).
+- Verified source identities: Source tree `ec6348f3767f8d5e59aad739180abbb1eb59f003`, MCP tree `76bc8bd36e651f34664bae917cd9d0d61cbe5907`, uplugin blob `baf99366d84d3a09ead256639f04e779806df0bc`. An exit0 diff against runtime candidate bound the later documentation commit to unchanged implementation.
 - Environment: Windows x64, installed UE 5.8.3 build 58210709, supported MSVC 14.44, project `CortexSandbox`. Verification builds use `-NoLiveCoding -NoHotReloadFromIDE`.
 - Delivery status: feature acceptance below is exercised; final independent review and publication remain gates. The optional all-domain native run failed as recorded below; it is not a green release gate.
 
@@ -40,6 +42,8 @@ Supported MSVC builds succeeded after the implementation and final fixture asser
 
 Final focused feature run: **12/12**, `Saved/TestLogs/AutomationTest_2026-10-06_235401.log`. Final formatted native domain run: **80/80**, `235854.log`. Task-1 completion gate: **80/80**, `Saved/TestLogs/AutomationTest_2026-10-07_001116.log`; raw warning/error/fatal/ensure search returned **zero matches**. The baseline domain contained 68 tests; twelve feature tests are registered, including persistence and authoring-policy coverage.
 
+Task-3 final completion gate: **80/80**, `Saved/TestLogs/AutomationTest_2026-10-07_083024.log`, zero raw warning/error/fatal/ensure matches.
+
 Fixture corrections were root fixes, not suppression: duplicate records copied before TArray reallocation; animation GUID map initialized before compilation; loaders reset before persisted file deletion; binding policy configured through the effective `UUMGEditorProjectSettings` CDO.
 
 ### Optional broad native run — failed
@@ -47,6 +51,8 @@ Fixture corrections were root fixes, not suppression: duplicate records copied b
 `RunTests.ps1 'Cortex+' -Timeout 600` selected rendering and no NullRHI. `Saved/TestLogs/AutomationTest_2026-10-07_075116.log` recorded **204 completed successes / 205 started**, then an access violation in `UE::GC::TBatchDispatcher<UE::GC::TReachabilityProcessor<5>>::FlushQueuedReferences` on Foreground Worker #0 while `Cortex.Blueprint.RemoveGraph.Apply.RecoveryFaults` compiled its initial `BP_Recovery` fixture. It did not time out. Two earlier animation warnings were logged (`Num Curves: 1`; invalid compressed animation data on a disposable curve fixture).
 
 The queue had not reached UMG feature tests. This establishes the observed boundary, not the cause or an independently proven baseline defect. No GC mode was disabled, warning suppressed, or unrelated production code changed to obtain a pass. Investigation and release disposition remain explicit.
+
+Isolated Blueprint diagnosis passed **242/242** (`075637.log`) with one unrelated Google connectivity timeout warning. Early-attached CodeLLDB reached the exact initial compile breakpoint, then passed that boundary without reproducing the GC crash; debugger overhead later produced PIE timing failures. This is not release proof or a root-cause diagnosis. Safe detach timed out; API shutdown was unreachable after native test transport changes, so only the identity-verified debugger-owned PID29200 was terminated. The user requires task-caused failures fixed here and unrelated failures filed separately; relation assessment remains a review/integration gate.
 
 ## Python contract and live suites
 
@@ -78,6 +84,8 @@ Final smoke asset: `/Game/Temp/Issue167/Smoke_20261007_000640/WBP_BindingSmoke`.
 7. After final E2E, physical bytes/hash still matched. User-approved exact fixture deletion then removed the smoke asset.
 
 Local evidence: `Saved/Issue167LiveEvidence_create_fresh.json`, `Saved/Issue167LiveEvidence_reload_fresh.json`, `Saved/Issue167LiveManifest.json`. First earlier smoke asset was later absent on disk; the deletion cause is unestablished. Its failed fresh-load evidence is retained, not attributed to the product or pytest. Assertion corrections: NAME_None renders as `"None"`; compilation can normalize path-owner classes, so retained identity compares the current compiled/saved baseline.
+
+Durable actual call results, manifests, source identities and benchmark dispositions: [assets/issue167/evidence.json](assets/issue167/evidence.json). The native runner's cleanup explicitly deletes `Content/Temp/Cortex*Test*`, including the first smoke prefix; this is consistent with the earlier disappearance, but no per-folder deletion log establishes that individual event.
 
 ## Manual all-domain MCP benchmark
 
