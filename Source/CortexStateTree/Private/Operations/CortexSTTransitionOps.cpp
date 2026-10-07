@@ -77,18 +77,6 @@ FCortexCommandResult MakeTransitionInvalidFieldError(const FString& Message, con
 	return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, Message, Details);
 }
 
-TArray<FCortexSTStateRef> CollectAllTransitionStates(const FCortexSTAssetContext& Context)
-{
-	TArray<FCortexSTStateRef> States;
-	if (Context.EditorData == nullptr || Context.EditorData->SubTrees.Num() == 0 || Context.EditorData->SubTrees[0] == nullptr)
-	{
-		return States;
-	}
-
-	CortexST::CollectStates(Context.EditorData->SubTrees[0], States);
-	return States;
-}
-
 bool ResolveTransitionStateBySelector(
 	const FCortexSTAssetContext& Context,
 	const TSharedPtr<FJsonObject>& Params,
@@ -98,18 +86,6 @@ bool ResolveTransitionStateBySelector(
 	FCortexSTStateRef& OutState,
 	FCortexCommandResult& OutError)
 {
-	const UStateTreeState* RootState =
-		Context.EditorData != nullptr && Context.EditorData->SubTrees.Num() > 0
-			? Context.EditorData->SubTrees[0]
-			: nullptr;
-	if (RootState == nullptr)
-	{
-		OutError = FCortexCommandRouter::Error(
-			CortexErrorCodes::StateTreeStateNotFound,
-			FString::Printf(TEXT("StateTree has no root state: %s"), *Context.AssetPath));
-		return false;
-	}
-
 	FString StateId;
 	FString StatePath;
 	const bool bHasStateId = Params.IsValid() && Params->TryGetStringField(IdField, StateId) && !StateId.IsEmpty();
@@ -123,7 +99,8 @@ bool ResolveTransitionStateBySelector(
 		return false;
 	}
 
-	const TArray<FCortexSTStateRef> States = CollectAllTransitionStates(Context);
+	TArray<FCortexSTStateRef> States;
+	CortexST::CollectAllStates(Context, States);
 	if (!bHasStateId && !bHasStatePath)
 	{
 		if (bDefaultToRoot && States.Num() > 0)
@@ -463,7 +440,8 @@ bool ResolveTransition(
 	}
 	else
 	{
-		const TArray<FCortexSTStateRef> States = CollectAllTransitionStates(Context);
+		TArray<FCortexSTStateRef> States;
+		CortexST::CollectAllStates(Context, States);
 		for (const FCortexSTStateRef& CandidateStateRef : States)
 		{
 			if (TryFindInState(CandidateStateRef))

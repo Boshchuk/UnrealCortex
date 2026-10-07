@@ -99,15 +99,11 @@ FCortexSTValidationSummary BuildValidationSummary(UStateTree* StateTree)
 		return Summary;
 	}
 
-	UStateTreeState* RootState = EditorData->SubTrees.Num() > 0 ? EditorData->SubTrees[0] : nullptr;
-	if (RootState == nullptr)
-	{
-		Summary.Errors.Add(TEXT("StateTree has no root state"));
-		return Summary;
-	}
-
+	FCortexSTAssetContext Context;
+	Context.StateTree = StateTree;
+	Context.EditorData = EditorData;
 	TArray<FCortexSTStateRef> States;
-	CortexST::CollectStates(RootState, States);
+	CortexST::CollectAllStates(Context, States);
 	if (States.Num() == 0)
 	{
 		Summary.Errors.Add(TEXT("StateTree has no root state"));
@@ -423,24 +419,28 @@ void CollectStates(UStateTreeState* Root, TArray<FCortexSTStateRef>& OutStates)
 	Visit(Root, nullptr);
 }
 
+void CollectAllStates(const FCortexSTAssetContext& Context, TArray<FCortexSTStateRef>& OutStates)
+{
+	if (Context.EditorData == nullptr)
+	{
+		return;
+	}
+
+	for (UStateTreeState* SubTreeRoot : Context.EditorData->SubTrees)
+	{
+		if (SubTreeRoot != nullptr)
+		{
+			CollectStates(SubTreeRoot, OutStates);
+		}
+	}
+}
+
 bool ResolveState(
 	const FCortexSTAssetContext& Context,
 	const TSharedPtr<FJsonObject>& Params,
 	FCortexSTStateRef& OutState,
 	FCortexCommandResult& OutError)
 {
-	UStateTreeState* RootState =
-		Context.EditorData != nullptr && Context.EditorData->SubTrees.Num() > 0
-			? Context.EditorData->SubTrees[0]
-			: nullptr;
-	if (RootState == nullptr)
-	{
-		OutError = FCortexCommandRouter::Error(
-			CortexErrorCodes::StateTreeStateNotFound,
-			FString::Printf(TEXT("StateTree has no root state: %s"), *Context.AssetPath));
-		return false;
-	}
-
 	FString StateId;
 	FString StatePath;
 	const bool bHasStateId = Params.IsValid() && Params->TryGetStringField(TEXT("state_id"), StateId) && !StateId.IsEmpty();
@@ -462,7 +462,7 @@ bool ResolveState(
 	}
 
 	TArray<FCortexSTStateRef> States;
-	CollectStates(RootState, States);
+	CollectAllStates(Context, States);
 	if (!bHasStateId && !bHasStatePath)
 	{
 		if (States.Num() > 0)

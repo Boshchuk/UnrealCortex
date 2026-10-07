@@ -382,13 +382,8 @@ FCortexCommandResult FCortexSTInspectOps::DumpTree(const TSharedPtr<FJsonObject>
 	const bool bIncludeTransitions = CortexST::GetOptionalBool(Params, TEXT("include_transitions"), true);
 	const bool bIncludeNodes = CortexST::GetOptionalBool(Params, TEXT("include_nodes"), false);
 
-	UStateTreeState* RootState =
-		Context.EditorData != nullptr && Context.EditorData->SubTrees.Num() > 0
-			? Context.EditorData->SubTrees[0]
-			: nullptr;
-
 	TArray<FCortexSTStateRef> States;
-	CortexST::CollectStates(RootState, States);
+	CortexST::CollectAllStates(Context, States);
 
 	TArray<TSharedPtr<FJsonValue>> SerializedStates;
 	SerializedStates.Reserve(States.Num());
