@@ -6,6 +6,7 @@
 #include "StateTreeConsiderationBase.h"
 #include "StateTreeEvaluatorBase.h"
 #include "StateTreeTaskBase.h"
+#include "StructUtils/InstancedStruct.h"
 #include "CortexStateTreeStoredInspectTestTypes.generated.h"
 
 USTRUCT()
@@ -24,6 +25,29 @@ struct FCortexSTStoredInspectReferenceArray
 
 	UPROPERTY()
 	TObjectPtr<UObject> Refs[2] = {nullptr, nullptr};
+};
+
+USTRUCT()
+struct FCortexSTStoredInspectEmpty
+{
+	GENERATED_BODY()
+};
+
+USTRUCT()
+struct FCortexSTStoredInspectDepthInstance
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FInstancedStruct DepthValue;
+};
+
+USTRUCT(meta = (Hidden))
+struct FCortexSTStoredInspectDepthTask : public FStateTreeTaskBase
+{
+	GENERATED_BODY()
+	using FInstanceDataType = FCortexSTStoredInspectDepthInstance;
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
 };
 
 USTRUCT()

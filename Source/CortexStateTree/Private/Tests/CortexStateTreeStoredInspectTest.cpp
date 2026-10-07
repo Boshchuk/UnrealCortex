@@ -974,6 +974,50 @@ bool FCortexSTStoredInspectContainerIssuesTest::RunTest(const FString& Parameter
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexSTStoredInspectInstancedDepthTest,
+	"Cortex.StateTree.StoredInspect.Values.InstancedStructDepth",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexSTStoredInspectInstancedDepthTest::RunTest(const FString& Parameters)
+{
+	FFixture Fixture;
+	if (!Fixture.Initialize(*this)) { return false; }
+	FStateTreeEditorNode& Task = Fixture.Root->Tasks[0];
+	Task.Node.InitializeAs<FCortexSTStoredInspectDepthTask>();
+	Task.Instance.InitializeAs<FCortexSTStoredInspectDepthInstance>();
+	FCortexSTStoredInspectDepthInstance& Instance = Task.Instance.GetMutable<FCortexSTStoredInspectDepthInstance>();
+	for (const int32 Depth : {32, 33, 64})
+	{
+		Instance.DepthValue.Reset();
+		FInstancedStruct* Current = &Instance.DepthValue;
+		for (int32 Index = 1; Index < Depth; ++Index)
+		{
+			Current->InitializeAs(FInstancedStruct::StaticStruct());
+			Current = &Current->GetMutable<FInstancedStruct>();
+		}
+		Current->InitializeAs(FCortexSTStoredInspectEmpty::StaticStruct());
+		const auto CheckDepth = [&](const TSharedPtr<FJsonObject>& Inspection)
+		{
+			TSharedPtr<FJsonObject> Stored = Field(*this, Inspection, TEXT("DepthValue"));
+			if (Depth == 32) { CompleteField(*this, Stored); }
+			else
+			{
+				Boolean(*this, Stored, TEXT("partial"), true);
+				TestTrue(TEXT("over-depth instanced wrappers report their exact field omission"),
+					HasIssue(Stored, TEXT("DepthValue"), TEXT("MAX_DEPTH_EXCEEDED")));
+			}
+		};
+		CheckDepth(TaskInstance(*this, Fixture));
+		TSharedPtr<FJsonObject> Page = SuccessfulData(*this, Fixture.Dump(Fixture.Params(TEXT("nodes"))));
+		const TArray<TSharedPtr<FJsonValue>>* Entries = Array(*this, Page, TEXT("entries"));
+		if (Entries && TestEqual(TEXT("selected task depth page has one entry"), Entries->Num(), 1))
+		{
+			CheckDepth(Object(*this, AsObject(*this, (*Entries)[0]), TEXT("instance_struct")));
+		}
+	}
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexSTStoredInspectReadOnlyTest,
 	"Cortex.StateTree.StoredInspect.ReadOnly.CleanAndDirtyPackages",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

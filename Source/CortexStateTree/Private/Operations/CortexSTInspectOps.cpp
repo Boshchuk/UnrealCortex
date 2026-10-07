@@ -34,13 +34,24 @@ FCortexPropertySerializationResult ReadStoredStruct(const UStruct* Type, const v
 	const FString& Path, int32 Depth)
 {
 	FCortexPropertySerializationResult Result;
+	if (Depth > 32)
+	{
+		Result.JsonValue = MakeShared<FJsonValueNull>();
+		Result.bPartial = true;
+		Result.Issues.Add({Path, TEXT("Maximum serialization depth exceeded"),
+			TEXT("MAX_DEPTH_EXCEEDED"), ECortexSerializationSeverity::Error, true, true});
+		return Result;
+	}
 	if (Type == FInstancedStruct::StaticStruct() && Memory)
 	{
 		const FInstancedStruct& Instance = *static_cast<const FInstancedStruct*>(Memory);
 		if (Instance.IsValid())
 		{
 			Result = ReadStoredStruct(Instance.GetScriptStruct(), Instance.GetMemory(), Path, Depth + 1);
-			Result.JsonValue->AsObject()->SetStringField(TEXT("_struct_type"), Instance.GetScriptStruct()->GetName());
+			if (Result.JsonValue->Type == EJson::Object)
+			{
+				Result.JsonValue->AsObject()->SetStringField(TEXT("_struct_type"), Instance.GetScriptStruct()->GetName());
+			}
 			return Result;
 		}
 	}
@@ -135,7 +146,10 @@ FCortexPropertySerializationResult ReadStoredValue(const FProperty* Property, co
 			const FInstancedStruct& Instance = *static_cast<const FInstancedStruct*>(Memory);
 			if (!Instance.IsValid()) { Result.JsonValue = MakeShared<FJsonValueNull>(); return Result; }
 			Result = ReadStoredStruct(Instance.GetScriptStruct(), Instance.GetMemory(), Path, Depth + 1);
-			Result.JsonValue->AsObject()->SetStringField(TEXT("_struct_type"), Instance.GetScriptStruct()->GetName());
+			if (Result.JsonValue->Type == EJson::Object)
+			{
+				Result.JsonValue->AsObject()->SetStringField(TEXT("_struct_type"), Instance.GetScriptStruct()->GetName());
+			}
 		}
 		else { Result = ReadStoredStruct(Struct->Struct, Memory, Path, Depth + 1); }
 	}
