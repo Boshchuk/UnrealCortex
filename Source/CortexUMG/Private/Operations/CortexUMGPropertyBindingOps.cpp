@@ -411,12 +411,12 @@ bool FCortexUMGPropertyBindingOps::AppendInspection(UWidgetBlueprint* Blueprint,
 	for (int32 Index = 0; Index < AllRecords.Num(); ++Index)
 	{
 		const FDelegateEditorBinding& Binding = Blueprint->Bindings[Index];
-		if (WidgetName && Binding.ObjectName != *WidgetName)
+		if (WidgetName && !Binding.ObjectName.Equals(*WidgetName, ESearchCase::CaseSensitive))
 		{
 			continue;
 		}
 		Records.Add(AllRecords[Index]);
-		if (!CortexUMGUtils::FindWidgetByName(Blueprint->WidgetTree, Binding.ObjectName))
+		if (!CortexUMGUtils::FindWidgetByName(Blueprint->WidgetTree, Binding.ObjectName, ESearchCase::CaseSensitive))
 		{
 			Diagnostics.Add(MakeShared<FJsonValueString>(TEXT("Missing target widget: ") + Binding.ObjectName));
 		}
@@ -479,7 +479,7 @@ FCortexCommandResult FCortexUMGPropertyBindingOps::SetPropertyBinding(const TSha
 		return Error;
 	}
 	UWidget* Widget =
-		Blueprint->WidgetTree ? CortexUMGUtils::FindWidgetByName(Blueprint->WidgetTree, WidgetName) : nullptr;
+		CortexUMGUtils::FindWidgetByName(Blueprint->WidgetTree, WidgetName, ESearchCase::CaseSensitive);
 	if (!Widget)
 	{
 		return FCortexCommandRouter::Error(CortexErrorCodes::WidgetNotFound,
@@ -507,7 +507,8 @@ FCortexCommandResult FCortexUMGPropertyBindingOps::SetPropertyBinding(const TSha
 	for (int32 Index = 0; Index < Blueprint->Bindings.Num(); ++Index)
 	{
 		const FDelegateEditorBinding& Binding = Blueprint->Bindings[Index];
-		if (Binding.ObjectName == WidgetName && Binding.PropertyName == TargetPropertyName)
+		if (Binding.ObjectName.Equals(WidgetName, ESearchCase::CaseSensitive) &&
+			Binding.PropertyName == TargetPropertyName)
 		{
 			if (Match != INDEX_NONE)
 			{

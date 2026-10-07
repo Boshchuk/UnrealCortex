@@ -6,7 +6,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from cortex_mcp.pagination import PaginationCache, encode_cursor
 from cortex_mcp.response import MAX_RESPONSE_CHARS, format_response
+from cortex_mcp.tools import routers
 from cortex_mcp.tools.routers import make_router
 
 
@@ -24,6 +26,24 @@ def test_binding_operations_refuse_pagination_instead_of_cached_read(command, ex
     assert payload.get("_error") == "INVALID_FIELD"
     connection.send_command.assert_not_called()
     connection.send_command_cached.assert_not_called()
+
+
+@pytest.mark.parametrize("command", ["get_tree", "get_widget"])
+@pytest.mark.parametrize("flag", [None, 0, 1, "true", [], {}])
+def test_malformed_inspection_flag_cannot_return_an_unrelated_cached_page(monkeypatch, command, flag):
+    cache = PaginationCache()
+    monkeypatch.setattr(routers, "_pagination_cache", cache)
+    key = cache.store("data.list_datatables", {}, "datatables", [{"name": "DT_Cached"}], {})
+    cursor = encode_cursor(key, 0, 1)
+    router = make_router("umg", object(), "UMG")
+    payload = json.loads(router(command, {
+        "asset_path": "/Game/UI/W",
+        "widget_name": "ProgressDisplay",
+        "include_property_bindings": flag,
+        "cursor": cursor,
+    }))
+    assert payload.get("_error") == "INVALID_FIELD"
+    assert "datatables" not in payload
 
 
 def test_oversized_orphan_inspection_is_explicitly_incomplete_and_retains_guard():

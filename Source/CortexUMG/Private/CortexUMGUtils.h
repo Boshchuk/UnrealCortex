@@ -42,7 +42,8 @@ namespace CortexUMGUtils
         return WBP;
     }
 
-    inline UWidget* FindWidgetByName(UWidgetTree* WidgetTree, const FString& Name)
+    inline UWidget* FindWidgetByName(UWidgetTree* WidgetTree, const FString& Name,
+        ESearchCase::Type SearchCase = ESearchCase::IgnoreCase)
     {
         if (!WidgetTree || !WidgetTree->RootWidget)
         {
@@ -55,7 +56,7 @@ namespace CortexUMGUtils
             {
                 return nullptr;
             }
-            if (Widget->GetName() == Name)
+            if (Widget->GetName().Equals(Name, SearchCase))
             {
                 return Widget;
             }

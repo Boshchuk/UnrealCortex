@@ -242,9 +242,18 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
 
             # Property-binding reads/writes must never be interpreted as cached pagination.
             property_binding_write = domain == "umg" and command == "set_property_binding"
+            property_binding_read_command = domain == "umg" and command in {"get_tree", "get_widget"}
+            if (
+                property_binding_read_command
+                and "include_property_bindings" in route_params
+                and not isinstance(route_params["include_property_bindings"], bool)
+            ):
+                return json.dumps({
+                    "_error": "INVALID_FIELD",
+                    "_message": "include_property_bindings must be boolean.",
+                })
             property_binding_read = (
-                domain == "umg"
-                and command in {"get_tree", "get_widget"}
+                property_binding_read_command
                 and route_params.get("include_property_bindings") is True
             )
             if property_binding_write or property_binding_read:

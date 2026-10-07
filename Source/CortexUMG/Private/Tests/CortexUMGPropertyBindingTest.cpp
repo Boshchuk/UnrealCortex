@@ -165,6 +165,72 @@ bool FCortexUMGPropertyBindingRefusalTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexUMGPropertyBindingExactWidgetNameTest,
+								 "Cortex.UMG.PropertyBinding.ExactWidgetNamePreservesCaseOnlyOrphans",
+								 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FCortexUMGPropertyBindingExactWidgetNameTest::RunTest(const FString& Parameters)
+{
+	FCortexUMGPropertyBindingFixture Fixture;
+	Fixture.Seed();
+	const FString Target = BindingText(Fixture.Blueprint->Bindings[0]);
+	const FString Retained = BindingText(Fixture.Blueprint->Bindings[1]);
+	const EBlueprintStatus Status = Fixture.Blueprint->Status;
+	for (const TCHAR* Name : {TEXT("progressdisplay"), TEXT("Progressdisplay")})
+	{
+		TSharedPtr<FJsonObject> Params = Fixture.WriteParams();
+		Params->SetStringField(TEXT("widget_name"), Name);
+		const FCortexCommandResult Refused = Fixture.Router.Execute(TEXT("umg.set_property_binding"), Params);
+		if (!TestEqual(TEXT("Case-mismatched exact target refuses"), Refused.ErrorCode,
+					   CortexErrorCodes::WidgetNotFound))
+		{
+			return false;
+		}
+	}
+	TestTrue(TEXT("Refused target retains every serialized field"),
+			 BindingText(Fixture.Blueprint->Bindings[0]).Equals(Target, ESearchCase::CaseSensitive));
+	TestTrue(TEXT("Refusal preserves the other serialized record"),
+			 BindingText(Fixture.Blueprint->Bindings[1]).Equals(Retained, ESearchCase::CaseSensitive));
+	TestEqual(TEXT("Case refusal preserves Blueprint status"), Fixture.Blueprint->Status, Status);
+	TestFalse(TEXT("Case refusal does not dirty"), Fixture.Blueprint->GetPackage()->IsDirty());
+
+	FDelegateEditorBinding Orphan = Fixture.Blueprint->Bindings[0];
+	Orphan.ObjectName = TEXT("progressdisplay");
+	Fixture.Blueprint->Bindings.Add(Orphan);
+	const FString OrphanText = BindingText(Orphan);
+	const TSharedPtr<FJsonObject> State = Fixture.State();
+	if (!TestTrue(TEXT("Case-only orphan remains inspectable"), State.IsValid()))
+	{
+		return false;
+	}
+	const TArray<TSharedPtr<FJsonValue>>& Diagnostics = State->GetArrayField(TEXT("diagnostics"));
+	TestTrue(TEXT("Case-only orphan is diagnosed with its raw target"),
+			 Diagnostics.Num() == 1 &&
+				 Diagnostics[0]->AsString().Contains(TEXT("progressdisplay"), ESearchCase::CaseSensitive));
+	const FCortexCommandResult Scoped = Fixture.Router.Execute(TEXT("umg.get_widget"), Fixture.ReadParams(true));
+	if (!TestTrue(TEXT("Canonical widget inspection succeeds"), Scoped.bSuccess))
+	{
+		return false;
+	}
+	const TArray<TSharedPtr<FJsonValue>>& ScopedRecords =
+		Scoped.Data->GetObjectField(TEXT("property_binding_state"))->GetArrayField(TEXT("bindings"));
+	TestTrue(TEXT("Canonical widget scope excludes case-only orphan"),
+			 ScopedRecords.Num() == 1 &&
+				 ScopedRecords[0]->AsObject()->GetStringField(TEXT("widget_name"))
+					 .Equals(TEXT("ProgressDisplay"), ESearchCase::CaseSensitive));
+	const FCortexCommandResult Cleared =
+		Fixture.Router.Execute(TEXT("umg.set_property_binding"), Fixture.WriteParams());
+	if (!TestTrue(TEXT("Canonical clear is not confused with the case-only orphan"), Cleared.bSuccess) ||
+		!TestEqual(TEXT("Only canonical record removed"), Fixture.Blueprint->Bindings.Num(), 2))
+	{
+		return false;
+	}
+	TestTrue(TEXT("Canonical clear preserves the other widget record"),
+			 BindingText(Fixture.Blueprint->Bindings[0]).Equals(Retained, ESearchCase::CaseSensitive));
+	TestTrue(TEXT("Canonical clear preserves raw case-only orphan identity"),
+			 BindingText(Fixture.Blueprint->Bindings[1]).Equals(OrphanText, ESearchCase::CaseSensitive));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCortexUMGPropertyBindingAuthoringTest,
 								 "Cortex.UMG.PropertyBinding.CreatesReplacesAndValidatesSources",
 								 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
