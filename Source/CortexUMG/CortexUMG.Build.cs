@@ -27,5 +27,7 @@ public class CortexUMG : ModuleRules
             "MovieScene",
             "MovieSceneTracks",
         });
+        // Canonical serialized binding guards use the engine-adopted SHA-256 implementation.
+        AddEngineThirdPartyPrivateStaticDependencies(Target, "OpenSSL");
     }
 }

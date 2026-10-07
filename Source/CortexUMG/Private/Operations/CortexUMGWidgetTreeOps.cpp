@@ -1,4 +1,5 @@
 #include "Operations/CortexUMGWidgetTreeOps.h"
+#include "Operations/CortexUMGPropertyBindingOps.h"
 #include "CortexBatchMutation.h"
 #include "CortexAssetFingerprint.h"
 #include "CortexUMGUtils.h"
@@ -362,8 +363,12 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::GetTree(const TSharedPtr<FJsonObje
     }
 
     TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+    if (!FCortexUMGPropertyBindingOps::AppendInspection(WBP, Params, nullptr, Data, LoadError))
+    {
+        return LoadError;
+    }
 
-    if (WBP->WidgetTree->RootWidget)
+    if (WBP->WidgetTree && WBP->WidgetTree->RootWidget)
     {
         Data->SetObjectField(TEXT("root"), BuildWidgetTreeJson(WBP->WidgetTree->RootWidget));
         Data->SetNumberField(TEXT("total_widgets"),
@@ -519,6 +524,10 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::GetWidget(const TSharedPtr<FJsonOb
     }
 
     TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+    if (!FCortexUMGPropertyBindingOps::AppendInspection(WBP, Params, &WidgetName, Data, LoadError))
+    {
+        return LoadError;
+    }
     Data->SetStringField(TEXT("name"), Widget->GetName());
     Data->SetStringField(TEXT("class"), Widget->GetClass()->GetName());
 

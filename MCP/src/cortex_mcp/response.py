@@ -68,6 +68,45 @@ def format_response(data: dict, tool_name: str) -> str:
     text = json.dumps(data, indent=2)
     if len(text) <= MAX_RESPONSE_CHARS:
         return text
+    # Asset-owned serialized identities cannot be silently cut or treated as empty.
+    state = data.get("property_binding_state")
+    if isinstance(state, dict):
+        bounded_state = {
+            key: state[key]
+            for key in ("scope", "total", "fingerprint")
+            if key in state
+        }
+        bounded_state["reader_complete"] = False
+        return json.dumps({
+            "_error": "RESPONSE_TOO_LARGE",
+            "_message": (
+                "Serialized binding inspection exceeds the response limit. "
+                "Existing widgets can be inspected individually with get_widget; "
+                "oversized orphan records cannot be retrieved through widget-scoped inspection."
+            ),
+            "property_binding_state": bounded_state,
+        }, indent=2)
+
+    fingerprint = data.get("fingerprint")
+    signature = fingerprint.get("domain_signature") if isinstance(fingerprint, dict) else None
+    if (
+        isinstance(signature, dict)
+        and signature.get("scope") == "umg.property_binding"
+        and "changed" in data
+    ):
+        # Mutation already happened. Preserve its outcome even if an identity is huge.
+        bounded = dict(data)
+        bounded["reader_complete"] = False
+        bounded["_binding_identity_truncated"] = True
+        bounded["_message"] = "Mutation outcome retained; an oversized serialized identity was omitted."
+        for key in ("before_binding", "binding"):
+            if len(json.dumps(bounded, indent=2)) <= MAX_RESPONSE_CHARS:
+                break
+            if isinstance(bounded.get(key), dict):
+                del bounded[key]
+                bounded[f"_{key}_omitted"] = True
+        return json.dumps(bounded, indent=2)
+
 
     # 1. Special handling for UMG animation binding mutation results:
     # Essential outcome fields must never be replaced with generic errors.
