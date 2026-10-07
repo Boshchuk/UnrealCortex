@@ -2181,7 +2181,7 @@ bool FCortexSTStoredInspectDefinitionlessSingleTaskTest::RunTest(const FString& 
 	const TArray<TSharedPtr<FJsonValue>> Nodes = Reconstruct(*this, Fixture, TEXT("nodes"), ExpectedTotal);
 	const auto PagedSingleTask = [&](const UStateTreeState& State) -> TSharedPtr<FJsonObject>
 	{
-		TSharedPtr<FJsonObject> Entry = FindById(*this, Nodes, State.ID);
+		TSharedPtr<FJsonObject> Entry = FindById(*this, Nodes, State.SingleTask.ID);
 		if (!Entry.IsValid()) { return nullptr; }
 		String(*this, Entry, TEXT("kind"), TEXT("single_task"));
 		Number(*this, Entry, TEXT("index"), 0);
