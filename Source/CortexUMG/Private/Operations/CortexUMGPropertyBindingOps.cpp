@@ -3,6 +3,7 @@
 #include "CortexAssetFingerprint.h"
 #include "CortexAssetMutationGuard.h"
 #include "CortexCommandRouter.h"
+#include "CortexEngineCompat.h"
 #include "WidgetBlueprint.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/Widget.h"
@@ -223,12 +224,13 @@ bool BuildBinding(UWidgetBlueprint* Blueprint, UWidget* Widget, FName PropertyNa
 		Error = TEXT("binding.kind must be property or function");
 		return false;
 	}
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Request->Values)
+	for (const auto& Field : Request->Values)
 	{
-		if (Field.Key != TEXT("kind") &&
-			Field.Key != (Kind == TEXT("property") ? TEXT("source_path") : TEXT("function_name")))
+		const FString FieldKey = CortexEngineCompat::JsonKeyToString(Field.Key);
+		if (FieldKey != TEXT("kind") &&
+			FieldKey != (Kind == TEXT("property") ? TEXT("source_path") : TEXT("function_name")))
 		{
-			Error = TEXT("Unknown or kind-incompatible binding field: ") + Field.Key;
+			Error = TEXT("Unknown or kind-incompatible binding field: ") + FieldKey;
 			return false;
 		}
 	}
