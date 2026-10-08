@@ -1,7 +1,7 @@
 # UMG widget animation authoring — issue176 design
 
 Date: 2026-10-08
-Status: Independently reviewed and corrected; awaiting user written-spec approval before implementation planning.
+Status: Independently reviewed, corrected and explicitly approved by the user; implementation plan is awaiting review/execution selection.
 Issue: https://github.com/etelyatn/UnrealCortex/issues/176
 Source baseline: 6506e03a21a8a2c6af1570b3d01e736947cd3040
 Implementation owner: UnrealCortex / CortexUMG; existing Python umg_cmd router.
@@ -175,4 +175,4 @@ Both original reviewers re-read the corrected contracts and returned no unresolv
 - [x] Think before acting — issue acceptance and existing animation/rename/fingerprint owners inspected at the baseline; runtime evidence is explicitly unexercised.
 - [x] Simplicity first — two routed commands and opt-in existing inspection; native MovieScene owners and existing removal reused.
 - [x] Surgical changes — ordinary widget float/color authoring only; unrelated domains, composite creation and parent gitlinks excluded.
-- [x] Goal-driven execution — five supported design findings corrected and rechecked by both reviewers; controller source checks and formatter smoke recorded above. Stopping condition is written-spec approval; implementation/runtime acceptance remains explicitly unverified.
+- [x] Goal-driven execution — five supported design findings corrected and rechecked by both reviewers; controller source checks and formatter smoke recorded above. User approved the written specification. Implementation/runtime acceptance remains explicitly unverified.
