@@ -105,3 +105,9 @@ Synchronize affected toolkit documentation/capabilities through cortex-sync-tool
 **Cross-domain risks:** Immediate serialized success is not lifecycle proof: compile can reinterpret stale kind-dependent fields. Generic response/cursor handling can falsely represent inspection or mutation without native execution.
 
 **Resolution:** Accepted by user. Remedies incorporated into read, write, and transaction contracts. Add regression coverage for legacy property-to-function replacement, impure/incompatible sources, disabled binding policy, oversized orphan read, and cursor-bearing mutation.
+
+## Compiler compatibility correction (PR171)
+
+JSON request-field validation binds entries with `const auto&` and converts keys through the existing `CortexEngineCompat::JsonKeyToString` helper. UE5.8 uses shared-string JSON keys; explicitly binding an FString-keyed pair constructs a temporary and fails Clang's range-loop check. Pre-5.8 conversion remains owned by the existing helper. Allowed fields, error text, mutation guards and public contracts are unchanged.
+
+Verification: [PR171 compiler and binding evidence](../verification/2026-10-08-pr171.md). No new toolkit or system architecture changes.
