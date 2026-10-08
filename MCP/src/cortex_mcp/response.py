@@ -8,6 +8,19 @@ logger = logging.getLogger(__name__)
 MAX_RESPONSE_CHARS = 40_000
 _MIN_LIST_SIZE = 10
 
+# Animation authoring writes are bounded by a dedicated formatter: an applied outcome is never
+# replaced by a generic size refusal, and cached-array pagination never applies to them.
+ANIMATION_AUTHORING_COMMANDS = frozenset({
+    "ensure_animation_binding",
+    "set_animation_property_track",
+})
+
+_AUTHORED_TRACK_REFERRAL = (
+    "Detailed authored track omitted because the response exceeds "
+    f"{MAX_RESPONSE_CHARS} characters. Use umg.list_animation_bindings with "
+    "include_track_content=true to inspect the stored animation content."
+)
+
 
 def _find_largest_list(data: dict) -> str | None:
     """Find the key of the largest list with _MIN_LIST_SIZE+ items in data."""
@@ -45,7 +58,72 @@ def _bound_nested_tracks(data: dict, max_tracks: int) -> dict:
     return new_data
 
 
-def format_response(data: dict, tool_name: str) -> str:
+def _bound_authoring_response(data: dict) -> str:
+    """Bound an animation authoring result without losing its outcome.
+
+    Native authoring envelopes are bounded before mutation. If detailed authored_track
+    content exceeds the transport limit, omit that content explicitly, never outcome,
+    current guard or error fields. Arbitrarily oversized error text cannot be made
+    bounded while also preserving it verbatim; native validation must bound its source.
+    """
+    text = json.dumps(data, indent=2)
+    if len(text) <= MAX_RESPONSE_CHARS:
+        return text
+
+    bounded = dict(data)
+    omitted_track = "authored_track" in bounded
+    if omitted_track:
+        del bounded["authored_track"]
+    bounded["reader_complete"] = False
+    if omitted_track:
+        bounded["authored_track_omitted"] = True
+    bounded["_authored_track_instructions"] = _AUTHORED_TRACK_REFERRAL
+    return json.dumps(bounded, indent=2)
+
+
+def _bounded_detail_oversize(data: dict) -> str:
+    """Explicit incomplete envelope for oversized detailed inspection.
+
+    Detailed tracks are never silently cut: either the complete native page is returned or this
+    summary envelope, so a partial page can never claim completeness.
+    """
+    counts = data.get("summary_counts")
+    if not isinstance(counts, dict):
+        counts = {
+            key: data[key]
+            for key in ("umg_binding_count", "movie_scene_binding_count", "track_count")
+            if key in data
+        }
+    payload = {
+        "_error": "RESPONSE_TOO_LARGE",
+        "_message": (
+            "Detailed animation binding content exceeds the response limit. "
+            "Re-request with a smaller limit, or omit include_track_content for the summary read."
+        ),
+        "reader_complete": False,
+        "asset_path": data.get("asset_path"),
+        "animation_name": data.get("animation_name"),
+        "fingerprint": data.get("fingerprint"),
+        "summary_counts": counts,
+        "max_response_chars": MAX_RESPONSE_CHARS,
+    }
+    return json.dumps(payload, indent=2)
+
+
+def _format_detailed_read(data: dict) -> str:
+    """Complete-or-explicit-incomplete formatting for include_track_content reads."""
+    if data.get("reader_complete") is False:
+        # Native already stopped detail extraction at its own budget.
+        return _bounded_detail_oversize(data)
+    complete = dict(data)
+    complete["reader_complete"] = True
+    text = json.dumps(complete, indent=2)
+    if len(text) <= MAX_RESPONSE_CHARS:
+        return text
+    return _bounded_detail_oversize(data)
+
+
+def format_response(data: dict, tool_name: str, *, command: str | None = None, detail: bool = False) -> str:
     """Serialize data to JSON, truncating array results if over size limit.
 
     If the response exceeds MAX_RESPONSE_CHARS:
@@ -61,10 +139,17 @@ def format_response(data: dict, tool_name: str) -> str:
     Args:
         data: The response data dict.
         tool_name: Name of the tool for error messages.
+        command: The routed command name, used for dedicated authoring formatting.
+        detail: True for include_track_content reads, which are formatted before the
+            generic nested-track truncator as complete-or-explicit-incomplete.
 
     Returns:
         JSON string, guaranteed under MAX_RESPONSE_CHARS.
     """
+    if command in ANIMATION_AUTHORING_COMMANDS:
+        return _bound_authoring_response(data)
+    if detail:
+        return _format_detailed_read(data)
     text = json.dumps(data, indent=2)
     if len(text) <= MAX_RESPONSE_CHARS:
         return text

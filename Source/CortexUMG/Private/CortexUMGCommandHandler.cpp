@@ -3,6 +3,7 @@
 #include "Operations/CortexUMGWidgetTreeOps.h"
 #include "Operations/CortexUMGWidgetPropertyOps.h"
 #include "Operations/CortexUMGWidgetAnimationOps.h"
+#include "Operations/CortexUMGAnimationAuthoringOps.h"
 #include "Operations/CortexUMGPropertyBindingOps.h"
 #include "CortexAssetMutationGuard.h"
 #include "Engine/Blueprint.h"
@@ -150,6 +151,14 @@ FCortexCommandResult FCortexUMGCommandHandler::Execute(
     {
         return FCortexUMGWidgetAnimationOps::RemoveAnimationBinding(Params);
     }
+    if (Command == TEXT("ensure_animation_binding"))
+    {
+        return FCortexUMGAnimationAuthoringOps::EnsureAnimationBinding(Params);
+    }
+    if (Command == TEXT("set_animation_property_track"))
+    {
+        return FCortexUMGAnimationAuthoringOps::SetAnimationPropertyTrack(Params);
+    }
 
     return FCortexCommandRouter::Error(
         CortexErrorCodes::UnknownCommand,
@@ -279,6 +288,7 @@ TArray<FCortexCommandInfo> FCortexUMGCommandHandler::GetSupportedCommands() cons
             .Required(TEXT("animation_name"), TEXT("string"), TEXT("Animation name to inspect"))
             .Optional(TEXT("offset"), TEXT("number"), TEXT("0-based pagination offset"))
             .Optional(TEXT("limit"), TEXT("number"), TEXT("Maximum bindings to return (1-200, default: 50)"))
+            .Optional(TEXT("include_track_content"), TEXT("boolean"), TEXT("Include detailed per-track property/section/channel content (default: false)"))
             .Optional(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Optional content guard fingerprint")),
         FCortexCommandInfo{ TEXT("remove_animation_binding"), TEXT("Remove a single UMG animation binding record with optimistic locking and preview") }
             .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
@@ -287,5 +297,19 @@ TArray<FCortexCommandInfo> FCortexUMGCommandHandler::GetSupportedCommands() cons
             .Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Content guard fingerprint from prior read"))
             .Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("If true, previews changes without mutating (default: true)"))
             .Optional(TEXT("save"), TEXT("boolean"), TEXT("If true, persists package to disk after mutation (default: false)")),
+        FCortexCommandInfo{ TEXT("ensure_animation_binding"), TEXT("Create or resolve an ordinary Designer-widget animation binding") }
+            .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
+            .Required(TEXT("animation_name"), TEXT("string"), TEXT("Animation name"))
+            .Required(TEXT("widget_name"), TEXT("string"), TEXT("Exact case-sensitive Designer widget name"))
+            .Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Content guard fingerprint from prior read"))
+            .Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("If true, previews changes without mutating (default: true)")),
+        FCortexCommandInfo{ TEXT("set_animation_property_track"), TEXT("Create, replace or clear one float/linear-color property track on an existing binding") }
+            .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
+            .Required(TEXT("animation_name"), TEXT("string"), TEXT("Animation name"))
+            .Required(TEXT("selector"), TEXT("object"), TEXT("Exact binding selector"))
+            .Required(TEXT("property_path"), TEXT("string"), TEXT("Exact reflected property path"))
+            .Required(TEXT("track"), TEXT("object"), TEXT("Track object, or explicit null to clear the one property track"))
+            .Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Content guard fingerprint from prior read"))
+            .Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("If true, previews changes without mutating (default: true)")),
     };
 }
