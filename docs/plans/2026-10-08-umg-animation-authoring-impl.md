@@ -10,7 +10,7 @@
 
 **Spec:** [2026-10-08-umg-animation-authoring-design.md](2026-10-08-umg-animation-authoring-design.md), explicitly approved by the user after both independent review lenses confirmed corrections. Source baseline: 6506e03a21a8a2c6af1570b3d01e736947cd3040. Design commit: b6f32c2.
 
-**Status:** Plan for user review; not execution approval or passing implementation evidence.
+**Status:** Implementation and mapped independent source review complete. Controller verified rendering Cortex+1802/1802, nonlivePython993/993, actualSDKauthor31/31 and fresh-processcold19/19 including real widget playback. Prescribed cross-domain benchmark complete:249actualSDKcalls and viewed graph/Designer/material/scene surfaces; task-owned fixtures/editor cleaned up. Evidence: [verification report](../verification/2026-10-08-issue176-umg-animation-authoring.md). Publication and expected-head merged delivery are in progress. Historical step checkboxes below are the approved execution brief; the ledger and verification report carry actual checkpoint results.
 
 ## Global Constraints
 
@@ -334,7 +334,7 @@ Use the actual returned player/compiled widget's animation, observe Decoration.R
 
 ## Approval and execution handoff
 
-Recommend subagent-driven execution with one native owner and one independent MCP owner, controller-owned RED/GREEN checkpoints and integrated acceptance. The native mutation journal/guard is too tightly coupled for multiple native writers; Python routing/formatting is a genuinely independent slice with a fixed contract. The user must review this written plan and select/confirm execution before production edits. This is the architectural artifact gate, not a renewed request for publication authority.
+User approved subagent-driven execution with one native owner and one independent MCP owner, controller-owned RED/GREEN checkpoints and integrated acceptance. The native mutation journal/guard stays with one native writer; Python routing/formatting is a genuinely independent slice with a fixed contract. Architectural artifact gates are complete. Merged-delivery authority remains established.
 
 ## Execution record
 
@@ -344,7 +344,11 @@ Recommend subagent-driven execution with one native owner and one independent MC
 - Native review correction: MovieSceneFloatChannel.h:197 takes Set arrays by value; the implementation snippet now moves Times/Values instead of copying them. Native reviewer confirmed the reversible track APIs and safe inherited member-pointer tick access.
 - Public-contract review correction: native dispatch/schema names rename_widget (CortexUMGCommandHandler.cpp:52-54,190-194), not rename. The controller rejected an unsupported reviewer claim that get_tree exposes its fingerprint: GetTree:354-383 does not. The corrected controlled-fixture workflow gets the unchanged is_variable from get_widget and obtains the proper tree fingerprint from the no-op set_widget_variable response before any transaction (WidgetTreeOps.cpp:1021-1047); the reviewer confirmed that correction. Neither animation nor property-binding fingerprints substitute for the rename guard.
 - Both reviewers reported no remaining blockers within their original review scopes after correction. No acceptance criterion was set aside; build/tests/native runtime remain unexecuted.
-- Implementation plan: awaiting user review/execution selection. No authored production behavior, native RED/GREEN, cold reload or actual new-animation playback has run.
+- Implementation plan: user approved and selected subagent-driven execution. Plan-scoped ledger and exclusive native/MCP edit ownership established; initial task dispatch is tests-only, before controller RED proof. No production authoring/native GREEN/cold-reload/new-animation playback claim.
+- Integrated acceptance: full rendering Cortex+1802/1802 on Saved/TestLogs/AutomationTest_2026-10-08_164424.log, no unexpected raw native diagnostics; Python993/993 (265deselected) on Saved/Issue176/mcp_final_nonlive.xml. ActualSDK author31/31 and NEW-process cold19/19 on Saved/Issue176/author_acceptance_final.json and cold_acceptance_final.json, including exact persisted digest/content, native generated-widget opacity0.5/color[0.5,0.25,0.125,1], unaffected/unplayed controls, rename/recompile/replay and surgical clear/removal.
+- Harness ordering correction: RunTests.ps1:439-451 deletes Content/Temp/Cortex*Test* before/after native runs; the earlier MCP package was removed by that cleanup, not shown to fail serialization. Controller recreated once AFTER all native tests and restarted without another runner. Final author/cold acceptance both passed; earlier failed artifacts remain distinguished from final evidence.
+- Final mapped reviewer approved only the two confirmed equality corrections after controller failing-first proof (bound inclusivity and channel native clock); no speculative wider re-review. Exercised source903fileSHA256:1a3c341fe67f5f5e66276395f6e4bb7fc8076726228dfc1844d03c798f4fdde7. Source manifest Saved/Issue176/verified_candidate_source_manifest.json binds native/Python/runtime evidence.
+- Targeted cortex-sync-docs audit reported local://issue176-project-doc-sync-report.md; user approved both bounded workspace CortexUMG/INDEX updates. Toolkit five-file synchronization reviewed for exact native commands/guards/limits; generated fallback --from-fixture --check passed. UE5.6/5.7 remain unverified.
 
 ## Simplicity check
 

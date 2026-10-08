@@ -1,5 +1,6 @@
 #include "Operations/CortexUMGWidgetAnimationOps.h"
 #include "Operations/CortexUMGAnimationBindingUtils.h"
+#include "Operations/CortexUMGAnimationTrackUtils.h"
 #include "CortexUMGUtils.h"
 #include "WidgetBlueprint.h"
 #include "Blueprint/WidgetTree.h"
@@ -195,6 +196,20 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::ListAnimationBindings(
             return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("limit must be an integer between 1 and 200"));
         }
     }
+
+    bool bIncludeTrackContent = false;
+    if (Params->HasField(TEXT("include_track_content")))
+    {
+        if (!Params->HasTypedField<EJson::Boolean>(TEXT("include_track_content"))
+            || !Params->TryGetBoolField(TEXT("include_track_content"), bIncludeTrackContent))
+        {
+            return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+                TEXT("include_track_content must be a boolean"));
+        }
+    }
+    int64 DetailedRemainingChars =
+        CortexUMGAnimationTrackUtils::MaxDetailedResponseChars - 2048;
+    bool bDetailedTooLarge = false;
 
     FCortexCommandResult LoadError;
     UWidgetBlueprint* WBP = CortexUMGUtils::LoadWidgetBlueprint(AssetPath, LoadError);
@@ -476,6 +491,30 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::ListAnimationBindings(
                         }
                         TrackObj->SetNumberField(TEXT("channel_count"), ChannelCount);
                         TrackObj->SetNumberField(TEXT("key_count"), KeyCount);
+
+                        if (bIncludeTrackContent)
+                        {
+                            TSharedPtr<FJsonObject> Detailed;
+                            TArray<FString> TrackDiagnostics;
+                            if (!CortexUMGAnimationTrackUtils::DescribeTrack(
+                                    Track, DetailedRemainingChars, Detailed, TrackDiagnostics))
+                            {
+                                bDetailedTooLarge = true;
+                                break;
+                            }
+                            if (Detailed.IsValid())
+                            {
+                                for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Detailed->Values)
+                                {
+                                    TrackObj->SetField(Pair.Key, Pair.Value);
+                                }
+                            }
+                            for (const FString& Diagnostic : TrackDiagnostics)
+                            {
+                                DiagnosticsArray.Add(MakeShared<FJsonValueString>(Diagnostic));
+                            }
+                        }
+
                         TracksArray.Add(MakeShared<FJsonValueObject>(TrackObj));
                     }
                 }
@@ -486,6 +525,23 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::ListAnimationBindings(
 
             BindingsArray.Add(MakeShared<FJsonValueObject>(B));
         }
+    }
+
+    if (bDetailedTooLarge)
+    {
+        TSharedPtr<FJsonObject> Bounded = MakeShared<FJsonObject>();
+        Bounded->SetStringField(TEXT("_error"), TEXT("RESPONSE_TOO_LARGE"));
+        Bounded->SetBoolField(TEXT("reader_complete"), false);
+        Bounded->SetStringField(TEXT("asset_path"), AssetPath);
+        Bounded->SetStringField(TEXT("animation_name"), AnimName);
+        Bounded->SetObjectField(TEXT("fingerprint"), LiveFingerprint.ToJson());
+        TSharedPtr<FJsonObject> SummaryCounts = MakeShared<FJsonObject>();
+        SummaryCounts->SetNumberField(TEXT("umg_binding_count"), TotalBindings);
+        SummaryCounts->SetNumberField(TEXT("movie_scene_binding_count"), MSBindingCount);
+        SummaryCounts->SetNumberField(TEXT("track_count"), TotalTrackCount);
+        Bounded->SetObjectField(TEXT("summary_counts"), SummaryCounts);
+        Bounded->SetNumberField(TEXT("max_response_chars"), CortexUMGAnimationTrackUtils::MaxDetailedResponseChars);
+        return FCortexCommandRouter::Success(Bounded);
     }
 
     TSharedPtr<FJsonObject> PaginationObj = MakeShared<FJsonObject>();
@@ -560,6 +616,7 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::ListAnimationBindings(
     Data->SetArrayField(TEXT("bindings"), BindingsArray);
     Data->SetObjectField(TEXT("pagination"), PaginationObj);
     Data->SetArrayField(TEXT("diagnostics"), DiagnosticsArray);
+    Data->SetBoolField(TEXT("reader_complete"), true);
 
     return FCortexCommandRouter::Success(Data);
 }

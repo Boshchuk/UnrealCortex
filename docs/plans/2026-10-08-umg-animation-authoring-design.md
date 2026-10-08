@@ -1,7 +1,7 @@
 # UMG widget animation authoring — issue176 design
 
 Date: 2026-10-08
-Status: Independently reviewed, corrected and explicitly approved by the user; implementation plan is awaiting review/execution selection.
+Status: Implemented and independently source-reviewed; full rendering native/Python and actual SDK saved-widget author/cold-reload/playback acceptance passed on UE5.8.3. Prescribed cross-domain benchmark and merged delivery are in progress.
 Issue: https://github.com/etelyatn/UnrealCortex/issues/176
 Source baseline: 6506e03a21a8a2c6af1570b3d01e736947cd3040
 Implementation owner: UnrealCortex / CortexUMG; existing Python umg_cmd router.
@@ -20,7 +20,7 @@ Enable an agent to create the contents of a UMG animation using structured Corte
 | Actual widget property changes | Not yet exercised | Real saved generated widget instance plays animation; inspect intermediate opacity/color and unchanged sibling |
 | Existing reads/removal/rename remain consistent | Binding removal synchronizes representations; native rename propagates binding WidgetName | Author, rename, inspect, play, selectively remove; siblings and unaffected tracks preserved |
 
-All rows are requirements, not currently passing claims. The mounted MCP server was not connected during initial intake; live verification remains a prerequisite to merge.
+All rows are requirements. Implementation acceptance is now exercised: full rendering Cortex+ passed 1802/1802, nonlive Python passed 993/993, and actual stdio MCP author/cold phases passed 31/31 and 19/19. The fresh process retained exact GUID/property/ranges/keys/interpolation and digest, produced opacity/color midpoint effects with unchanged controls, and preserved rename/clear/removal semantics. Publication is not yet complete; exact evidence belongs in [the verification report](../verification/2026-10-08-issue176-umg-animation-authoring.md).
 
 ## Ownership and reuse
 
