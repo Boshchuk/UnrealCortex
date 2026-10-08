@@ -120,16 +120,6 @@ bool TryParseEnumValue(
 	return true;
 }
 
-void CollectAllStates(const FCortexSTAssetContext& Context, TArray<FCortexSTStateRef>& OutStates)
-{
-	if (Context.EditorData == nullptr || Context.EditorData->SubTrees.Num() == 0 || Context.EditorData->SubTrees[0] == nullptr)
-	{
-		return;
-	}
-
-	CortexST::CollectStates(Context.EditorData->SubTrees[0], OutStates);
-}
-
 bool ResolveStateBySelector(
 	const FCortexSTAssetContext& Context,
 	const TSharedPtr<FJsonObject>& Params,
@@ -139,18 +129,6 @@ bool ResolveStateBySelector(
 	FCortexSTStateRef& OutState,
 	FCortexCommandResult& OutError)
 {
-	const UStateTreeState* RootState =
-		Context.EditorData != nullptr && Context.EditorData->SubTrees.Num() > 0
-			? Context.EditorData->SubTrees[0]
-			: nullptr;
-	if (RootState == nullptr)
-	{
-		OutError = FCortexCommandRouter::Error(
-			CortexErrorCodes::StateTreeStateNotFound,
-			FString::Printf(TEXT("StateTree has no root state: %s"), *Context.AssetPath));
-		return false;
-	}
-
 	FString StateId;
 	FString StatePath;
 	const bool bHasStateId = Params.IsValid() && Params->TryGetStringField(IdField, StateId) && !StateId.IsEmpty();
@@ -165,7 +143,7 @@ bool ResolveStateBySelector(
 	}
 
 	TArray<FCortexSTStateRef> States;
-	CollectAllStates(Context, States);
+	CortexST::CollectAllStates(Context, States);
 
 	if (!bHasStateId && !bHasStatePath)
 	{
