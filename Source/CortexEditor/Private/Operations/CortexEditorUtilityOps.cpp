@@ -697,7 +697,9 @@ FCortexCommandResult FCortexEditorUtilityOps::ExecuteConsoleCommand(
 			TEXT("Missing required param: command"));
 	}
 
-	const bool bOk = GEditor->PlayWorld->Exec(GEditor->PlayWorld, *Command);
+	// Preserve world Exec precedence; never dispatch again after either path handles the input.
+	const bool bOk = GEditor->PlayWorld->Exec(GEditor->PlayWorld, *Command)
+		|| IConsoleManager::Get().ProcessUserConsoleInput(*Command, *GLog, GEditor->PlayWorld);
 	if (!bOk)
 	{
 		return FCortexCommandRouter::Error(

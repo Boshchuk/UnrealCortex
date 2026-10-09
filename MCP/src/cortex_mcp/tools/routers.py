@@ -12,7 +12,11 @@ from pydantic import ConfigDict, WithJsonSchema, create_model
 from cortex_mcp.capabilities import CORE_DOMAINS
 from cortex_mcp.graph_patch_boundary import dispatch_graph_apply_patch
 from cortex_mcp.pagination import PaginationCache, decode_cursor
-from cortex_mcp.response import format_response, _find_largest_list
+from cortex_mcp.response import (
+    ANIMATION_AUTHORING_COMMANDS,
+    _find_largest_list,
+    format_response,
+)
 from cortex_mcp.schema_generator import (
     SCHEMA_VERSION,
     get_schema_dir,
@@ -109,17 +113,42 @@ def _should_forward_limit_to_cpp(domain: str, command: str, params: dict) -> boo
     return False
 
 
-def _format_ue_command_error(exc: UECommandError) -> str:
+def _error_payload(code: str, message: str, details) -> dict:
+    """Standard native error payload with non-reserved detail fields preserved."""
     payload = {
         "success": False,
-        "_error": exc.code,
-        "_message": exc.message,
-        "_command": exc.command,
+        "_error": code,
+        "_message": message,
     }
-    for key, value in exc.details.items():
-        if key not in _UE_ERROR_RESERVED_FIELDS:
-            payload[key] = value
-    return format_response(payload, "ue_command_error")
+    if isinstance(details, dict):
+        for key, value in details.items():
+            if key not in _UE_ERROR_RESERVED_FIELDS:
+                payload[key] = value
+    return payload
+
+
+def _native_failure_payload(response) -> dict | None:
+    """Convert a transport-returned native failure envelope into the standard error payload.
+
+    EditorConnection raises UECommandError for failed commands; this keeps any non-raising
+    failure envelope from being mistaken for absent data and reported as an empty success.
+    """
+    if not isinstance(response, dict) or response.get("success") is not False:
+        return None
+    error = response.get("error")
+    if not isinstance(error, dict):
+        error = {}
+    return _error_payload(
+        error.get("code", "UNKNOWN"),
+        error.get("message", "Unknown error"),
+        error.get("details"),
+    )
+
+
+def _format_ue_command_error(exc: UECommandError, command: str | None = None) -> str:
+    payload = _error_payload(exc.code, exc.message, exc.details)
+    payload["_command"] = exc.command
+    return format_response(payload, "ue_command_error", command=command)
 
 
 _CANONICAL_ROUTER_SHAPE = {"command": "string", "params": "object"}
@@ -265,6 +294,21 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
                 response = connection.send_command(qualified, route_params)
                 return format_response(response.get("data", {}), f"{domain}_cmd")
 
+            # Animation authoring writes dispatch directly: any supplied cursor/limit/offset
+            # field refuses before generic cached pagination, and native failures are
+            # propagated instead of being reported as an empty success.
+            if domain == "umg" and command in ANIMATION_AUTHORING_COMMANDS:
+                if any(key in route_params for key in ("limit", "cursor", "offset")):
+                    return json.dumps({
+                        "_error": "INVALID_FIELD",
+                        "_message": "Pagination fields are unsupported for animation authoring.",
+                    })
+                response = connection.send_command(qualified, route_params)
+                failure = _native_failure_payload(response)
+                if failure is not None:
+                    return format_response(failure, "ue_command_error", command=command)
+                return format_response(response.get("data", {}), f"{domain}_cmd", command=command)
+
             # UMG animation binding inspection and guarded removal
             if domain == "umg" and command in {"remove_animation_binding", "list_animation_bindings"}:
                 if command == "remove_animation_binding":
@@ -273,8 +317,28 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
                             "_error": "INVALID_FIELD",
                             "_message": "Pagination parameters (limit, cursor, offset) are not supported on remove_animation_binding.",
                         })
+                elif (
+                    "include_track_content" in route_params
+                    and not isinstance(route_params["include_track_content"], bool)
+                ):
+                    return json.dumps({
+                        "_error": "INVALID_FIELD",
+                        "_message": "include_track_content must be boolean.",
+                    })
                 response = connection.send_command(qualified, route_params)
-                return format_response(response.get("data", {}), f"{domain}_cmd")
+                failure = _native_failure_payload(response)
+                if failure is not None:
+                    return format_response(failure, "ue_command_error", command=command)
+                detail = (
+                    command == "list_animation_bindings"
+                    and route_params.get("include_track_content") is True
+                )
+                return format_response(
+                    response.get("data", {}),
+                    f"{domain}_cmd",
+                    command=command,
+                    detail=detail,
+                )
 
             # Check for cursor (subsequent page — no C++ call needed)
             cursor_token = route_params.get("cursor")
@@ -307,7 +371,7 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
         except ConnectionError as exc:
             return f"Error: {exc}"
         except UECommandError as exc:
-            return _format_ue_command_error(exc)
+            return _format_ue_command_error(exc, command=command)
         except (RuntimeError, ValueError, KeyError) as exc:
             return f"Error: {exc}"
 

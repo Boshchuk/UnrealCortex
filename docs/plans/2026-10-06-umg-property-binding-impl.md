@@ -157,3 +157,9 @@ Final review found two Important/P2 defects, no Critical/Minor: case-mismatched 
 
 Publication: UnrealCortex PR169 merged `8f6012a5536b880912f59eadd4e06ad8be7549d0` from exact expected head `562373b4fcb4a234655dc4f0ab104dc3199c6a1f` against unchanged base `c05e89bd8aaae5b21af7078ab1a4dfbbeeb8490e`. Remote MERGED and issue167 CLOSED/COMPLETED confirmed. Exit0 Source/MCP/uplugin diff against tested `3801aaa80d23419757e7999aca3923959c1d1b81` plus ancestry binds the shipped result to exercised evidence. Toolkit PR66 and CortexSandbox PR116 merged their exact reviewed documentation heads; no parent gitlink/schema/cdb changes included.
 
+
+## PR171 compatibility correction
+
+Retain Boshchuk's `const auto&` request-field iteration and existing `JsonKeyToString` conversion without changing binding validation. Current-main integration `cafdecd7912ebb3890264d23cf185060f1e00657` passed the supported editor build, focused real-header Clang RED/GREEN, actual changed translation-unit syntax compilation, 141/141 UMG tests and native TCP positive/refusal smoke. Native tests and smoke had no raw warning/error/fatal diagnostics. Windows Clang checks retain engine-header warnings and are not Linux linking proof; contributor Linux results remain attributed.
+
+Detailed identity, commands, limitations and review: [PR171 verification](../verification/2026-10-08-pr171.md). No MCP/toolkit contract change or new permanent test was required.
