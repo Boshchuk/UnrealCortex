@@ -957,7 +957,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCortexBPAnalysisTimelinesPreloadMembersTest::RunTest(const FString& Parameters)
 {
 	FCortexBPCommandHandler Handler;
-	const FString UniqueSuffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString UniqueSuffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	const FString BlueprintName = FString::Printf(TEXT("BP_TimelinePreload_%s"), *UniqueSuffix);
 	const FString TestPath = FString::Printf(TEXT("/Game/Temp/CortexBPTest_TimelinePreload_%s"), *UniqueSuffix);
 	const FString TestBPPath = FString::Printf(TEXT("%s/%s"), *TestPath, *BlueprintName);

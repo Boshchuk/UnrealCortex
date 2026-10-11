@@ -57,7 +57,7 @@ FCortexCommandRouter CreateCurveRouter()
 
 FString MakeCurveSuffix()
 {
-	return FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(12);
+	return FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(12);
 }
 
 UAnimSequence* CreateCurveTestSequence(FAutomationTestBase& Test, FString& OutAssetPath)
