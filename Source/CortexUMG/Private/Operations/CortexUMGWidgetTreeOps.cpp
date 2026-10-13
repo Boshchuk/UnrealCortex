@@ -50,6 +50,8 @@
 #include "MovieScene.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 #include "UObject/UnrealType.h"
 #if __has_include("UIComponentWidgetBlueprintExtension.h")
 #include "UIComponentWidgetBlueprintExtension.h"
@@ -511,20 +513,27 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::GetTree(const TSharedPtr<FJsonObje
 
     // The asset-owned binding inventory is appended by its own owner and is never shortened by the
     // tree budget, so a combined read whose complete response exceeds the module's established
-    // ceiling refuses explicitly instead of returning a partial payload that hides the inventory.
-    if (Data->HasField(TEXT("property_binding_state"))
-        && CortexUMGAnimationTrackUtils::EstimateAsciiPrettyChars(MakeShared<FJsonValueObject>(Data))
-               > CortexUMGAnimationTrackUtils::MaxDetailedResponseChars)
+    // bounded-response ceiling refuses explicitly instead of returning a partial payload that hides
+    // the inventory. The measured quantity is the model-facing compact JSON text this command
+    // actually ships (the transport's condensed writer), not a pretty-printed estimate of it.
+    if (Data->HasField(TEXT("property_binding_state")))
     {
-        TSharedPtr<FJsonObject> Bounded = MakeShared<FJsonObject>();
-        Bounded->SetStringField(TEXT("_error"), TEXT("RESPONSE_TOO_LARGE"));
-        Bounded->SetBoolField(TEXT("reader_complete"), false);
-        Bounded->SetStringField(TEXT("asset_path"), AssetPath);
-        Bounded->SetNumberField(TEXT("total_widgets"), TotalWidgets);
-        Bounded->SetNumberField(TEXT("returned_widgets"), Budget.ReturnedWidgets);
-        Bounded->SetNumberField(TEXT("max_response_chars"),
-            CortexUMGAnimationTrackUtils::MaxDetailedResponseChars);
-        return FCortexCommandRouter::Success(Bounded);
+        FString CompactText;
+        const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+            TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&CompactText);
+        FJsonSerializer::Serialize(Data.ToSharedRef(), Writer);
+        if (CompactText.Len() > CortexUMGAnimationTrackUtils::MaxDetailedResponseChars)
+        {
+            TSharedPtr<FJsonObject> Bounded = MakeShared<FJsonObject>();
+            Bounded->SetStringField(TEXT("_error"), TEXT("RESPONSE_TOO_LARGE"));
+            Bounded->SetBoolField(TEXT("reader_complete"), false);
+            Bounded->SetStringField(TEXT("asset_path"), AssetPath);
+            Bounded->SetNumberField(TEXT("total_widgets"), TotalWidgets);
+            Bounded->SetNumberField(TEXT("returned_widgets"), Budget.ReturnedWidgets);
+            Bounded->SetNumberField(TEXT("max_response_chars"),
+                CortexUMGAnimationTrackUtils::MaxDetailedResponseChars);
+            return FCortexCommandRouter::Success(Bounded);
+        }
     }
 
     return FCortexCommandRouter::Success(Data);

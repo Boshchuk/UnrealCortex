@@ -15,21 +15,25 @@ are controller-owned.
 names-only projection, reports how complete the walk actually was, and refuses an unsafe combined
 tree + property-binding read instead of emitting a complete-looking partial payload.
 
-Changed files (this task, all uncommitted):
+Changed files (this task):
 
 | File | Change |
 |---|---|
 | `Source/CortexUMG/Private/Operations/CortexUMGWidgetTreeOps.h` | Private `FTreeReadBudget` (the one traversal budget: `MaxDepth`, `RemainingNodes`, `bNamesOnly` plus the accounting `ReturnedWidgets`/`bDepthCut`/`bNodeCut`) and the bounded `BuildWidgetTreeJson(UWidget*, int32 Depth, FTreeReadBudget&)` signature. |
-| `Source/CortexUMG/Private/Operations/CortexUMGWidgetTreeOps.cpp` | Strict optional param reads (`ReadBoundedTreeIntParam`/`ReadBoundedTreeBoolParam`, cpp:201-238); budget-inspected, names-projected builder (cpp:241-321); `GetTree` (cpp:444-525) parses the bounds, counts the asset total without property expansion, emits the completeness fields and applies the combined-read refusal. |
+| `Source/CortexUMG/Private/Operations/CortexUMGWidgetTreeOps.cpp` | Strict optional param reads (`ReadBoundedTreeIntParam`/`ReadBoundedTreeBoolParam`, cpp:201-238); budget-inspected, names-projected builder (cpp:241-321); `GetTree` (cpp:444-537) parses the bounds, counts the asset total without property expansion, emits the completeness fields and applies the combined-read refusal, which measures the **compact** condensed-writer text of the built response. |
 | `Source/CortexUMG/Private/CortexUMGCommandHandler.cpp` | The live `get_tree` command info (cpp:186-191) advertises the optional `depth`, `max_nodes` and `names_only`; the description names the bounded/names-only contract. |
-| `Source/CortexUMG/Private/Tests/CortexUMGTreeBoundsTest.cpp` | Staged RED: six consumer-visible regressions `Cortex.UMG.TreeBounds.*` (untracked; not modified by the implementation round). |
+| `Source/CortexUMG/Private/Tests/CortexUMGTreeBoundsTest.cpp` | Staged RED: six consumer-visible regressions `Cortex.UMG.TreeBounds.*`, plus `Cortex.UMG.TreeBounds.CompactAdmissibleCombinedReadAccepted` added with the review correction below (seven regressions total; untracked). |
 | `Plugins/UnrealCortex/docs/verification/2026-10-13-issue180-token-efficiency-task10.md` | This record. |
 
 Not part of this task (deliberately): the generated MCP fallback and capabilities fixtures, the
 toolkit resources and the parent-repo/toolkit UMG documents — Task 17 owns those.
 
-`git status --porcelain -- Source/CortexUMG` lists exactly the three modified files above plus the
-already-staged untracked test file; nothing else in the module was touched.
+The first implementation round (the three production/test files above plus this record) is committed
+as `beb1cb8` ("Task10: honest bounded UMG tree reads with truthful cut metadata"). The review
+correction round documented below is uncommitted on top of that commit and touches only
+`Operations/CortexUMGWidgetTreeOps.cpp`, `Tests/CortexUMGTreeBoundsTest.cpp` and this record, so
+`git status --porcelain -- Source/CortexUMG` currently lists exactly the corrected `.cpp` and the test
+file.
 
 ## Contract implemented
 
@@ -57,12 +61,20 @@ already-staged untracked test file; nothing else in the module was touched.
 * `include_property_bindings=true` remains an independent complete asset-wide inventory appended by
   its unchanged owner (`FCortexUMGPropertyBindingOps::AppendInspection`); a tree cut never shortens it,
   and orphan diagnostics still resolve against the full tree with case-sensitive lookup.
-* The one exception: when the inventory is attached and the estimated ASCII-pretty size of the whole
-  response exceeds the module ceiling `CortexUMGAnimationTrackUtils::MaxDetailedResponseChars` (40000),
-  the combined read refuses with the module's bounded envelope — `_error = "RESPONSE_TOO_LARGE"`,
-  `reader_complete = false`, retained `asset_path` / `total_widgets` / `returned_widgets` /
-  `max_response_chars`, and no `root`, `property_binding_state` or `tree_complete` — instead of
-  returning partial orphan state as empty.
+* The one exception: when the inventory is attached and the **compact** JSON text of the whole built
+  response exceeds the module's established bounded-response ceiling
+  `CortexUMGAnimationTrackUtils::MaxDetailedResponseChars` (40000 characters), the combined read
+  refuses with the module's bounded envelope — `_error = "RESPONSE_TOO_LARGE"`, `reader_complete =
+  false`, retained `asset_path` / `total_widgets` / `returned_widgets` / `max_response_chars`, and no
+  `root`, `property_binding_state` or `tree_complete` — instead of returning partial orphan state as
+  empty.
+* The measured quantity is exactly the text this command ships to the model: the built response
+  object is serialized with the transport's condensed writer
+  (`TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>` through `FJsonSerializer::Serialize`) and
+  the resulting `FString::Len()` is compared with the 40000 ceiling. It is **not** the pretty-indented
+  estimate (`EstimateAsciiPrettyChars`, which pads every number to 32 characters and adds per-element
+  indent) that the animation family measures, so a combined read whose compact payload fits the
+  ceiling is never refused.
 * A tree-only oversized read is deliberately not refused natively: the tree is caller-boundable via
   `depth`/`max_nodes` (and its completeness is declared by `tree_complete`), and bounded tree-only
   responses are owned by the Python layer's own `RESPONSE_TOO_LARGE` refusal.
@@ -91,7 +103,17 @@ Per-test consumer-visible failures (test file line numbers as reported by the ru
 * `FullTreeRecovery` — `tree_complete`/`returned_widgets` absent (`-1`) and leaves still serialized an
   empty `children` array.
 
-## Controller-observed GREEN (implementation round)
+The `Cortex.UMG.TreeBounds` family is now seven regressions; the run above covered the six staged RED
+ones, and the seventh, `Cortex.UMG.TreeBounds.CompactAdmissibleCombinedReadAccepted`, was added with
+the review correction below and has no RED of its own: it pins the corrected compact-text ceiling
+against a payload that a pretty-estimate ceiling would have refused, so it fails only if the metric
+regresses.
+
+## Controller-observed GREEN — first implementation round (pre-correction source)
+
+The two runs below covered the first implementation (the pretty-estimate ceiling); they are the
+observed evidence for that source and are superseded for the corrected source by the round recorded
+next.
 
 | Filter | Result | Log | Raw diagnostic scan |
 |---|---|---|---|
@@ -102,14 +124,47 @@ Both logs end with a queue-empty line for their own filter (`6 tests performed.`
 `13 tests performed.`), i.e. the runs covered exactly the intended families. The runs are
 controller-owned; the numbers above are read from those logs.
 
+## Correction round: compact-response ceiling (review finding fix)
+
+Review finding (controller source-confirmed, P2): the combined-read refusal compared a
+pretty-indented estimate with a ceiling whose constraint is the model-facing **compact** text, so it
+over-refused combined reads whose shipped payload fits (for example a tree of a few hundred
+short-named widgets).
+
+Correction applied (UMG tree branch only):
+
+* The refusal now serializes the built response with the repo-wide condensed writer
+  (`TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>` + `FJsonSerializer::Serialize` →
+  `FString::Len()`, the same pattern as `CortexCommandRouter.cpp:98-101` and
+  `CortexTcpServer.cpp:768-770`) and compares that length with the same 40000-character ceiling. No new
+  estimator family was added, and the animation/authoring pretty-ceiling reads are untouched.
+* The `RESPONSE_TOO_LARGE` envelope is unchanged: `_error`, `reader_complete=false`, `asset_path`,
+  `total_widgets`, `returned_widgets`, `max_response_chars`, with no `root` /
+  `property_binding_state` / `tree_complete`.
+* The genuinely oversized fixture (120 children × 512-character fill) still refuses — its compact text
+  is ~67.8 kB — and the six existing regressions are unchanged.
+* New boundary regression `Cortex.UMG.TreeBounds.CompactAdmissibleCombinedReadAccepted`: 450 children
+  with a 25-character fill. Trees of that shape carry a pretty-indented estimate of ~47 kB (tree only)
+  to ~48 kB (with the inventory) while the shipped condensed text is ~32.5 kB (tree only) to ~33.2 kB
+  (with the inventory); the test asserts the read is accepted, `tree_complete=true`,
+  `returned_widgets == total_widgets == 451`, `reader_complete=true`, the seeded record retained, and
+  measures the returned payload with the same condensed writer to prove
+  `30000 < compact < 40000` with no `_error`.
+
+Covering run identity for the corrected source: **to be recorded here from the controller's serial
+`Cortex.UMG.TreeBounds+` (7 tests) and `Cortex.UMG.PropertyBinding+` (13 tests) runs.** This record
+does not claim that GREEN.
+
 ## Bindings proved unchanged
 
 * `Source/CortexUMG/Private/Operations/CortexUMGPropertyBindingOps.{h,cpp}` has **zero** changes, and
   `GetTree` still calls the same `AppendInspection(WBP, Params, nullptr, Data, …)` before any tree
   work, so the tree budget cannot reach the inventory path.
 * `Cortex.UMG.PropertyBinding+` — the full 13-test binding family, including
-  `ExactWidgetNamePreservesCaseOnlyOrphans` and `Persistence.ExplicitLifecycle` — is 13/13 GREEN on the
-  same source as the tree change (`235524.log`).
+  `ExactWidgetNamePreservesCaseOnlyOrphans` and `Persistence.ExplicitLifecycle` — was 13/13 GREEN on
+  the pre-correction source (`235524.log`). The binding owner has zero changes in either round, so the
+  tree-branch correction cannot alter any of those tests; the corrected source's run identity is
+  recorded in the correction round above.
 * `Cortex.UMG.TreeBounds.BindingOrphanUnderCut` additionally pins that a genuinely cut read
   (`tree_complete=false`) still returns `reader_complete=true`, `total=2`, `scope="asset"`, both
   serialized records (the case-only orphan keeping its exact raw name) and exactly one exact
@@ -139,10 +194,13 @@ No consumer indexes a UMG tree node's `children` directly, so no consumer needed
 * **Honest projection.** `incomplete` is omitted (not `false`) on complete nodes to keep cut claims
   one-sided, and a null panel child can never make its parent look cut: `incomplete` is set only when
   the walk actually stopped early (`bChildrenCut`).
-* **Ceiling reuse.** The combined-read refusal reuses the animation family's estimator
-  (`EstimateAsciiPrettyChars`) and ceiling (`MaxDetailedResponseChars = 40000`,
-  `CortexUMGAnimationTrackUtils.h:72`) instead of defining a second convention, and it measures the
-  exact built response so the refusal decision and the shipped envelope cannot disagree.
+* **Ceiling reuse (corrected).** The combined-read refusal shares the module's single
+  40000-character bounded-response ceiling (`MaxDetailedResponseChars`,
+  `CortexUMGAnimationTrackUtils.h:72`) with the animation family rather than defining a second limit,
+  but it measures the quantity that family does **not**: the compact condensed-writer text of the
+  response. The animation/authoring reads keep their own pretty-estimate measurement; only the UMG
+  tree branch was corrected. Because the decision is taken on the exact string that would be shipped,
+  the refusal decision and the shipped envelope cannot disagree.
 
 ## Task 17 handoff (not done here)
 

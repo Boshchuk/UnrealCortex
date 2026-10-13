@@ -9,8 +9,9 @@
 //   * the top level reports `returned_widgets`, `total_widgets`, `tree_complete` and `reasons`;
 //   * `include_property_bindings=true` stays a complete asset-wide inspection that a tree cut does
 //     not shorten, and a case-only orphan record keeps its exact raw widget name;
-//   * an unsafe oversized combined tree+bindings read is refused explicitly instead of returning a
-//     complete-looking partial payload.
+//   * an unsafe oversized combined tree+bindings read (whose complete compact JSON text exceeds the
+//     bounded-response ceiling) is refused explicitly instead of returning a complete-looking partial
+//     payload, while a combined read whose shipped text still fits that ceiling stays accepted.
 // Fixtures are dedicated task-owned Widget Blueprint packages in /Temp, retired without global GC.
 
 #include "Misc/AutomationTest.h"
@@ -27,6 +28,8 @@
 #include "Components/TextBlock.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
 #include "UObject/Package.h"
@@ -719,5 +722,78 @@ bool FCortexUMGTreeBoundsFullTreeRecoveryTest::RunTest(const FString& Parameters
 		TestTrue(TEXT("widget properties are unchanged by reads"),
 				 LeafAfter->GetText().ToString().Equals(TEXT("TreeBoundsLeafText"), ESearchCase::CaseSensitive));
 	}
+	return true;
+}
+
+// --- compact-admissible combined read is never refused ----------------------------------------
+
+// The bounded-response ceiling applies to the compact (model-facing) JSON text the command actually
+// ships. 450 children with a 25-character fill put the combined tree + inventory payload at roughly
+// 33 kB of condensed text while its pretty-indented estimate is roughly 48 kB, so a read judged on
+// the shipped text must stay accepted even though a pretty-estimate ceiling would have refused it.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexUMGTreeBoundsCompactAdmissibleCombinedTest,
+	"Cortex.UMG.TreeBounds.CompactAdmissibleCombinedReadAccepted",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGTreeBoundsCompactAdmissibleCombinedTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	FCortexUMGTreeBoundsFixture Fixture(FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	if (!Fixture.BuildOversizedTree(450, 25))
+	{
+		AddError(TEXT("compact-admissible fixture tree could not be created"));
+		return false;
+	}
+	Fixture.SeedOversizedBinding();
+
+	const FCortexCommandResult Read =
+		Fixture.Router.Execute(TEXT("umg.get_tree"), Fixture.ReadParams(true));
+	TestTrue(TEXT("compact-admissible combined read succeeds"), Read.bSuccess && Read.Data.IsValid());
+	if (!Read.bSuccess || !Read.Data.IsValid())
+	{
+		return false;
+	}
+	TestFalse(TEXT("compact-admissible combined read is not refused"),
+			  Read.Data->HasField(TEXT("_error")));
+
+	// Same condensed writer the command measures itself with: this is the exact text length the
+	// ceiling is compared against, so the fixture is admissible by construction.
+	FString CompactText;
+	const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+		TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&CompactText);
+	TestTrue(TEXT("combined payload serializes to condensed text"),
+			 FJsonSerializer::Serialize(Read.Data.ToSharedRef(), Writer));
+	TestTrue(TEXT("combined payload fits the bounded-response ceiling"), CompactText.Len() < 40000);
+	TestTrue(TEXT("fixture payload is genuinely large"), CompactText.Len() > 30000);
+
+	bool bTreeComplete = false;
+	TestTrue(TEXT("compact-admissible read declares completeness"),
+			 Read.Data->TryGetBoolField(TEXT("tree_complete"), bTreeComplete));
+	TestTrue(TEXT("compact-admissible read recovers the whole tree"), bTreeComplete);
+	int32 Returned = -1;
+	TestTrue(TEXT("compact-admissible read declares returned_widgets"),
+			 Read.Data->TryGetNumberField(TEXT("returned_widgets"), Returned));
+	TestEqual(TEXT("compact-admissible read returns every widget"), Returned, 451);
+	int32 Total = -1;
+	TestTrue(TEXT("compact-admissible read declares total_widgets"),
+			 Read.Data->TryGetNumberField(TEXT("total_widgets"), Total));
+	TestEqual(TEXT("compact-admissible read counts every widget"), Total, 451);
+
+	const TSharedPtr<FJsonObject>* State = nullptr;
+	TestTrue(TEXT("compact-admissible read still returns the binding inventory"),
+			 Read.Data->TryGetObjectField(TEXT("property_binding_state"), State));
+	if (!State || !State->IsValid())
+	{
+		return false;
+	}
+	bool bReaderComplete = false;
+	TestTrue(TEXT("compact-admissible read declares reader_complete"),
+			 (*State)->TryGetBoolField(TEXT("reader_complete"), bReaderComplete));
+	TestTrue(TEXT("compact-admissible read keeps the complete inventory"), bReaderComplete);
+	int32 BindingTotal = -1;
+	TestTrue(TEXT("compact-admissible read declares the inventory total"),
+			 (*State)->TryGetNumberField(TEXT("total"), BindingTotal));
+	TestEqual(TEXT("compact-admissible read keeps the seeded record"), BindingTotal, 1);
 	return true;
 }
