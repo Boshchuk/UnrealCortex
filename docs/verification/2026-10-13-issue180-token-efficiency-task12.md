@@ -19,13 +19,14 @@ Changed files (this task):
 
 | File | Change |
 |---|---|
-| `Source/CortexReflect/Private/Operations/CortexReflectOps.cpp` | `ClassDetail` (~cpp:1119-1130) validates the supplied `detail` and returns `InvalidField` for anything other than `summary`/`full`. `ClassHierarchy` (~cpp:651-654) reads `include_flat_classes` (default `false`) and (~cpp:728-751) builds/emits the flat `classes` array only when true; the reflect cache params (~cpp:758) record the opt-in. `Search` (~cpp:2129-2223) counts every match before applying the page, materializes at most `limit` rows, and emits `returned`/`total_matches`/`truncated`; the legacy `total_results` field is deleted outright. |
+| `Source/CortexReflect/Private/Operations/CortexReflectOps.cpp` | `ClassDetail` (~cpp:1119-1130) validates the supplied `detail` and returns `InvalidField` for anything other than `summary`/`full`. `ClassHierarchy` (~cpp:651-654) reads `include_flat_classes` (default `false`) and (~cpp:744-766) builds/emits the flat `classes` array only when true; the reflect cache params (~cpp:773) record the opt-in. `BuildHierarchyTree` (~cpp:544-560) threads a `bool& bOutTruncated` out-param set whenever the `MaxResults` node budget stops the walk early, and `ClassHierarchy` emits it as the authoritative `truncated` boolean (~cpp:736-738). `Search` (~cpp:2136-2230) counts every match before applying the page, materializes at most `limit` rows, and emits `returned`/`total_matches`/`truncated`; the legacy `total_results` field is deleted outright. |
+| `Source/CortexReflect/Private/Operations/CortexReflectOps.h` | `BuildHierarchyTree` declaration gains the `bool& bOutTruncated` parameter. |
 | `Source/CortexReflect/Private/CortexReflectCommandHandler.cpp` | Live command info: `class_hierarchy` advertises the optional `include_flat_classes` boolean; `class_detail`'s `detail` description states summary/full and that any other value is refused. |
 | `MCP/src/tools/reflect/detail.py` | `query_class_detail` default becomes `detail="summary"`; an invalid value refuses before any native dispatch; the native level is forwarded (`summary`/`full`; `properties` → `full`); new `_COVERAGE_FIELDS` (`cdo_unavailable`, `_message`, `error`, `error_code`) survive every projection. |
-| `MCP/src/tools/reflect/context.py` | `query_class_context` validates `detail`, forwards the requested level for `self`, fetches the parent with native `detail="summary"`, and emits one honest `children_complete` field computed from the native `truncated` signal (when present) or the requested node cap. |
-| `Source/CortexReflect/Private/Tests/CortexReflectHierarchyTest.cpp` | Staged RED (by `Task12ReflectLean`, unchanged): `Cortex.Reflect.Hierarchy.FlatClassesDefaultOff` / `FlatClassesOptIn`. |
+| `MCP/src/tools/reflect/context.py` | `query_class_context` validates `detail`, forwards the requested level for `self`, fetches the parent with native `detail="summary"`, and derives the single `children_complete` field **solely** from the native `truncated` traversal signal (the returned-length heuristic is deleted). |
+| `Source/CortexReflect/Private/Tests/CortexReflectHierarchyTest.cpp` | Staged RED `Cortex.Reflect.Hierarchy.FlatClassesDefaultOff` / `FlatClassesOptIn`, plus the correction-round regression `Cortex.Reflect.Hierarchy.BoundedTraversalDeclaresTruncation` (budget-bounded walk with emitted children below `max_results` must declare `truncated=true`). |
 | `Source/CortexReflect/Private/Tests/CortexReflectSearchTest.cpp` | Staged RED (unchanged): `Search.Basic`/`Limit` migrated to the truthful metadata, new `Search.UnderLimitComplete`, and `ClassHierarchy.ProjectPluginBlueprintVisible` opts into `include_flat_classes=true`. |
-| `MCP/tests/test_reflect_tools.py` | Staged RED (unchanged): the `StubReflectConnection` wiring regressions and the child-bounds guards. |
+| `MCP/tests/test_reflect_tools.py` | Staged RED wiring/child-bounds regressions, plus the correction-round `test_truncated_below_emitted_cap_declares_incompleteness`. |
 | `docs/systems/cortex-reflect.md` | Parent-repo Reflect doc: summary default, invalid-detail refusal, `children_complete`, `include_flat_classes` opt-in and the `returned`/`total_matches`/`truncated` search metadata (former `total_results` removed). |
 | `Plugins/UnrealCortex/docs/verification/2026-10-13-issue180-token-efficiency-task12.md` | This record. |
 
@@ -64,9 +65,9 @@ array, so the Python flat list still works with the native default off.
 * Keeps its `properties` default; the requested class (`self`) is fetched at the requested level,
   while the parent is fetched through the **native summary** read (full extraction for the parent
   would be wasted work).
-* Bounds children and reports exactly one honest completeness field, `children_complete`: a native
-  `truncated` signal wins when present, otherwise a child page that stayed under the requested 20-node
-  cap is the complete proof. A capped child page is never presented as a complete inventory;
+* Bounds children and reports exactly one honest completeness field, `children_complete`, derived
+  **solely** from the native `truncated` traversal signal. A bounded child page is never presented as
+  a complete inventory, even when its emitted children are far below the requested 20-node cap;
   `children_count` always equals the returned child count.
 
 `reflect.class_hierarchy` (native)
@@ -75,6 +76,10 @@ array, so the Python flat list still works with the native default off.
   representation and the flat duplicate `classes` array is not emitted.
 * `include_flat_classes=true` recovers the unchanged flat list (every tree node name once).
 * The opt-in is recorded in the reflect cache params so a cached tree is never mislabelled.
+* `truncated` (boolean) is the authoritative traversal-exhaustion signal: true when the
+  depth/`max_results` walk stopped early. It is produced by the walk itself and is not recomputable
+  from the emitted children, so a bounded hierarchy is reported incomplete even when fewer children
+  than the cap were emitted.
 
 `reflect.search` (native)
 
@@ -87,8 +92,8 @@ array, so the Python flat list still works with the native default off.
 
 1. **`total_results` removed, not aliased** (clean cutover), replaced by the truthful
    `returned`/`total_matches`/`truncated`.
-2. **One honest child-completeness field: `children_complete`** — native `truncated` passthrough when
-   present, otherwise the requested-cap rule; a capped page is never presented complete.
+2. **One honest child-completeness field: `children_complete`** — derived solely from the native
+   `truncated` traversal-exhaustion signal; a bounded page is never presented complete.
 3. **Unknown `detail` refuses at both layers** — Python before dispatch, and native `InvalidField`
    (the native op does expose a `detail` parameter, verified in source).
 
@@ -114,6 +119,38 @@ carried `total_results = len(results)` (a returned length labelled a total).
 
 Raw `Warning|Ensure|Fatal|Assertion` scan of the native GREEN run log: clean.
 
+## Correction round: authoritative traversal-exhaustion signal
+
+Review round (controller-source-confirmed P2): `context.py` derived `children_complete` partly from
+`1 + len(children) < _CHILDREN_MAX_RESULTS`, but native `reflect.class_hierarchy` emitted no
+truncation/completeness field (`truncated` existed only for `reflect.search`), so the "native signal"
+branch was dead and the length heuristic alone decided. The emitted children can be far below the cap
+while the traversal was bounded (filtered/skipped intermediaries and deeper nodes consume the same
+`MaxResults` budget), so a truncated hierarchy could be reported complete.
+
+Correction:
+
+* Native `BuildHierarchyTree` (~cpp:544-560) threads a `bool& bOutTruncated` out-param, set whenever
+  the `MaxResults` node budget stops the walk early (a candidate child remains unvisited), and the
+  header declaration gains it; `ClassHierarchy` emits it as the response `truncated` boolean
+  (~cpp:736-738). It reflects the traversal, never the emitted array, and is not recomputable from the
+  returned children.
+* `context.py` deletes the returned-length heuristic; `children_complete` is now
+  `not bool(hierarchy_data.get("truncated", False))` — derived solely from the native signal.
+* Regressions added: `Cortex.Reflect.Hierarchy.BoundedTraversalDeclaresTruncation` (native:
+  `root=AActor`, `depth=2`, `include_engine=true`, `max_results=3` — the budget is spent on the root
+  and descendants, the emitted child list is shorter than the budget, and the response must still
+  declare `truncated=true`) and
+  `TestContextNativeSummaryAndChildBounds.test_truncated_below_emitted_cap_declares_incompleteness`
+  (Python: a native page with `truncated=true` and only 3 emitted children — far below the 20-node cap
+  — must yield `children_complete=False`).
+* Forwarding: the signal lives in the native response `data`; `send_command_cached`/`ResponseCache`
+  store the whole response, and `context.py` reads `truncated` from `hierarchy_data` with no
+  intervening projection, so no value is dropped.
+
+Covering runs for the corrected source (native `Cortex.Reflect+` including the new regression, and the
+Python `test_reflect_tools.py` with the new case) are controller-owned and are **not** claimed here.
+
 ## Cache identity
 
 `send_command_cached` keys on the full params dict
@@ -131,10 +168,11 @@ distinct native read rather than returning a stale full/default payload.
 * **No new native mode.** `properties` remains a Python projection over native full, so only
   `summary` requests the reduced native read; no reader forwards `properties` to native (verified:
   the only native `reflect.class_detail` senders are `detail.py` and `context.py`).
-* **One honest completeness field.** `children_complete` is the single emitted field; the native
-  `truncated` passthrough is preferred when present, with the requested-cap rule as the fallback
-  (native `class_hierarchy` itself is not required to emit `truncated` by design line 95, so the rule
-  is the live path today).
+* **One honest completeness field.** `children_complete` is the single emitted field and mirrors the
+  native `truncated` traversal-exhaustion signal (carried through the cached response data; no
+  projection drops it). The returned-length heuristic was removed because filtered/skipped
+  intermediaries and deeper nodes can consume the native budget while the emitted children stay below
+  the cap.
 * **Clean cutover.** `total_results` is deleted outright; the migrated native tests assert its
   absence and assert `total_matches` is distinct from `returned`.
 

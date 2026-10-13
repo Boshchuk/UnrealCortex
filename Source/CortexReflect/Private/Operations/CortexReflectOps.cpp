@@ -499,6 +499,7 @@ void FCortexReflectOps::BuildHierarchyTree(
 	int32& OutBPCount,
 	int32& OutProjectCppCount,
 	int32& OutProjectBPCount,
+	bool& bOutTruncated,
 	const TSet<UClass*>& EngineAncestorsOfProject)
 {
 	OutNode = MakeShared<FJsonObject>();
@@ -540,9 +541,11 @@ void FCortexReflectOps::BuildHierarchyTree(
 	}
 	OutTotalCount++;
 
-	// Build children
+	// Build children. The walk is bounded by MaxResults, so the traversal itself records whether it
+	// stopped early: the emitted child count cannot prove completeness, because filtered/skipped
+	// intermediaries and deeper nodes consume the same node budget.
 	TArray<TSharedPtr<FJsonValue>> ChildrenArray;
-	if (CurrentDepth < MaxDepth && OutTotalCount < MaxResults)
+	if (CurrentDepth < MaxDepth)
 	{
 		TArray<UClass*> DirectChildren;
 		GetDerivedClasses(Root, DirectChildren, false);
@@ -551,6 +554,8 @@ void FCortexReflectOps::BuildHierarchyTree(
 		{
 			if (OutTotalCount >= MaxResults)
 			{
+				// Candidate children remain but the node budget is spent: the walk is bounded.
+				bOutTruncated = true;
 				break;
 			}
 
@@ -576,6 +581,7 @@ void FCortexReflectOps::BuildHierarchyTree(
 					MaxResults,
 					OutTotalCount, OutCppCount, OutBPCount,
 					OutProjectCppCount, OutProjectBPCount,
+					bOutTruncated,
 					EngineAncestorsOfProject
 				);
 				// Undo the count for the skipped engine class itself.
@@ -607,6 +613,7 @@ void FCortexReflectOps::BuildHierarchyTree(
 				MaxResults,
 				OutTotalCount, OutCppCount, OutBPCount,
 				OutProjectCppCount, OutProjectBPCount,
+				bOutTruncated,
 				EngineAncestorsOfProject
 			);
 			ChildrenArray.Add(MakeShared<FJsonValueObject>(ChildNode));
@@ -692,6 +699,7 @@ FCortexCommandResult FCortexReflectOps::ClassHierarchy(const TSharedPtr<FJsonObj
 	int32 BPCount = 0;
 	int32 ProjectCppCount = 0;
 	int32 ProjectBPCount = 0;
+	bool bHierarchyTruncated = false;
 	TSharedPtr<FJsonObject> TreeNode;
 	BuildHierarchyTree(
 		RootClass, TreeNode,
@@ -700,6 +708,7 @@ FCortexCommandResult FCortexReflectOps::ClassHierarchy(const TSharedPtr<FJsonObj
 		MaxResults,
 		TotalCount, CppCount, BPCount,
 		ProjectCppCount, ProjectBPCount,
+		bHierarchyTruncated,
 		EngineAncestorsOfProject
 	);
 
@@ -724,6 +733,9 @@ FCortexCommandResult FCortexReflectOps::ClassHierarchy(const TSharedPtr<FJsonObj
 	TreeNode->SetNumberField(TEXT("project_cpp_count"), ProjectCppCount);
 	TreeNode->SetNumberField(TEXT("engine_cpp_count"), FMath::Max(0, CppCount - ProjectCppCount));
 	TreeNode->SetNumberField(TEXT("project_blueprint_count"), ProjectBPCount);
+	// Authoritative traversal-exhaustion signal: true when the depth/MaxResults walk stopped early.
+	// It is produced by the walk itself, never recomputed from the emitted child array.
+	TreeNode->SetBoolField(TEXT("truncated"), bHierarchyTruncated);
 
 	// Build flat classes list only when explicitly requested (opt-in duplicate access).
 	if (bIncludeFlatClasses)

@@ -454,3 +454,53 @@ bool FCortexReflectHierarchyFlatClassesOptInTest::RunTest(const FString& Paramet
 
 	return true;
 }
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexReflectHierarchyBoundedTraversalSignalTest,
+	"Cortex.Reflect.Hierarchy.BoundedTraversalDeclaresTruncation",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexReflectHierarchyBoundedTraversalSignalTest::RunTest(const FString& Parameters)
+{
+	FCortexReflectCommandHandler Handler;
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("root"), TEXT("AActor"));
+	Params->SetNumberField(TEXT("depth"), 2);
+	Params->SetBoolField(TEXT("include_engine"), true);
+	// A node budget far below the size of the AActor hierarchy, so the walk is bounded early.
+	Params->SetNumberField(TEXT("max_results"), 3);
+
+	const FCortexCommandResult Result = Handler.Execute(TEXT("class_hierarchy"), Params);
+	TestTrue(TEXT("class_hierarchy should succeed"), Result.bSuccess);
+
+	if (!Result.Data.IsValid())
+	{
+		AddError(TEXT("Result data is invalid"));
+		return true;
+	}
+
+	// The node budget is spent on the root and its descendants, so the walk stops early. The
+	// emitted top-level child list is shorter than the budget, and the truncation must come from
+	// the traversal itself rather than from the emitted child count.
+	bool bTruncated = false;
+	TestTrue(TEXT("A bounded traversal must declare truncation"),
+		Result.Data->TryGetBoolField(TEXT("truncated"), bTruncated));
+	TestTrue(TEXT("A bounded traversal must report truncated=true"), bTruncated);
+
+	const TArray<TSharedPtr<FJsonValue>>* Children = nullptr;
+	TestTrue(TEXT("A bounded hierarchy must still be navigable through children"),
+		Result.Data->TryGetArrayField(TEXT("children"), Children));
+	if (Children)
+	{
+		TestTrue(TEXT("Emitted children must be shorter than the node budget"),
+			Children->Num() < 3);
+	}
+
+	int32 TotalClasses = 0;
+	TestTrue(TEXT("total_classes must remain present"),
+		Result.Data->TryGetNumberField(TEXT("total_classes"), TotalClasses));
+	TestTrue(TEXT("total_classes must not exceed the node budget"), TotalClasses <= 3);
+
+	return true;
+}

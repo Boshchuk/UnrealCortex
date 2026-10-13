@@ -465,3 +465,29 @@ class TestContextNativeSummaryAndChildBounds:
         assert payload["children_count"] == 1
         assert payload.get("children_truncated") in (None, False)
         assert payload.get("children_complete") in (None, True)
+
+    def test_truncated_below_emitted_cap_declares_incompleteness(self):
+        # The native node budget can be spent on filtered/skipped intermediaries and deeper nodes,
+        # so a bounded walk may emit far fewer children than the reader's requested cap. The reader
+        # must trust the native traversal-exhaustion signal, not the emitted length.
+        def handler(command, params):
+            if command == "reflect.class_hierarchy":
+                return {
+                    "name": params["root"],
+                    "type": "cpp",
+                    # 3 children are far below the reader's 20-node cap, yet the traversal was
+                    # bounded natively, so the page must not be presented as complete.
+                    "children": [{"name": f"Child_{i}", "type": "cpp"} for i in range(3)],
+                    "total_classes": 42,
+                    "cpp_count": 42,
+                    "blueprint_count": 0,
+                    "truncated": True,
+                }
+            return _FULL_DETAIL
+
+        tool, _ = self._tool(handler)
+
+        payload = json.loads(tool(class_name="AMyActor"))
+
+        assert payload["children_count"] == 3
+        assert payload["children_complete"] is False

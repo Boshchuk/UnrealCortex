@@ -9,8 +9,8 @@ logger = logging.getLogger(__name__)
 
 _TTL_CONTEXT = 1800  # 30 min
 
-# Native builds the child page as root + (cap - 1) children, so a page that returns fewer than
-# this many total nodes finished within budget; one that reaches the cap is not proven complete.
+# The child page is requested at one bounded size; the native response's own traversal-exhaustion
+# signal (`truncated`) is the authoritative completeness proof for that page.
 _CHILDREN_MAX_RESULTS = 20
 
 
@@ -87,14 +87,12 @@ def register_reflect_context_tools(mcp, connection: UEConnection):
                     children.append(entry)
                 result["children"] = children
                 result["children_count"] = len(children)
-                # A capped child page must never be presented as a complete inventory: report one
-                # honest completeness field. A native truncation signal wins when present;
-                # otherwise a page that stayed under the requested node cap is the complete proof.
-                native_truncated = bool(hierarchy_data.get("truncated"))
-                returned_nodes = 1 + len(children)
-                result["children_complete"] = (
-                    not native_truncated and returned_nodes < _CHILDREN_MAX_RESULTS
-                )
+                # Completeness comes solely from the native traversal-exhaustion signal, never from
+                # the emitted child count: filtered/skipped intermediaries and deeper nodes consume
+                # the same native budget, so a bounded walk can emit fewer children than the cap.
+                # `class_hierarchy` always emits `truncated`; the default only covers a
+                # non-conforming payload.
+                result["children_complete"] = not bool(hierarchy_data.get("truncated", False))
             except (ConnectionError, RuntimeError) as e:
                 result["children"] = []
                 result["children_count"] = 0
