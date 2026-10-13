@@ -2,7 +2,7 @@
 
 import logging
 from cortex_mcp.tcp_client import UEConnection
-from cortex_mcp.response import format_response
+from cortex_mcp.response import format_native_page
 
 logger = logging.getLogger(__name__)
 
@@ -28,15 +28,16 @@ def register_reflect_override_tools(mcp, connection: UEConnection):
         custom_variables plus total_overrides.
         """
         try:
+            params = {
+                "class_name": class_name,
+                "depth": depth,
+                "limit": limit,
+            }
             response = connection.send_command_cached(
                 "reflect.find_overrides",
-                {
-                    "class_name": class_name,
-                    "depth": depth,
-                    "limit": limit,
-                },
+                params,
                 ttl=_TTL_OVERRIDES,
             )
-            return format_response(response.get("data", {}), "query_overrides")
+            return format_native_page(response.get("data", {}), "reflect.find_overrides", params)
         except ConnectionError as e:
             return f"Error: {e}"

@@ -1,7 +1,7 @@
 """MCP tools for asset dependency queries."""
 
 import logging
-from cortex_mcp.response import format_response
+from cortex_mcp.response import format_native_page
 from cortex_mcp.tcp_client import UEConnection
 
 logger = logging.getLogger(__name__)
@@ -30,11 +30,12 @@ def register_reflect_dependency_tools(mcp, connection: UEConnection):
         (C++) or asset_class (content).
         """
         try:
+            params = {"asset_path": asset_path, "category": category, "limit": limit}
             response = connection.send_command_cached(
                 "reflect.get_dependencies",
-                {"asset_path": asset_path, "category": category, "limit": limit},
+                params,
                 ttl=_TTL_DEPS,
             )
-            return format_response(response.get("data", {}), "get_dependencies")
+            return format_native_page(response.get("data", {}), "reflect.get_dependencies", params)
         except ConnectionError as e:
             return f"Error: {e}"

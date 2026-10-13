@@ -2,7 +2,7 @@
 
 import logging
 from cortex_mcp.tcp_client import UEConnection
-from cortex_mcp.response import format_response
+from cortex_mcp.response import format_native_page
 
 logger = logging.getLogger(__name__)
 
@@ -36,19 +36,20 @@ def register_reflect_usage_tools(mcp, connection: UEConnection):
         (scope, blueprints_scanned, not_scanned).
         """
         try:
+            params = {
+                "symbol": symbol,
+                "class_name": class_name,
+                "scope": scope,
+                "deep_scan": deep_scan,
+                "path_filter": path_filter,
+                "limit": limit,
+                "max_blueprints": max_blueprints,
+            }
             response = connection.send_command_cached(
                 "reflect.find_usages",
-                {
-                    "symbol": symbol,
-                    "class_name": class_name,
-                    "scope": scope,
-                    "deep_scan": deep_scan,
-                    "path_filter": path_filter,
-                    "limit": limit,
-                    "max_blueprints": max_blueprints,
-                },
+                params,
                 ttl=_TTL_USAGES,
             )
-            return format_response(response.get("data", {}), "query_usages")
+            return format_native_page(response.get("data", {}), "reflect.find_usages", params)
         except ConnectionError as e:
             return f"Error: {e}"

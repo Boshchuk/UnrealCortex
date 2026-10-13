@@ -266,9 +266,9 @@ class TestRouterPagination:
     """Phase 2B: routers extract limit/cursor and route through pagination."""
 
     def test_limit_returns_paginated_first_page(self):
-        """Passing limit returns a paginated first page."""
+        """Passing limit returns a paginated first page from the owner's primary array."""
         items = [{"id": i} for i in range(100)]
-        router, conn = _router_with_mock(response_data={"rows": items, "count": 100})
+        router, conn = _router_with_mock(response_data={"datatables": items, "count": 100})
 
         result = json.loads(router("list_datatables", {"limit": 20}))
 
@@ -276,7 +276,7 @@ class TestRouterPagination:
         assert result["_pagination"]["total"] == 100
         assert result["_pagination"]["returned"] == 20
         assert result["_pagination"]["has_more"] is True
-        assert len(result["rows"]) == 20
+        assert len(result["datatables"]) == 20
         # limit/cursor should NOT be passed to C++
         call_params = conn.send_command.call_args[0][1]
         assert "limit" not in call_params
@@ -285,7 +285,7 @@ class TestRouterPagination:
     def test_cursor_returns_next_page(self):
         """Passing cursor from first page returns the second page."""
         items = [{"id": i} for i in range(100)]
-        router, conn = _router_with_mock(response_data={"rows": items, "count": 100})
+        router, conn = _router_with_mock(response_data={"datatables": items, "count": 100})
 
         # First page
         page1 = json.loads(router("list_datatables", {"limit": 30}))
@@ -297,27 +297,32 @@ class TestRouterPagination:
 
         conn.send_command.assert_not_called()
         assert page2["_pagination"]["returned"] == 30
-        assert page2["rows"][0]["id"] == 30
+        assert page2["datatables"][0]["id"] == 30
 
     def test_last_page_has_no_cursor(self):
         """Last page has has_more=false and next_cursor=null."""
         items = [{"id": i} for i in range(25)]
-        router, conn = _router_with_mock(response_data={"rows": items})
+        router, conn = _router_with_mock(response_data={"datatables": items})
 
-        page1 = json.loads(router("list", {"limit": 20}))
+        page1 = json.loads(router("list_datatables", {"limit": 20}))
         cursor = page1["_pagination"]["next_cursor"]
-        page2 = json.loads(router("list", {"cursor": cursor}))
+        page2 = json.loads(router("list_datatables", {"cursor": cursor}))
 
         assert page2["_pagination"]["has_more"] is False
         assert page2["_pagination"]["next_cursor"] is None
-        assert len(page2["rows"]) == 5
+        assert len(page2["datatables"]) == 5
 
     def test_expired_cursor_returns_error(self):
-        """Expired or invalid cache key returns CURSOR_EXPIRED."""
-        router, _ = _router_with_mock()
+        """A live cursor whose snapshot is gone returns CURSOR_EXPIRED."""
+        from cortex_mcp.tools import routers as routers_module
 
-        fake_cursor = encode_cursor("nonexistent_key", 0, 10)
-        result = json.loads(router("list", {"cursor": fake_cursor}))
+        items = [{"id": i} for i in range(25)]
+        router, _ = _router_with_mock(response_data={"datatables": items})
+        page1 = json.loads(router("list_datatables", {"limit": 10}))
+        cursor = page1["_pagination"]["next_cursor"]
+
+        routers_module._pagination_cache.clear()
+        result = json.loads(router("list_datatables", {"cursor": cursor}))
 
         assert result["_error"] == "CURSOR_EXPIRED"
 
@@ -372,105 +377,30 @@ class TestRouterPagination:
         assert result["saved"] is True
         assert "_pagination" not in result
 
-    def test_string_table_reference_search_forwards_limit_to_cpp(self):
-        """StringTable reference scans use the C++ limit instead of router pagination."""
-        router, conn = _router_with_mock(response_data={"results": [{"id": i} for i in range(50)], "total_matches": 50})
-
-        result = json.loads(
-            router(
-                "search_datatable_content",
-                {
-                    "table_path": "/Game/Data/DT_Test",
-                    "search_mode": "string_table_refs",
-                    "limit": 100,
-                },
-            )
-        )
-
-        assert "_pagination" not in result
-        assert len(result["results"]) == 50
-        conn.send_command.assert_called_once()
-        command, call_params = conn.send_command.call_args[0]
-        assert command == "data.search_datatable_content"
-        assert call_params["limit"] == 100
-
-    def test_editor_list_cvars_forwards_limit_to_cpp(self):
-        """Editor CVar listing uses the C++ limit instead of router pagination."""
-        router, conn = _router_with_mock(
-            domain="editor",
-            response_data={
-                "variables": [{"name": f"t.Var{i}"} for i in range(3)],
-                "commands": [],
-                "returned_count": 3,
-                "total_matched": 100,
-                "truncated": True,
-            },
-        )
-
-        result = json.loads(router("list_cvars", {"pattern": "t.", "limit": 10}))
-
-        assert "_pagination" not in result
-        assert result["returned_count"] == 3
-        conn.send_command.assert_called_once()
-        command, call_params = conn.send_command.call_args[0]
-        assert command == "editor.list_cvars"
-        assert call_params["limit"] == 10
-
-    def test_anim_list_assets_forwards_limit_to_cpp(self):
-        """anim.list_assets owns limit semantics in C++, not Python pagination."""
-        router, conn = _router_with_mock(
-            domain="anim",
-            response_data={"assets": {"count": 0, "returned": 0, "truncated": False, "items": []}},
-        )
-
-        result = json.loads(router("list_assets", {"limit": 10}))
-
-        assert "_pagination" not in result
-        conn.send_command.assert_called_once()
-        command, call_params = conn.send_command.call_args[0]
-        assert command == "anim.list_assets"
-        assert call_params["limit"] == 10
-
 
 class TestPaginationEdgeCases:
-    """Edge cases and interaction between Phase 1 and Phase 2."""
-
-    def test_large_limit_triggers_truncation_safety_net(self):
-        """A huge page that exceeds 40KB still gets truncated as safety net."""
-        # Create items large enough that 200 items exceed 40KB
-        items = [{"id": i, "data": "x" * 300} for i in range(500)]
-        router, _ = _router_with_mock(response_data={"rows": items})
-
-        result = json.loads(router("list", {"limit": 200}))
-
-        assert "_pagination" in result
-        # If the page exceeds 40KB, truncation also kicks in
-        result_text = compact_json(result)
-        assert len(result_text) <= MAX_RESPONSE_CHARS
-        # Safety net actually triggered — rows is checked directly because
-        # _pagination.returned reflects the pre-truncation count (see TD-001).
-        assert len(result["rows"]) < 200
+    """Edge cases and interaction between explicit pages and the size guard."""
 
     def test_cursor_without_limit_uses_embedded_limit(self):
         """cursor without limit in the request still works — limit is in the cursor."""
         items = [{"id": i} for i in range(100)]
-        router, conn = _router_with_mock(response_data={"rows": items})
+        router, conn = _router_with_mock(response_data={"datatables": items})
 
-        page1 = json.loads(router("list", {"limit": 25}))
+        page1 = json.loads(router("list_datatables", {"limit": 25}))
         cursor = page1["_pagination"]["next_cursor"]
 
         conn.send_command.reset_mock()
-        page2 = json.loads(router("list", {"cursor": cursor}))
+        page2 = json.loads(router("list_datatables", {"cursor": cursor}))
 
         assert page2["_pagination"]["returned"] == 25
-        assert page2["rows"][0]["id"] == 25
+        assert page2["datatables"][0]["id"] == 25
 
     def test_limit_string_coerced_to_int(self):
         """limit passed as string '50' should work."""
         items = [{"id": i} for i in range(100)]
-        router, _ = _router_with_mock(response_data={"rows": items})
+        router, _ = _router_with_mock(response_data={"datatables": items})
 
-        result = json.loads(router("list", {"limit": "50"}))
+        result = json.loads(router("list_datatables", {"limit": "50"}))
 
         assert "_pagination" in result
         assert result["_pagination"]["returned"] == 50
@@ -478,9 +408,9 @@ class TestPaginationEdgeCases:
     def test_pagination_metadata_no_count_field(self):
         """Paginated responses use _pagination.total, not a top-level count field."""
         items = [{"id": i} for i in range(100)]
-        router, _ = _router_with_mock(response_data={"rows": items, "count": 100})
+        router, _ = _router_with_mock(response_data={"datatables": items, "count": 100})
 
-        result = json.loads(router("list", {"limit": 10}))
+        result = json.loads(router("list_datatables", {"limit": 10}))
 
         # count from template is preserved, _pagination.total is canonical
         assert result.get("count") == 100

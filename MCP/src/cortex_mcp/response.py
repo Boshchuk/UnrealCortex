@@ -32,6 +32,47 @@ _AUTHORED_TRACK_REFERRAL = (
     "include_track_content=true to inspect the stored animation content."
 )
 
+# Reads whose owner exposes an explicit selector are complete-or-refuse: an oversized page is
+# refused with the applicable selector instead of being silently shortened by the generic array
+# truncator, and the refusal never advertises a limit the read cannot consume. The selector
+# itself is implemented in the native owners (Tasks 5/10); until then the refusal is the whole
+# truthful answer. Reads that fit the budget are never policed.
+_PROPERTIES_DISCOVERY_SELECTOR = (
+    "Select only the needed 'properties', or use include_values=false / discovery_limit for "
+    "metadata discovery."
+)
+_CATALOG_SECTION_SELECTOR = (
+    "Request only the needed 'sections', and keep include_asset_paths=false for the default view."
+)
+_REFLECT_DETAIL_SELECTOR = "Request detail=summary, or narrow the class you inspect."
+_REFLECT_CONTEXT_SELECTOR = (
+    "Request detail=summary, or read the parent properties only instead of the whole context."
+)
+_COMPLETE_OR_REFUSE_POLICIES: dict[str, str] = {
+    "data.get_data_asset": (
+        "Select the needed members with 'fields' instead of reading the whole DataAsset."
+    ),
+    "material.get_node": (
+        "Request only the needed 'properties' of the node, or read the node identity alone."
+    ),
+    "umg.get_tree": (
+        "Bound the traversal with 'depth' or 'max_nodes', use names_only=true for a lean "
+        "hierarchy, or inspect one widget with umg.get_widget."
+    ),
+    "blueprint.get_class_defaults": _PROPERTIES_DISCOVERY_SELECTOR,
+    "blueprint.list_settable_defaults": _PROPERTIES_DISCOVERY_SELECTOR,
+    "blueprint.list_inherited_properties": _PROPERTIES_DISCOVERY_SELECTOR,
+    "get_capabilities": (
+        "Request detail=names for the per-operation schema index, or inspect one operation schema."
+    ),
+    "get_data_catalog": _CATALOG_SECTION_SELECTOR,
+    "data.get_data_catalog": _CATALOG_SECTION_SELECTOR,
+    "query_class_detail": _REFLECT_DETAIL_SELECTOR,
+    "reflect.class_detail": _REFLECT_DETAIL_SELECTOR,
+    "query_class_context": _REFLECT_CONTEXT_SELECTOR,
+    "reflect.class_context": _REFLECT_CONTEXT_SELECTOR,
+}
+
 
 def _find_largest_list(data: dict) -> str | None:
     """Find the key of the largest list with _MIN_LIST_SIZE+ items in data."""
@@ -92,6 +133,121 @@ def _bound_authoring_response(data: dict) -> str:
     return compact_json(bounded)
 
 
+# Names a refusal field owns: context from the request or the native echo can never overwrite them.
+_RESERVED_REFUSAL_KEYS = frozenset({
+    "success",
+    "reader_complete",
+    "qualified_command",
+    "_error",
+    "_message",
+    "_suggestion",
+    "_native_page_omitted",
+    "_omitted_context",
+})
+
+
+def _selector_context(data: dict, request_params: dict | None) -> dict:
+    """Selector/window context for a refusal: native scalars win, request selectors fill gaps.
+
+    Arrays and nested objects are the incomplete payload itself and are never echoed. A native
+    value always wins a collision, because the owner emits the window it actually applied (for
+    example `level.list_actors` clamps the offset and cap and reports the applied values), so the
+    refusal must never advertise an unconsumed request window. The caller's selectors are still
+    carried when the native response does not echo them (for example `umg.get_tree` has no asset
+    path), and request-side telemetry keys are ignored.
+    """
+    context: dict = {}
+    if isinstance(request_params, dict):
+        for key, value in request_params.items():
+            if key in _RESERVED_REFUSAL_KEYS or key.startswith("_") or isinstance(value, (list, dict)):
+                continue
+            context[key] = value
+    for key, value in data.items():
+        if key in _RESERVED_REFUSAL_KEYS or key.startswith("_") or isinstance(value, (list, dict)):
+            continue
+        context[key] = value
+    return context
+
+
+def _bounded_refusal(payload: dict, context: dict) -> str:
+    """Attach as much selector context as fits, dropping whole oversized fields explicitly.
+
+    A field is never truncated: when the refusal would exceed the budget the largest remaining
+    context value is dropped and its key is listed in `_omitted_context`, so the omission is
+    reported instead of hidden. The fixed refusal fields are never dropped.
+    """
+    remaining = dict(context)
+    omitted: list[str] = []
+    while True:
+        trial = dict(payload)
+        trial.update(remaining)
+        if omitted:
+            trial["_omitted_context"] = sorted(omitted)
+        if len(compact_json(trial)) <= MAX_RESPONSE_CHARS:
+            return compact_json(trial)
+        if not remaining:
+            # Fixed refusal fields are bounded, so this keeps the guarantee unconditional.
+            trial.pop("_omitted_context", None)
+            return compact_json(trial)
+        largest = max(remaining, key=lambda key: (len(compact_json({key: remaining[key]})), key))
+        del remaining[largest]
+        omitted.append(largest)
+
+
+def _refuse_oversized_read(
+    data: dict,
+    label: str,
+    suggestion: str,
+    request_params: dict | None = None,
+) -> str:
+    """Refuse an oversized read that owns an explicit selector.
+
+    The applicable selector is named instead of shortening the payload: a shortened array could be
+    mistaken for a complete read, and the selector already exists to make the read affordable.
+    """
+    payload = {
+        "_error": "RESPONSE_TOO_LARGE",
+        "_message": (
+            f"{label} response exceeds {MAX_RESPONSE_CHARS} characters; "
+            "the complete read was refused."
+        ),
+        "reader_complete": False,
+        "_suggestion": suggestion,
+    }
+    return _bounded_refusal(payload, _selector_context(data, request_params))
+
+
+def format_native_page(data: dict, qualified_command: str, params: dict) -> str:
+    """Complete-or-refuse formatting for a native-owned page.
+
+    A native page carries native totals/completeness and a continuation computed for the whole
+    page, so it is never shortened here: the complete page is returned, or an explicitly
+    incomplete refusal preserves the window/selector context, exposes no advancing continuation
+    and names a smaller limit or field selection. Even a single oversized record refuses. The
+    context is bounded: an oversized selector/echo value is dropped whole and named in
+    `_omitted_context`, and the native window scalars win any collision with the request.
+    """
+    text = compact_json(data)
+    if len(text) <= MAX_RESPONSE_CHARS:
+        return text
+
+    payload = {
+        "_error": "RESPONSE_TOO_LARGE",
+        "_message": (
+            f"{qualified_command} native page exceeds {MAX_RESPONSE_CHARS} characters; "
+            "the complete native page was not returned."
+        ),
+        "reader_complete": False,
+        "_native_page_omitted": True,
+        "qualified_command": qualified_command,
+        "_suggestion": (
+            "Re-request with a smaller limit or select fewer fields; the response guard never "
+            "shortens a native page because the continuation was computed for the full page."
+        ),
+    }
+    return _bounded_refusal(payload, _selector_context(data, params))
+
+
 def _bounded_detail_oversize(data: dict) -> str:
     """Explicit incomplete envelope for oversized detailed inspection.
 
@@ -134,25 +290,38 @@ def _format_detailed_read(data: dict) -> str:
     return _bounded_detail_oversize(data)
 
 
-def format_response(data: dict, tool_name: str, *, command: str | None = None, detail: bool = False) -> str:
+def format_response(
+    data: dict,
+    tool_name: str,
+    *,
+    command: str | None = None,
+    detail: bool = False,
+    qualified_command: str | None = None,
+    request_params: dict | None = None,
+) -> str:
     """Serialize data to JSON, truncating array results if over size limit.
 
     If the response exceeds MAX_RESPONSE_CHARS:
     1. For mutation results with remaining_bindings, essential outcome fields
        are always preserved, and remaining_bindings is truncated with dedicated metadata.
-    2. For binding queries, nested track details are bounded first so canonical selectors
+    2. Reads that own an explicit selector are complete-or-refuse, naming that selector.
+    3. For binding queries, nested track details are bounded first so canonical selectors
        remain retrievable under the 40k limit.
-    3. Diagnostics are truncated separately with independent metadata without corrupting
+    4. Diagnostics are truncated separately with independent metadata without corrupting
        binding pagination.
-    4. Paginated arrays are truncated with reconciled pagination metadata guaranteeing
+    5. Paginated arrays are truncated with reconciled pagination metadata guaranteeing
        forward progress.
 
     Args:
         data: The response data dict.
-        tool_name: Name of the tool for error messages.
+        tool_name: Name of the tool for error messages, and the policy key for standalone reads
+            that have no routed qualified command.
         command: The routed command name, used for dedicated authoring formatting.
         detail: True for include_track_content reads, which are formatted before the
             generic nested-track truncator as complete-or-explicit-incomplete.
+        qualified_command: The exact routed read command (e.g. ``data.get_data_asset``), used to
+            resolve the complete-or-refuse selector policy.
+        request_params: The caller's selector/window, kept as context for refusals and errors.
 
     Returns:
         JSON string, guaranteed under MAX_RESPONSE_CHARS.
@@ -279,9 +448,21 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
         outcome["_remaining_bindings_instructions"] = suggestion
         return compact_json(outcome)
 
+    # 2. Reads that own an explicit selector are complete-or-refuse: name the selector instead of
+    # shortening an array that would then look like a complete read. Native error envelopes are
+    # never converted into a refusal.
+    policy = _COMPLETE_OR_REFUSE_POLICIES.get(qualified_command or tool_name)
+    if policy is not None and not data.get("_error"):
+        return _refuse_oversized_read(
+            data,
+            qualified_command or tool_name,
+            policy,
+            request_params,
+        )
+
     working_data = dict(data)
 
-    # 2. Bound nested tracks in bindings if present and oversized
+    # 3. Bound nested tracks in bindings if present and oversized
     if "bindings" in working_data and isinstance(working_data["bindings"], list):
         max_nested_tracks = 0
         for b in working_data["bindings"]:
@@ -314,7 +495,7 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
             # If even bounding tracks didn't completely fit, use 5 tracks as bounded baseline
             working_data = _bound_nested_tracks(working_data, 5)
 
-    # 3. Truncate diagnostics separately if present and oversized (without corrupting binding pagination)
+    # 4. Truncate diagnostics separately if present and oversized (without corrupting binding pagination)
     if "diagnostics" in working_data and isinstance(working_data["diagnostics"], list) and len(working_data["diagnostics"]) > 0:
         diag = working_data["diagnostics"]
         orig_diag_count = len(diag)
@@ -350,7 +531,7 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
         working_data["_diagnostics_total"] = orig_diag_count
         working_data["_diagnostics_returned"] = 0
 
-    # 4. Truncate the primary array (with pagination reconciliation if applicable)
+    # 5. Truncate the primary array (with pagination reconciliation if applicable)
     # Determine which array pagination belongs to
     paginated_key = None
     if "pagination" in working_data and isinstance(working_data["pagination"], dict):
