@@ -8,8 +8,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from cortex_mcp.pagination import PaginationCache, encode_cursor, decode_cursor
-from cortex_mcp.response import format_response, MAX_RESPONSE_CHARS
+from cortex_mcp.response import compact_json, format_response, MAX_RESPONSE_CHARS
 from cortex_mcp.tools.routers import make_router
+
+# Truncation fixtures must exceed the budget in the representation actually emitted
+# (compact JSON), not only in the padded pretty form.
+_OVERSIZED_COUNT = 800
 
 
 def _router_with_mock(domain: str = "data", response_data: dict | None = None):
@@ -20,9 +24,37 @@ def _router_with_mock(domain: str = "data", response_data: dict | None = None):
     return make_router(domain, connection, "test docs"), connection
 
 
-def _make_large_list(key: str, count: int = 500) -> dict:
+def _make_large_list(key: str, count: int = _OVERSIZED_COUNT) -> dict:
     """Build a response that exceeds MAX_RESPONSE_CHARS."""
     return {key: [{"id": i, "name": f"Item_{i}", "path": f"/Game/Test/Asset_{i}"} for i in range(count)]}
+
+
+class TestCompactRepresentation:
+    """The public body and every budget calculation use one compact representation."""
+
+    def test_compact_json_uses_separators_and_never_escapes_ascii(self):
+        assert compact_json({"a": 1, "b": [True, None], "u": "caf\u00e9 \u7de8"}) == (
+            '{"a":1,"b":[true,null],"u":"caf\u00e9 \u7de8"}'
+        )
+
+    def test_format_response_emits_single_line_compact_json(self):
+        data = {"items": [1, 2, 3], "count": 3}
+
+        text = format_response(data, "test")
+
+        assert "\n" not in text
+        assert ", " not in text and ": " not in text
+        assert json.loads(text) == data
+
+    def test_budget_is_measured_in_compact_characters(self):
+        """A payload that fits the budget compactly is never truncated for padding alone."""
+        data = _make_large_list("blueprints", 500)
+        assert len(compact_json(data)) <= MAX_RESPONSE_CHARS
+
+        result = json.loads(format_response(data, "test"))
+
+        assert "_truncated" not in result
+        assert len(result["blueprints"]) == 500
 
 
 class TestAutoDetectTruncation:
@@ -30,21 +62,21 @@ class TestAutoDetectTruncation:
 
     def test_unknown_array_key_is_truncated(self):
         """Array keys NOT in the old allowlist must still be truncated."""
-        data = _make_large_list("blueprints", 500)
+        data = _make_large_list("blueprints", _OVERSIZED_COUNT)
         result = json.loads(format_response(data, "test"))
 
         assert "_truncated" in result
-        assert result["_truncated"]["original_count"] == 500
+        assert result["_truncated"]["original_count"] == _OVERSIZED_COUNT
         assert len(result["blueprints"]) == result["_truncated"]["returned_count"]
-        assert len(json.dumps(result, indent=2)) <= MAX_RESPONSE_CHARS
+        assert len(compact_json(result)) <= MAX_RESPONSE_CHARS
 
     def test_known_array_key_still_works(self):
         """Previously allowlisted keys like 'rows' must still be truncated."""
-        data = _make_large_list("rows", 500)
+        data = _make_large_list("rows", _OVERSIZED_COUNT)
         result = json.loads(format_response(data, "test"))
 
         assert "_truncated" in result
-        assert result["_truncated"]["original_count"] == 500
+        assert result["_truncated"]["original_count"] == _OVERSIZED_COUNT
 
     def test_small_list_not_truncated(self):
         """Lists with fewer than 10 items must NOT be truncated even if response is large."""
@@ -62,12 +94,12 @@ class TestAutoDetectTruncation:
         """When multiple lists qualify, the largest one is truncated."""
         data = {
             "small_list": [{"id": i} for i in range(15)],
-            "big_list": [{"id": i, "name": f"Item_{i}", "path": f"/Game/Test/Asset_{i}"} for i in range(500)],
+            "big_list": [{"id": i, "name": f"Item_{i}", "path": f"/Game/Test/Asset_{i}"} for i in range(_OVERSIZED_COUNT)],
         }
         result = json.loads(format_response(data, "test"))
 
         assert "_truncated" in result
-        assert result["_truncated"]["original_count"] == 500
+        assert result["_truncated"]["original_count"] == _OVERSIZED_COUNT
         # big_list was truncated, small_list untouched
         assert len(result["small_list"]) == 15
 
@@ -87,7 +119,7 @@ class TestAutoDetectTruncation:
 
     def test_truncation_suggestion_mentions_limit(self):
         """Truncation metadata suggests using 'limit' parameter."""
-        data = _make_large_list("results", 500)
+        data = _make_large_list("results", _OVERSIZED_COUNT)
         result = json.loads(format_response(data, "test"))
 
         assert "limit" in result["_truncated"]["suggestion"].lower()
@@ -413,7 +445,7 @@ class TestPaginationEdgeCases:
 
         assert "_pagination" in result
         # If the page exceeds 40KB, truncation also kicks in
-        result_text = json.dumps(result, indent=2)
+        result_text = compact_json(result)
         assert len(result_text) <= MAX_RESPONSE_CHARS
         # Safety net actually triggered — rows is checked directly because
         # _pagination.returned reflects the pre-truncation count (see TD-001).

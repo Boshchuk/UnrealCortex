@@ -287,6 +287,12 @@ class UEConnection:
         }
         self._metric_events: list[dict] = []
         self._seen_read_keys: set[str] = set()
+        self._last_tool_commands: dict[str, str] = {}
+        self._response_sizes: dict = {
+            "total": {"json_chars": 0, "utf8_bytes": 0, "calls": 0},
+            "by_tool": {},
+            "by_command": {},
+        }
 
     @property
     def connected(self) -> bool:
@@ -484,13 +490,58 @@ class UEConnection:
         self._telemetry["logical_tool_calls"] += 1
         key = "parallel_tool_calls" if parallel else "sequential_tool_calls"
         self._telemetry[key] += 1
+        self._last_tool_commands[tool_name] = command
         self._record_metric(
             "tool_invocation",
             {"tool": tool_name, "command": command, "parallel": parallel},
         )
 
+    def last_command_for_tool(self, tool_name: str) -> str:
+        """Most recent qualified command routed through `tool_name` (empty when unknown).
+
+        Used to attribute an emitted response size to the routed command without the
+        presentation boundary needing to know each domain's command naming.
+        """
+        return self._last_tool_commands.get(tool_name, "")
+
+    def record_response_size(
+        self,
+        tool_name: str,
+        qualified_command: str,
+        json_chars: int,
+        utf8_bytes: int,
+    ) -> None:
+        """Aggregate one public return's emitted body size.
+
+        `json_chars` and `utf8_bytes` count the emitted compact JSON body only, excluding
+        `_meta.cortex` telemetry itself. Totals and per-tool/command aggregates are exposed
+        through :meth:`get_call_metrics` as a stable `response_sizes` object.
+        """
+        total = self._response_sizes["total"]
+        total["calls"] += 1
+        total["json_chars"] += json_chars
+        total["utf8_bytes"] += utf8_bytes
+        self._accumulate_response_size(self._response_sizes["by_tool"], tool_name or "", json_chars, utf8_bytes)
+        if qualified_command:
+            self._accumulate_response_size(
+                self._response_sizes["by_command"], qualified_command, json_chars, utf8_bytes
+            )
+
+    @staticmethod
+    def _accumulate_response_size(bucket: dict, key: str, json_chars: int, utf8_bytes: int) -> None:
+        entry = bucket.setdefault(key, {"json_chars": 0, "utf8_bytes": 0, "calls": 0})
+        entry["calls"] += 1
+        entry["json_chars"] += json_chars
+        entry["utf8_bytes"] += utf8_bytes
+
     def get_call_metrics(self) -> dict:
-        """Return aggregated session call-count telemetry."""
+        """Return aggregated session call-count and response-size telemetry.
+
+        `response_sizes` is a stable object owned by this method:
+        `{"total": {...}, "by_tool": {name: {...}}, "by_command": {qualified: {...}}}`
+        where each entry is `{"json_chars": int, "utf8_bytes": int, "calls": int}`.
+        Sizes count the emitted compact JSON body only, excluding `_meta.cortex`.
+        """
         parallel_total = (
             self._telemetry["parallel_tool_calls"] + self._telemetry["sequential_tool_calls"]
         )
@@ -509,6 +560,16 @@ class UEConnection:
                 if observed_reads > 0
                 else 0.0
             ),
+            "response_sizes": {
+                "total": dict(self._response_sizes["total"]),
+                "by_tool": {
+                    tool: dict(entry) for tool, entry in self._response_sizes["by_tool"].items()
+                },
+                "by_command": {
+                    command: dict(entry)
+                    for command, entry in self._response_sizes["by_command"].items()
+                },
+            },
         }
 
     def _record_metric(self, name: str, payload: dict) -> None:

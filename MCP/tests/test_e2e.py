@@ -1362,6 +1362,7 @@ def test_live_operation_schema_round_trips(tcp_connection):
 async def test_profile_operation_schema_returns_live_contract(tcp_connection):
     """profile_operation_schema must expose the live editor contract without executing the command."""
     from mcp.server.fastmcp import FastMCP
+    from mcp.types import CallToolResult
     from cortex_mcp.server import _register_explicit_tools
 
     test_mcp = FastMCP("cortex-test")
@@ -1374,6 +1375,8 @@ async def test_profile_operation_schema_returns_live_contract(tcp_connection):
         content = content[0]
     if isinstance(content, list):
         content = content[0]
+    if isinstance(content, CallToolResult):
+        content = next(block for block in content.content if block.type == "text")
     payload = json.loads(content.text)
     assert payload["source"] == "live_editor"
     assert payload["policy_allowed"] is True

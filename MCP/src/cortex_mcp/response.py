@@ -8,6 +8,17 @@ logger = logging.getLogger(__name__)
 MAX_RESPONSE_CHARS = 40_000
 _MIN_LIST_SIZE = 10
 
+
+def compact_json(value) -> str:
+    """The single emitted and budget-counted JSON representation.
+
+    Compact separators and no ASCII escaping: this is the text a caller receives, so
+    every size decision must be measured against it, not against a padded/escaped form.
+    Durable artifacts, hashes and protocol input serialization keep their own encoding.
+    """
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
 # Animation authoring writes are bounded by a dedicated formatter: an applied outcome is never
 # replaced by a generic size refusal, and cached-array pagination never applies to them.
 ANIMATION_AUTHORING_COMMANDS = frozenset({
@@ -66,7 +77,7 @@ def _bound_authoring_response(data: dict) -> str:
     current guard or error fields. Arbitrarily oversized error text cannot be made
     bounded while also preserving it verbatim; native validation must bound its source.
     """
-    text = json.dumps(data, indent=2)
+    text = compact_json(data)
     if len(text) <= MAX_RESPONSE_CHARS:
         return text
 
@@ -78,7 +89,7 @@ def _bound_authoring_response(data: dict) -> str:
     if omitted_track:
         bounded["authored_track_omitted"] = True
     bounded["_authored_track_instructions"] = _AUTHORED_TRACK_REFERRAL
-    return json.dumps(bounded, indent=2)
+    return compact_json(bounded)
 
 
 def _bounded_detail_oversize(data: dict) -> str:
@@ -107,7 +118,7 @@ def _bounded_detail_oversize(data: dict) -> str:
         "summary_counts": counts,
         "max_response_chars": MAX_RESPONSE_CHARS,
     }
-    return json.dumps(payload, indent=2)
+    return compact_json(payload)
 
 
 def _format_detailed_read(data: dict) -> str:
@@ -117,7 +128,7 @@ def _format_detailed_read(data: dict) -> str:
         return _bounded_detail_oversize(data)
     complete = dict(data)
     complete["reader_complete"] = True
-    text = json.dumps(complete, indent=2)
+    text = compact_json(complete)
     if len(text) <= MAX_RESPONSE_CHARS:
         return text
     return _bounded_detail_oversize(data)
@@ -150,7 +161,7 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
         return _bound_authoring_response(data)
     if detail:
         return _format_detailed_read(data)
-    text = json.dumps(data, indent=2)
+    text = compact_json(data)
     if len(text) <= MAX_RESPONSE_CHARS:
         return text
     # Asset-owned serialized identities cannot be silently cut or treated as empty.
@@ -162,7 +173,7 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
             if key in state
         }
         bounded_state["reader_complete"] = False
-        return json.dumps({
+        return compact_json({
             "_error": "RESPONSE_TOO_LARGE",
             "_message": (
                 "Serialized binding inspection exceeds the response limit. "
@@ -170,7 +181,7 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
                 "oversized orphan records cannot be retrieved through widget-scoped inspection."
             ),
             "property_binding_state": bounded_state,
-        }, indent=2)
+        })
 
     fingerprint = data.get("fingerprint")
     signature = fingerprint.get("domain_signature") if isinstance(fingerprint, dict) else None
@@ -185,12 +196,12 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
         bounded["_binding_identity_truncated"] = True
         bounded["_message"] = "Mutation outcome retained; an oversized serialized identity was omitted."
         for key in ("before_binding", "binding"):
-            if len(json.dumps(bounded, indent=2)) <= MAX_RESPONSE_CHARS:
+            if len(compact_json(bounded)) <= MAX_RESPONSE_CHARS:
                 break
             if isinstance(bounded.get(key), dict):
                 del bounded[key]
                 bounded[f"_{key}_omitted"] = True
-        return json.dumps(bounded, indent=2)
+        return compact_json(bounded)
 
 
     # 1. Special handling for UMG animation binding mutation results:
@@ -214,7 +225,7 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
             trial["_remaining_bindings_returned"] = mid
             trial["_suggestion"] = suggestion
             trial["_remaining_bindings_instructions"] = suggestion
-            trial_text = json.dumps(trial, indent=2)
+            trial_text = compact_json(trial)
             if len(trial_text) <= MAX_RESPONSE_CHARS:
                 best = mid
                 best_candidate = trial
@@ -227,7 +238,7 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
                 "Truncated remaining_bindings response for %s: %d -> %d items",
                 tool_name, len(bindings), best,
             )
-            return json.dumps(best_candidate, indent=2)
+            return compact_json(best_candidate)
 
         # If even 0 remaining_bindings didn't fit, check if diagnostics can be truncated
         if "diagnostics" in data and isinstance(data["diagnostics"], list):
@@ -244,7 +255,7 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
                 trial["_suggestion"] = suggestion
                 trial["_remaining_bindings_instructions"] = suggestion
                 trial["diagnostics"] = diag[:mid]
-                trial_text = json.dumps(trial, indent=2)
+                trial_text = compact_json(trial)
                 if len(trial_text) <= MAX_RESPONSE_CHARS:
                     best_diag_candidate = trial
                     lo = mid + 1
@@ -252,7 +263,7 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
                     hi = mid - 1
 
             if best_diag_candidate is not None:
-                return json.dumps(best_diag_candidate, indent=2)
+                return compact_json(best_diag_candidate)
 
         # Fallback to minimal essential outcome envelope
         essential_keys = {
@@ -266,7 +277,7 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
         outcome["_remaining_bindings_returned"] = 0
         outcome["_suggestion"] = suggestion
         outcome["_remaining_bindings_instructions"] = suggestion
-        return json.dumps(outcome, indent=2)
+        return compact_json(outcome)
 
     working_data = dict(data)
 
@@ -285,7 +296,7 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
             while lo <= hi:
                 mid = (lo + hi) // 2
                 trial = _bound_nested_tracks(working_data, mid)
-                trial_text = json.dumps(trial, indent=2)
+                trial_text = compact_json(trial)
                 if len(trial_text) <= MAX_RESPONSE_CHARS:
                     best_track_limit = mid
                     best_bounded = trial
@@ -298,7 +309,7 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
                     "Bounded nested tracks for %s: max %d tracks",
                     tool_name, best_track_limit,
                 )
-                return json.dumps(best_bounded, indent=2)
+                return compact_json(best_bounded)
 
             # If even bounding tracks didn't completely fit, use 5 tracks as bounded baseline
             working_data = _bound_nested_tracks(working_data, 5)
@@ -317,7 +328,7 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
             trial["_diagnostics_truncated"] = True
             trial["_diagnostics_total"] = orig_diag_count
             trial["_diagnostics_returned"] = mid
-            trial_text = json.dumps(trial, indent=2)
+            trial_text = compact_json(trial)
             if len(trial_text) <= MAX_RESPONSE_CHARS:
                 best_diag_count = mid
                 best_diag_candidate = trial
@@ -330,7 +341,7 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
                 "Truncated diagnostics for %s: %d -> %d items",
                 tool_name, orig_diag_count, best_diag_count,
             )
-            return json.dumps(best_diag_candidate, indent=2)
+            return compact_json(best_diag_candidate)
 
         # If even 0 diagnostics doesn't fit, remove diagnostics from working_data
         working_data = dict(working_data)
@@ -357,13 +368,13 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
     if array_key is None or not isinstance(working_data.get(array_key), list) or len(working_data[array_key]) == 0:
         logger.warning(
             "Response for %s is %d chars with no truncatable array",
-            tool_name, len(json.dumps(working_data)),
+            tool_name, len(compact_json(working_data)),
         )
-        return json.dumps({
+        return compact_json({
             "_error": "RESPONSE_TOO_LARGE",
-            "_size": len(json.dumps(working_data)),
+            "_size": len(compact_json(working_data)),
             "_suggestion": "Pass 'limit' parameter to paginate through results.",
-        }, indent=2)
+        })
 
     target_list = working_data[array_key]
     original_count = len(target_list)
@@ -391,7 +402,7 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
             "returned_count": mid,
             "suggestion": "Pass 'limit' parameter to paginate through results.",
         }
-        trial_text = json.dumps(trial, indent=2)
+        trial_text = compact_json(trial)
         if len(trial_text) <= MAX_RESPONSE_CHARS:
             best = mid
             lo = mid + 1
@@ -403,11 +414,11 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
             "Response for %s cannot fit even a single item of %s under %d chars",
             tool_name, array_key, MAX_RESPONSE_CHARS,
         )
-        return json.dumps({
+        return compact_json({
             "_error": "RESPONSE_TOO_LARGE",
-            "_size": len(json.dumps(working_data)),
+            "_size": len(compact_json(working_data)),
             "_suggestion": f"Individual entries in '{array_key}' exceed size limit. Reduce nested fields or query with smaller scope.",
-        }, indent=2)
+        })
 
     truncated = dict(working_data)
     truncated[array_key] = target_list[:best]
@@ -433,4 +444,4 @@ def format_response(data: dict, tool_name: str, *, command: str | None = None, d
         "Truncated %s response for %s: %d -> %d items",
         array_key, tool_name, original_count, best,
     )
-    return json.dumps(truncated, indent=2)
+    return compact_json(truncated)
