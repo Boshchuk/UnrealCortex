@@ -131,6 +131,24 @@ measurement.
   no authoring diagnostics — so this is **not** a zero-warning manual-editor claim.
 * The parent-repo `docs/systems/python-mcp.md` change is scoped local (not committed with the plugin).
 
+## Review round 1 correction (StateTree declaration grammar)
+
+Independent review (`local://task-2-review.md`, Important P2) found that the shortened
+`statetree_compose` description had removed the Python operation-item declaration grammar.
+`MCP/src/tools/statetree/composites.py` (docstring-only, +7/−3; no production logic or tests changed)
+now restores `{'command': 'add_state', 'params': {...}}` / `{'op': 'add_state', ...}` and states that
+explicit `operations` items and the `states`/`transitions`/`removals` shorthands **may be combined in
+one call**, matching `_synthesize_operations`.
+
+Covering evidence (controller): `tests/test_statetree_composites.py` → **8/8 passed in 0.04 s**; actual
+stdio smoke with `CORTEX_PORT=65000` (unavailable native boundary) showed both restored operation
+shapes and a shorthand reaching the native boundary (`isError=true`, opaque `Connection refused at
+127.0.0.1:65000`), while a malformed item without `command`/`op` returned JSON `success=false` with
+`Operation missing 'command'` before any native dispatch. The first smoke attempt mis-assumed a
+JSON-encoded connection exception (`JSONDecodeError`); the controller corrected the script only and
+reran to exit 0 in 11.25 s. Deliberately no wording test was added (the existing semantic tests prove
+normalization). No native StateTree creation is claimed.
+
 ## Commit identity
 
 * `42700f5c849965536d4054b1e9b7cd8f0d3118e1` — "Task2: names-only router descriptions and optional
@@ -138,6 +156,9 @@ measurement.
   descriptions, `test_capabilities.py`, `test_tool_output.py`, the deletion of
   `test_composite_docstrings.py`, and this record; parent
   `59bb68352f2df39dc1165a06c585a62fc8faff2f`).
+* `2b8e6b2ec3ba6888fbff7d4a34770e632054232a` — "docs: record Task-2 verification commit identity".
+* Review round-1 correction commit: the single commit carrying this section and the StateTree
+  docstring fix; scoped re-review range `2b8e6b2..HEAD` (SHA recorded by the controller).
 * Committed by explicit path only inside the `Plugins/UnrealCortex` submodule; no parent-repo commit,
   no gitlink update, no unrelated path. The parent-repo `docs/systems/python-mcp.md` and the
   git-ignored task workspace (report/ledger/basetemps) stay local.

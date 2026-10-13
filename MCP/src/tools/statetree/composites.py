@@ -337,9 +337,13 @@ def register_statetree_composite_tools(mcp, connection: UEConnection) -> None:
         mode='create' builds a new asset and requires schema_class; mode='update' mutates an
         existing asset and requires expected_fingerprint, used as the initial stale-write guard and
         refreshed after each successful step. validate/compile/save gate the statetree.validate_asset,
-        statetree.compile and final save steps. Supply either an explicit operations list or the
-        states/transitions/removals shorthands (synthesized into statetree.add_state / add_transition /
-        remove_state / remove_transition calls).
+        statetree.compile and final save steps.
+
+        Mutations come from explicit `operations` items — each an envelope such as
+        {'command': 'add_state', 'params': {...}} or {'op': 'add_state', ...} — and/or the
+        states/transitions/removals shorthands, which are synthesized into statetree.add_state /
+        add_transition / remove_state / remove_transition calls. Explicit operations and shorthands
+        may be combined in one call.
 
         Returns the success/failure payload with step counts and the latest known fingerprint.
         Create mode performs best-effort statetree.delete_asset cleanup when a later step fails.
