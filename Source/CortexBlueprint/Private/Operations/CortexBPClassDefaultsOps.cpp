@@ -386,26 +386,300 @@ namespace
 		return Formats;
 	}
 
-	static TSharedPtr<FJsonObject> BuildDiscoveryPropertyInfo(FProperty* Property, void* ValuePtr)
+	// Every class-default discovery read shares one bounded metadata window. The discovery_* names
+	// never collide with the generic limit/offset selectors, so native discovery paging is never
+	// reinterpreted by the cached read layer.
+	static constexpr int32 DiscoveryDefaultLimit = 100;
+	static constexpr int32 DiscoveryMaxLimit = 200;
+
+	struct FDiscoveryReadControls
+	{
+		bool bIncludeValues = false;
+		bool bIncludeValuesSupplied = false;
+		bool bIncludeMembers = false;
+		int32 Offset = 0;
+		int32 Limit = DiscoveryDefaultLimit;
+	};
+
+	// Reads an optional boolean control. A field present with a non-boolean JSON type refuses before
+	// any property is admitted, so a malformed selector never triggers value work.
+	static bool ReadOptionalBoolControl(
+		const TSharedPtr<FJsonObject>& Params,
+		const TCHAR* Field,
+		bool& OutValue,
+		bool& bOutSupplied,
+		FCortexCommandResult& OutError)
+	{
+		bOutSupplied = false;
+		const TSharedPtr<FJsonValue> Found = Params ? Params->TryGetField(Field) : nullptr;
+		if (!Found.IsValid())
+		{
+			return true;
+		}
+		if (Found->Type != EJson::Boolean)
+		{
+			OutError = FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidField,
+				FString::Printf(TEXT("'%s' must be a boolean"), Field));
+			return false;
+		}
+		OutValue = Found->AsBool();
+		bOutSupplied = true;
+		return true;
+	}
+
+	// Reads an optional integer control within an inclusive range. A present field that is not an
+	// integral JSON number in range refuses with InvalidField.
+	static bool ReadOptionalIntegerControl(
+		const TSharedPtr<FJsonObject>& Params,
+		const TCHAR* Field,
+		int32 MinValue,
+		int32 MaxValue,
+		int32& OutValue,
+		bool& bOutSupplied,
+		FCortexCommandResult& OutError)
+	{
+		bOutSupplied = false;
+		const TSharedPtr<FJsonValue> Found = Params ? Params->TryGetField(Field) : nullptr;
+		if (!Found.IsValid())
+		{
+			return true;
+		}
+		if (Found->Type != EJson::Number)
+		{
+			OutError = FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidField,
+				FString::Printf(TEXT("'%s' must be an integer"), Field));
+			return false;
+		}
+		const double RawValue = Found->AsNumber();
+		if (!FMath::IsFinite(RawValue)
+			|| RawValue != FMath::TruncToDouble(RawValue)
+			|| RawValue < static_cast<double>(MinValue)
+			|| RawValue > static_cast<double>(MaxValue))
+		{
+			OutError = FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidField,
+				FString::Printf(TEXT("'%s' must be an integer between %d and %d"), Field, MinValue, MaxValue));
+			return false;
+		}
+		OutValue = static_cast<int32>(RawValue);
+		bOutSupplied = true;
+		return true;
+	}
+
+	// Parses the shared include_values/include_members/discovery_offset/discovery_limit controls
+	// before any property is admitted. Malformed flags and out-of-range limits refuse.
+	static bool ParseDiscoveryReadControls(
+		const TSharedPtr<FJsonObject>& Params,
+		FDiscoveryReadControls& OutControls,
+		FCortexCommandResult& OutError)
+	{
+		OutControls = FDiscoveryReadControls();
+
+		bool bSupplied = false;
+		if (!ReadOptionalBoolControl(Params, TEXT("include_values"), OutControls.bIncludeValues, bSupplied, OutError))
+		{
+			return false;
+		}
+		OutControls.bIncludeValuesSupplied = bSupplied;
+		if (!ReadOptionalBoolControl(Params, TEXT("include_members"), OutControls.bIncludeMembers, bSupplied, OutError))
+		{
+			return false;
+		}
+		if (!ReadOptionalIntegerControl(Params, TEXT("discovery_offset"), 0, TNumericLimits<int32>::Max(),
+			OutControls.Offset, bSupplied, OutError))
+		{
+			return false;
+		}
+		if (!ReadOptionalIntegerControl(Params, TEXT("discovery_limit"), 1, DiscoveryMaxLimit,
+			OutControls.Limit, bSupplied, OutError))
+		{
+			return false;
+		}
+		return true;
+	}
+
+	// Reads the optional 'properties' selector. Every element must be a string; a malformed selector
+	// refuses instead of silently reading the whole admitted population.
+	static bool ReadOptionalPropertySelector(
+		const TSharedPtr<FJsonObject>& Params,
+		TArray<FString>& OutSelectors,
+		FCortexCommandResult& OutError)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Found = nullptr;
+		if (!Params || !Params->TryGetArrayField(TEXT("properties"), Found) || Found == nullptr)
+		{
+			return true;
+		}
+		for (const TSharedPtr<FJsonValue>& Value : *Found)
+		{
+			if (!Value.IsValid() || Value->Type != EJson::String)
+			{
+				OutError = FCortexCommandRouter::Error(
+					CortexErrorCodes::InvalidField,
+					TEXT("'properties' must be an array of strings"));
+				return false;
+			}
+			OutSelectors.Add(Value->AsString());
+		}
+		return true;
+	}
+
+	// Settable discovery admits every exposed, serializable root; inherited discovery additionally
+	// excludes properties owned by the Blueprint's own generated class.
+	static bool IsAdmittedDiscoveryRoot(
+		UBlueprintGeneratedClass* GeneratedClass,
+		FProperty* RootProperty,
+		bool bInheritedOnly)
+	{
+		if (!RootProperty
+			|| !ShouldExposePropertyForDiscovery(RootProperty)
+			|| !IsSupportedDiscoveryProperty(RootProperty))
+		{
+			return false;
+		}
+		if (bInheritedOnly && RootProperty->GetOwnerStruct() == GeneratedClass)
+		{
+			return false;
+		}
+		return true;
+	}
+
+	// Resolves the top-level root FProperty of a selected selector path so discovery scope can be
+	// enforced on the root before any leaf is accepted.
+	static FProperty* ResolveDiscoveryRootProperty(UBlueprintGeneratedClass* GeneratedClass, const FString& Selector)
+	{
+		if (!GeneratedClass || Selector.IsEmpty())
+		{
+			return nullptr;
+		}
+		const int32 Dot = Selector.Find(TEXT("."), ESearchCase::CaseSensitive);
+		const FString RootName = Dot == INDEX_NONE ? Selector : Selector.Left(Dot);
+		return FindFProperty<FProperty>(GeneratedClass, FName(*RootName));
+	}
+
+	// Emits the discovery envelope for a metadata page: the honest admitted population size plus the
+	// window actually returned. Completeness is only claimed when the page reaches the population end.
+	static void AddDiscoveryPagination(
+		const TSharedPtr<FJsonObject>& Data,
+		int32 TotalProperties,
+		int32 Offset,
+		int32 Limit,
+		int32 Returned)
+	{
+		const bool bComplete = (Offset + Returned) >= TotalProperties;
+		Data->SetNumberField(TEXT("total_properties"), TotalProperties);
+
+		TSharedPtr<FJsonObject> Pagination = MakeShared<FJsonObject>();
+		Pagination->SetNumberField(TEXT("offset"), Offset);
+		Pagination->SetNumberField(TEXT("limit"), Limit);
+		Pagination->SetNumberField(TEXT("returned"), Returned);
+		if (bComplete)
+		{
+			Pagination->SetField(TEXT("next_offset"), MakeShared<FJsonValueNull>());
+		}
+		else
+		{
+			Pagination->SetNumberField(TEXT("next_offset"), Offset + Returned);
+		}
+		Pagination->SetBoolField(TEXT("is_complete"), bComplete);
+		Data->SetObjectField(TEXT("discovery_pagination"), Pagination);
+	}
+
+	// Builds the single struct-member representation shared by every class-default read: one level of
+	// member path/type metadata, with member values extracted only when values were requested.
+	static TSharedPtr<FJsonObject> BuildStructMembersInfo(FProperty* Property, void* ValuePtr, bool bIncludeValues)
+	{
+		const FStructProperty* StructProp = CastField<FStructProperty>(Property);
+		if (!StructProp)
+		{
+			return nullptr;
+		}
+
+		TSharedPtr<FJsonObject> MembersObj = MakeShared<FJsonObject>();
+		const UScriptStruct* ScriptStruct = StructProp->Struct;
+		if (!ScriptStruct)
+		{
+			return MembersObj;
+		}
+
+		for (TFieldIterator<FProperty> MemberIt(ScriptStruct); MemberIt; ++MemberIt)
+		{
+			FProperty* MemberProp = *MemberIt;
+			if (!MemberProp)
+			{
+				continue;
+			}
+
+			TSharedPtr<FJsonObject> MemberInfo = MakeShared<FJsonObject>();
+			MemberInfo->SetStringField(TEXT("type"), MemberProp->GetCPPType());
+			MemberInfo->SetStringField(TEXT("path"),
+				FString::Printf(TEXT("%s.%s"), *Property->GetName(), *MemberProp->GetName()));
+
+			if (bIncludeValues)
+			{
+				void* MemberValuePtr = MemberProp->ContainerPtrToValuePtr<void>(ValuePtr);
+				const TSharedPtr<FJsonValue> MemberValue =
+					FCortexSerializer::PropertyToJson(MemberProp, MemberValuePtr);
+				MemberInfo->SetField(TEXT("value"),
+					MemberValue.IsValid() ? MemberValue : MakeShared<FJsonValueNull>());
+				if (const FTextProperty* MemberTextProperty = CastField<FTextProperty>(MemberProp))
+				{
+					const TSharedPtr<FJsonObject> TextJson = FCortexSerializer::TextToJson(
+						MemberTextProperty->GetPropertyValue(MemberValuePtr));
+					if (TextJson->HasField(TEXT("string_table")))
+					{
+						MemberInfo->SetObjectField(TEXT("string_table"), TextJson->GetObjectField(TEXT("string_table")));
+					}
+				}
+			}
+
+			MembersObj->SetObjectField(MemberProp->GetName(), MemberInfo);
+		}
+
+		return MembersObj;
+	}
+
+	// Metadata discovery keeps type/category/defined_in/accepted_formats, extracts no value unless
+	// requested, and expands struct members only when requested (member values only with values).
+	static TSharedPtr<FJsonObject> BuildDiscoveryPropertyInfo(
+		FProperty* Property,
+		void* ValuePtr,
+		bool bIncludeValues,
+		bool bIncludeMembers)
 	{
 		TSharedPtr<FJsonObject> PropertyInfo = MakeShared<FJsonObject>();
 		PropertyInfo->SetStringField(TEXT("type"), Property->GetCPPType());
 
-		TSharedPtr<FJsonValue> SerializedValue;
-		if (const FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property))
+		if (bIncludeValues)
 		{
-			UObject* ObjectValue = ObjectProperty->GetObjectPropertyValue(ValuePtr);
-			SerializedValue = ObjectValue
-				? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(ObjectValue->GetPathName()))
-				: TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>());
+			TSharedPtr<FJsonValue> SerializedValue;
+			if (const FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property))
+			{
+				UObject* ObjectValue = ObjectProperty->GetObjectPropertyValue(ValuePtr);
+				SerializedValue = ObjectValue
+					? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(ObjectValue->GetPathName()))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>());
+			}
+			else
+			{
+				SerializedValue = FCortexSerializer::PropertyToJson(Property, ValuePtr);
+			}
+			PropertyInfo->SetField(
+				TEXT("value"),
+				SerializedValue.IsValid() ? SerializedValue : MakeShared<FJsonValueNull>());
+
+			if (const FTextProperty* TextProperty = CastField<FTextProperty>(Property))
+			{
+				const TSharedPtr<FJsonObject> TextJson = FCortexSerializer::TextToJson(
+					TextProperty->GetPropertyValue(ValuePtr));
+				if (TextJson->HasField(TEXT("string_table")))
+				{
+					PropertyInfo->SetObjectField(TEXT("string_table"), TextJson->GetObjectField(TEXT("string_table")));
+				}
+			}
 		}
-		else
-		{
-			SerializedValue = FCortexSerializer::PropertyToJson(Property, ValuePtr);
-		}
-		PropertyInfo->SetField(
-			TEXT("value"),
-			SerializedValue.IsValid() ? SerializedValue : MakeShared<FJsonValueNull>());
 
 		const FString Category = Property->GetMetaData(TEXT("Category"));
 		if (!Category.IsEmpty())
@@ -419,6 +693,15 @@ namespace
 		}
 
 		PropertyInfo->SetArrayField(TEXT("accepted_formats"), BuildAcceptedFormats(Property));
+
+		if (bIncludeMembers)
+		{
+			if (const TSharedPtr<FJsonObject> Members = BuildStructMembersInfo(Property, ValuePtr, bIncludeValues))
+			{
+				PropertyInfo->SetObjectField(TEXT("members"), Members);
+			}
+		}
+
 		return PropertyInfo;
 	}
 
@@ -602,7 +885,7 @@ TArray<FString> FCortexBPClassDefaultsOps::FindSimilarPropertyNames(
 	return Result;
 }
 
-FCortexCommandResult FCortexBPClassDefaultsOps::ListSettableDefaults(const TSharedPtr<FJsonObject>& Params)
+FCortexCommandResult FCortexBPClassDefaultsOps::ListDefaults(const TSharedPtr<FJsonObject>& Params, bool bInheritedOnly)
 {
 	FString BlueprintPath;
 	if (!Params.IsValid()
@@ -637,19 +920,94 @@ FCortexCommandResult FCortexBPClassDefaultsOps::ListSettableDefaults(const TShar
 			TEXT("Blueprint generated class is missing"));
 	}
 
+	FDiscoveryReadControls Controls;
+	FCortexCommandResult ControlError;
+	if (!ParseDiscoveryReadControls(Params, Controls, ControlError))
+	{
+		return ControlError;
+	}
+
+	TArray<FString> Selectors;
+	if (!ReadOptionalPropertySelector(Params, Selectors, ControlError))
+	{
+		return ControlError;
+	}
+
+	const auto MakeNotFound = [GeneratedClass](const FString& Selector)
+	{
+		return MakePropertyNotFoundError(
+			GeneratedClass,
+			Selector,
+			GeneratedClass->GetName(),
+			[](UStruct* Struct, const FString& Name, int32 MaxSuggestions)
+			{
+				return FCortexBPClassDefaultsOps::FindSimilarPropertyNames(Struct, Name, MaxSuggestions);
+			});
+	};
+
 	TSharedPtr<FJsonObject> PropertiesObj = MakeShared<FJsonObject>();
 	int32 Count = 0;
-	for (TFieldIterator<FProperty> It(GeneratedClass); It; ++It)
+	int32 TotalProperties = 0;
+	bool bPaged = false;
+
+	if (Selectors.Num() > 0)
 	{
-		FProperty* Property = *It;
-		if (!ShouldExposePropertyForDiscovery(Property) || !IsSupportedDiscoveryProperty(Property))
+		// A selector is resolved after root admission and is never silently paged.
+		for (const FString& Selector : Selectors)
 		{
-			continue;
+			if (!IsAdmittedDiscoveryRoot(GeneratedClass, ResolveDiscoveryRootProperty(GeneratedClass, Selector), bInheritedOnly))
+			{
+				return MakeNotFound(Selector);
+			}
+
+			FProperty* Property = nullptr;
+			void* ValuePtr = nullptr;
+			if (!FCortexPropertyUtils::ResolvePropertyPath(CDO, Selector, Property, ValuePtr))
+			{
+				return MakeNotFound(Selector);
+			}
+
+			PropertiesObj->SetObjectField(Selector,
+				BuildDiscoveryPropertyInfo(Property, ValuePtr, Controls.bIncludeValues, Controls.bIncludeMembers));
+			++Count;
+		}
+	}
+	else
+	{
+		TArray<TPair<FProperty*, void*>> Admitted;
+		for (TFieldIterator<FProperty> It(GeneratedClass); It; ++It)
+		{
+			FProperty* Property = *It;
+			if (!IsAdmittedDiscoveryRoot(GeneratedClass, Property, bInheritedOnly))
+			{
+				continue;
+			}
+			Admitted.Add(TPair<FProperty*, void*>(Property, Property->ContainerPtrToValuePtr<void>(CDO)));
 		}
 
-		void* ValuePtr = Property->ContainerPtrToValuePtr<void>(CDO);
-		PropertiesObj->SetObjectField(Property->GetName(), BuildDiscoveryPropertyInfo(Property, ValuePtr));
-		++Count;
+		TotalProperties = Admitted.Num();
+		if (Controls.bIncludeValues)
+		{
+			// An effective-value read returns the whole admitted population, complete.
+			for (const TPair<FProperty*, void*>& Entry : Admitted)
+			{
+				PropertiesObj->SetObjectField(Entry.Key->GetName(),
+					BuildDiscoveryPropertyInfo(Entry.Key, Entry.Value, true, Controls.bIncludeMembers));
+			}
+			Count = TotalProperties;
+		}
+		else
+		{
+			bPaged = true;
+			const int32 Begin = FMath::Min(Controls.Offset, TotalProperties);
+			const int32 End = FMath::Min(Begin + Controls.Limit, TotalProperties);
+			for (int32 Index = Begin; Index < End; ++Index)
+			{
+				PropertiesObj->SetObjectField(Admitted[Index].Key->GetName(),
+					BuildDiscoveryPropertyInfo(Admitted[Index].Key, Admitted[Index].Value, false, Controls.bIncludeMembers));
+			}
+			Count = End - Begin;
+		}
 	}
 
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
@@ -657,75 +1015,28 @@ FCortexCommandResult FCortexBPClassDefaultsOps::ListSettableDefaults(const TShar
 	Data->SetStringField(TEXT("class"), GeneratedClass->GetName());
 	Data->SetStringField(TEXT("parent_class"),
 		Blueprint->ParentClass ? Blueprint->ParentClass->GetName() : TEXT(""));
+	Data->SetBoolField(TEXT("values_included"), Controls.bIncludeValues);
 	Data->SetObjectField(TEXT("properties"), PropertiesObj);
 	Data->SetNumberField(TEXT("count"), Count);
+	if (bPaged)
+	{
+		AddDiscoveryPagination(Data, TotalProperties, Controls.Offset, Controls.Limit, Count);
+	}
+	else if (Selectors.Num() == 0)
+	{
+		Data->SetNumberField(TEXT("total_properties"), TotalProperties);
+	}
 	return FCortexCommandRouter::Success(Data);
+}
+
+FCortexCommandResult FCortexBPClassDefaultsOps::ListSettableDefaults(const TSharedPtr<FJsonObject>& Params)
+{
+	return ListDefaults(Params, /*bInheritedOnly=*/false);
 }
 
 FCortexCommandResult FCortexBPClassDefaultsOps::ListInheritedProperties(const TSharedPtr<FJsonObject>& Params)
 {
-	FString BlueprintPath;
-	if (!Params.IsValid()
-		|| (!Params->TryGetStringField(TEXT("asset_path"), BlueprintPath)
-			&& !Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
-		|| BlueprintPath.IsEmpty())
-	{
-		return FCortexCommandRouter::Error(
-			CortexErrorCodes::InvalidField,
-			TEXT("Missing or empty 'asset_path' field"));
-	}
-
-	FString LoadError;
-	UBlueprint* Blueprint = FCortexBPAssetOps::LoadBlueprint(BlueprintPath, LoadError);
-	if (!Blueprint)
-	{
-		return FCortexCommandRouter::Error(CortexErrorCodes::BlueprintNotFound, LoadError);
-	}
-
-	FString CDOError;
-	UObject* CDO = GetBlueprintCDO(Blueprint, CDOError);
-	if (!CDO)
-	{
-		return FCortexCommandRouter::Error(CortexErrorCodes::CompileFailed, CDOError);
-	}
-
-	UBlueprintGeneratedClass* GeneratedClass = Cast<UBlueprintGeneratedClass>(Blueprint->GeneratedClass);
-	if (!GeneratedClass)
-	{
-		return FCortexCommandRouter::Error(
-			CortexErrorCodes::CompileFailed,
-			TEXT("Blueprint generated class is missing"));
-	}
-
-	TSharedPtr<FJsonObject> PropertiesObj = MakeShared<FJsonObject>();
-	int32 Count = 0;
-	for (TFieldIterator<FProperty> It(GeneratedClass); It; ++It)
-	{
-		FProperty* Property = *It;
-		if (!ShouldExposePropertyForDiscovery(Property) || !IsSupportedDiscoveryProperty(Property))
-		{
-			continue;
-		}
-
-		UStruct* OwnerStruct = Property->GetOwnerStruct();
-		if (OwnerStruct == GeneratedClass)
-		{
-			continue;
-		}
-
-		void* ValuePtr = Property->ContainerPtrToValuePtr<void>(CDO);
-		PropertiesObj->SetObjectField(Property->GetName(), BuildDiscoveryPropertyInfo(Property, ValuePtr));
-		++Count;
-	}
-
-	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
-	Data->SetStringField(TEXT("blueprint_path"), BlueprintPath);
-	Data->SetStringField(TEXT("class"), GeneratedClass->GetName());
-	Data->SetStringField(TEXT("parent_class"),
-		Blueprint->ParentClass ? Blueprint->ParentClass->GetName() : TEXT(""));
-	Data->SetObjectField(TEXT("properties"), PropertiesObj);
-	Data->SetNumberField(TEXT("count"), Count);
-	return FCortexCommandRouter::Success(Data);
+	return ListDefaults(Params, /*bInheritedOnly=*/true);
 }
 
 FCortexCommandResult FCortexBPClassDefaultsOps::GetClassDefaults(const TSharedPtr<FJsonObject>& Params)
@@ -769,15 +1080,32 @@ FCortexCommandResult FCortexBPClassDefaultsOps::GetClassDefaults(const TSharedPt
 			TEXT("Blueprint generated class is missing"));
 	}
 
-	const TArray<TSharedPtr<FJsonValue>>* PropertiesArray = nullptr;
-	Params->TryGetArrayField(TEXT("properties"), PropertiesArray);
-	const bool bDiscoveryMode = (PropertiesArray == nullptr || PropertiesArray->Num() == 0);
+	FDiscoveryReadControls Controls;
+	FCortexCommandResult ControlError;
+	if (!ParseDiscoveryReadControls(Params, Controls, ControlError))
+	{
+		return ControlError;
+	}
+
+	TArray<FString> Selectors;
+	if (!ReadOptionalPropertySelector(Params, Selectors, ControlError))
+	{
+		return ControlError;
+	}
+
+	const bool bDiscoveryMode = Selectors.Num() == 0;
+	// A nonempty selector is an effective-value read unless the caller opted out explicitly; an
+	// unfiltered read defaults to metadata discovery.
+	const bool bIncludeValues = Controls.bIncludeValuesSupplied ? Controls.bIncludeValues : !bDiscoveryMode;
 
 	TSharedPtr<FJsonObject> PropertiesObj = MakeShared<FJsonObject>();
 	int32 Count = 0;
+	int32 TotalProperties = 0;
+	bool bPaged = false;
 
 	if (bDiscoveryMode)
 	{
+		TArray<TPair<FProperty*, void*>> Admitted;
 		for (TFieldIterator<FProperty> It(GeneratedClass); It; ++It)
 		{
 			FProperty* Property = *It;
@@ -796,93 +1124,39 @@ FCortexCommandResult FCortexBPClassDefaultsOps::GetClassDefaults(const TSharedPt
 				continue;
 			}
 
-			void* ValuePtr = Property->ContainerPtrToValuePtr<void>(CDO);
-			TSharedPtr<FJsonObject> PropertyInfo = MakeShared<FJsonObject>();
-			PropertyInfo->SetStringField(TEXT("type"), Property->GetCPPType());
-			const TSharedPtr<FJsonValue> SerializedValue = FCortexSerializer::PropertyToJson(Property, ValuePtr);
-			PropertyInfo->SetField(
-				TEXT("value"),
-				SerializedValue.IsValid()
-					? SerializedValue
-					: MakeShared<FJsonValueNull>());
-			if (const FTextProperty* TextProperty = CastField<FTextProperty>(Property))
+			Admitted.Add(TPair<FProperty*, void*>(Property, Property->ContainerPtrToValuePtr<void>(CDO)));
+		}
+
+		TotalProperties = Admitted.Num();
+		if (bIncludeValues)
+		{
+			// An effective-value discovery read returns the whole admitted population, complete.
+			for (const TPair<FProperty*, void*>& Entry : Admitted)
 			{
-				const TSharedPtr<FJsonObject> TextJson = FCortexSerializer::TextToJson(
-					TextProperty->GetPropertyValue(ValuePtr));
-				if (TextJson->HasField(TEXT("string_table")))
-				{
-					PropertyInfo->SetObjectField(TEXT("string_table"), TextJson->GetObjectField(TEXT("string_table")));
-				}
+				PropertiesObj->SetObjectField(Entry.Key->GetName(),
+					BuildDiscoveryPropertyInfo(Entry.Key, Entry.Value, true, Controls.bIncludeMembers));
 			}
-
-			const FString Category = Property->GetMetaData(TEXT("Category"));
-			if (!Category.IsEmpty())
+			Count = TotalProperties;
+		}
+		else
+		{
+			// Metadata discovery returns one bounded page of the admitted population.
+			bPaged = true;
+			const int32 Begin = FMath::Min(Controls.Offset, TotalProperties);
+			const int32 End = FMath::Min(Begin + Controls.Limit, TotalProperties);
+			for (int32 Index = Begin; Index < End; ++Index)
 			{
-				PropertyInfo->SetStringField(TEXT("category"), Category);
+				PropertiesObj->SetObjectField(Admitted[Index].Key->GetName(),
+					BuildDiscoveryPropertyInfo(Admitted[Index].Key, Admitted[Index].Value, false, Controls.bIncludeMembers));
 			}
-
-			if (UStruct* OwnerStruct = Property->GetOwnerStruct())
-			{
-				PropertyInfo->SetStringField(TEXT("defined_in"), OwnerStruct->GetName());
-			}
-
-			// If property is a struct, add "members" with one level of member info
-			if (const FStructProperty* StructProp = CastField<FStructProperty>(Property))
-			{
-				TSharedPtr<FJsonObject> MembersObj = MakeShared<FJsonObject>();
-				const UScriptStruct* ScriptStruct = StructProp->Struct;
-				if (ScriptStruct)
-				{
-					for (TFieldIterator<FProperty> MemberIt(ScriptStruct); MemberIt; ++MemberIt)
-					{
-						FProperty* MemberProp = *MemberIt;
-						if (!MemberProp)
-						{
-							continue;
-						}
-
-						TSharedPtr<FJsonObject> MemberInfo = MakeShared<FJsonObject>();
-						MemberInfo->SetStringField(TEXT("type"), MemberProp->GetCPPType());
-						MemberInfo->SetStringField(TEXT("path"),
-							FString::Printf(TEXT("%s.%s"), *Property->GetName(), *MemberProp->GetName()));
-
-						// Serialize member value
-						void* MemberValuePtr = MemberProp->ContainerPtrToValuePtr<void>(ValuePtr);
-						const TSharedPtr<FJsonValue> MemberValue = FCortexSerializer::PropertyToJson(MemberProp, MemberValuePtr);
-						MemberInfo->SetField(TEXT("value"),
-							MemberValue.IsValid() ? MemberValue : MakeShared<FJsonValueNull>());
-						if (const FTextProperty* MemberTextProperty = CastField<FTextProperty>(MemberProp))
-						{
-							const TSharedPtr<FJsonObject> TextJson = FCortexSerializer::TextToJson(
-								MemberTextProperty->GetPropertyValue(MemberValuePtr));
-							if (TextJson->HasField(TEXT("string_table")))
-							{
-								MemberInfo->SetObjectField(TEXT("string_table"), TextJson->GetObjectField(TEXT("string_table")));
-							}
-						}
-
-						MembersObj->SetObjectField(MemberProp->GetName(), MemberInfo);
-					}
-				}
-				PropertyInfo->SetObjectField(TEXT("members"), MembersObj);
-			}
-
-			PropertiesObj->SetObjectField(Property->GetName(), PropertyInfo);
-			++Count;
+			Count = End - Begin;
 		}
 	}
 	else
 	{
-		for (const TSharedPtr<FJsonValue>& PropertyValue : *PropertiesArray)
+		// Selected property paths preserve their effective values; they are never paged.
+		for (const FString& PropertyName : Selectors)
 		{
-			if (!PropertyValue.IsValid() || PropertyValue->Type != EJson::String)
-			{
-				return FCortexCommandRouter::Error(
-					CortexErrorCodes::InvalidField,
-					TEXT("'properties' must be an array of strings"));
-			}
-
-			const FString PropertyName = PropertyValue->AsString();
 			FProperty* Property = nullptr;
 			void* ValuePtr = nullptr;
 			if (!FCortexPropertyUtils::ResolvePropertyPath(CDO, PropertyName, Property, ValuePtr))
@@ -897,36 +1171,8 @@ FCortexCommandResult FCortexBPClassDefaultsOps::GetClassDefaults(const TSharedPt
 					});
 			}
 
-			TSharedPtr<FJsonObject> PropertyInfo = MakeShared<FJsonObject>();
-			PropertyInfo->SetStringField(TEXT("type"), Property->GetCPPType());
-			const TSharedPtr<FJsonValue> SerializedValue = FCortexSerializer::PropertyToJson(Property, ValuePtr);
-			PropertyInfo->SetField(
-				TEXT("value"),
-				SerializedValue.IsValid()
-					? SerializedValue
-					: MakeShared<FJsonValueNull>());
-			if (const FTextProperty* TextProperty = CastField<FTextProperty>(Property))
-			{
-				const TSharedPtr<FJsonObject> TextJson = FCortexSerializer::TextToJson(
-					TextProperty->GetPropertyValue(ValuePtr));
-				if (TextJson->HasField(TEXT("string_table")))
-				{
-					PropertyInfo->SetObjectField(TEXT("string_table"), TextJson->GetObjectField(TEXT("string_table")));
-				}
-			}
-
-			const FString Category = Property->GetMetaData(TEXT("Category"));
-			if (!Category.IsEmpty())
-			{
-				PropertyInfo->SetStringField(TEXT("category"), Category);
-			}
-
-			if (UStruct* OwnerStruct = Property->GetOwnerStruct())
-			{
-				PropertyInfo->SetStringField(TEXT("defined_in"), OwnerStruct->GetName());
-			}
-
-			PropertiesObj->SetObjectField(PropertyName, PropertyInfo);
+			PropertiesObj->SetObjectField(PropertyName,
+				BuildDiscoveryPropertyInfo(Property, ValuePtr, bIncludeValues, Controls.bIncludeMembers));
 			++Count;
 		}
 	}
@@ -936,8 +1182,17 @@ FCortexCommandResult FCortexBPClassDefaultsOps::GetClassDefaults(const TSharedPt
 	Data->SetStringField(TEXT("class"), GeneratedClass->GetName());
 	Data->SetStringField(TEXT("parent_class"),
 		Blueprint->ParentClass ? Blueprint->ParentClass->GetName() : TEXT(""));
+	Data->SetBoolField(TEXT("values_included"), bIncludeValues);
 	Data->SetObjectField(TEXT("properties"), PropertiesObj);
 	Data->SetNumberField(TEXT("count"), Count);
+	if (bPaged)
+	{
+		AddDiscoveryPagination(Data, TotalProperties, Controls.Offset, Controls.Limit, Count);
+	}
+	else if (bDiscoveryMode)
+	{
+		Data->SetNumberField(TEXT("total_properties"), TotalProperties);
+	}
 
 	UE_LOG(LogCortexBlueprint, Log, TEXT("Read class defaults from %s (%d properties)"), *BlueprintPath, Count);
 	return FCortexCommandRouter::Success(Data);

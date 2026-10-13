@@ -494,15 +494,22 @@ bool FCortexBPClassDefaultsNestedDiscoveryTest::RunTest(const FString& Parameter
 		return true;
 	}
 
-	// Discovery mode (no properties specified)
+	// Struct member expansion is opt-in, so this consumer requests values and members explicitly.
 	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 	Params->SetStringField(TEXT("blueprint_path"), AssetPath);
+	Params->SetBoolField(TEXT("include_values"), true);
+	Params->SetBoolField(TEXT("include_members"), true);
 
 	const FCortexCommandResult Result = Handler.Execute(TEXT("get_class_defaults"), Params);
 	TestTrue(TEXT("Discovery should succeed"), Result.bSuccess);
 
 	if (Result.Data.IsValid())
 	{
+		bool bValuesIncluded = false;
+		TestTrue(TEXT("explicit value read declares value inclusion"),
+			Result.Data->TryGetBoolField(TEXT("values_included"), bValuesIncluded));
+		TestTrue(TEXT("explicit value read includes values"), bValuesIncluded);
+
 		const TSharedPtr<FJsonObject>* PropsObj = nullptr;
 		if (Result.Data->TryGetObjectField(TEXT("properties"), PropsObj) && PropsObj)
 		{

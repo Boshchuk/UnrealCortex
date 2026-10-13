@@ -295,14 +295,28 @@ TArray<FCortexCommandInfo> FCortexBPCommandHandler::GetSupportedCommands() const
 		.Optional(TEXT("cascade_exec_chain"), TEXT("boolean"), TEXT("Custom-event exec cascade, default false"))
 		.OptionalExpectedFingerprint()
 		.Optional(TEXT("expected_validation_hash"), TEXT("string"), TEXT("Validation hash returned by preview")));
-	Commands.Add(FCortexCommandInfo{TEXT("get_class_defaults"), TEXT("Read default property values from a Blueprint CDO")}
+	Commands.Add(FCortexCommandInfo{TEXT("get_class_defaults"), TEXT("Read a Blueprint CDO's default properties (metadata-only discovery unless values requested)")}
 		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
-		.Optional(TEXT("properties"), TEXT("array"), TEXT("Specific properties to read"))
+		.Optional(TEXT("properties"), TEXT("array"), TEXT("Specific property paths to read; nonempty defaults to effective values"))
+		.Optional(TEXT("include_values"), TEXT("boolean"), TEXT("Include effective values; default true for a selected read, false for discovery"))
+		.Optional(TEXT("include_members"), TEXT("boolean"), TEXT("Expand one level of struct member metadata (values only with include_values)"))
+		.Optional(TEXT("discovery_offset"), TEXT("number"), TEXT("Metadata discovery page offset; default 0"))
+		.Optional(TEXT("discovery_limit"), TEXT("number"), TEXT("Metadata discovery page size; default 100, max 200"))
 		.Optional(TEXT("blueprint_path"), TEXT("string"), TEXT("Optional alternate Blueprint path")));
-	Commands.Add(FCortexCommandInfo{TEXT("list_inherited_properties"), TEXT("List inherited class-default properties in settable form")}
-		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path")));
-	Commands.Add(FCortexCommandInfo{TEXT("list_settable_defaults"), TEXT("List settable class-default properties with accepted formats")}
-		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path")));
+	Commands.Add(FCortexCommandInfo{TEXT("list_inherited_properties"), TEXT("List inherited class-default property metadata (paged)")}
+		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
+		.Optional(TEXT("properties"), TEXT("array"), TEXT("Specific property paths to select"))
+		.Optional(TEXT("include_values"), TEXT("boolean"), TEXT("Include effective values; default false"))
+		.Optional(TEXT("include_members"), TEXT("boolean"), TEXT("Expand one level of struct member metadata (values only with include_values)"))
+		.Optional(TEXT("discovery_offset"), TEXT("number"), TEXT("Metadata discovery page offset; default 0"))
+		.Optional(TEXT("discovery_limit"), TEXT("number"), TEXT("Metadata discovery page size; default 100, max 200")));
+	Commands.Add(FCortexCommandInfo{TEXT("list_settable_defaults"), TEXT("List settable class-default property metadata (paged)")}
+		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
+		.Optional(TEXT("properties"), TEXT("array"), TEXT("Specific property paths to select"))
+		.Optional(TEXT("include_values"), TEXT("boolean"), TEXT("Include effective values; default false"))
+		.Optional(TEXT("include_members"), TEXT("boolean"), TEXT("Expand one level of struct member metadata (values only with include_values)"))
+		.Optional(TEXT("discovery_offset"), TEXT("number"), TEXT("Metadata discovery page offset; default 0"))
+		.Optional(TEXT("discovery_limit"), TEXT("number"), TEXT("Metadata discovery page size; default 100, max 200")));
 	Commands.Add(FCortexCommandInfo{TEXT("set_class_defaults"), TEXT("Set default property values on a Blueprint CDO")}
 		.OptionalBatchItems(TEXT("Batch items with target, properties, compile, save, expected_fingerprint"))
 		.OptionalExpectedFingerprint()
