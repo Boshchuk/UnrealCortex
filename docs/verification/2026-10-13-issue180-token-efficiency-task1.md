@@ -6,10 +6,12 @@
 - Plugin base: `9f899fafeb18666cc8204f7446120d411491861f` (branch `feat/issue-180-token-efficiency`).
 - Scope: Python MCP presentation boundary only. No native/C++ change, no editor runtime, no
   description/toolset change (Task 2), no pagination-ownership change (Task 3).
-- Verified source identity: the working tree on branch `feat/issue-180-token-efficiency` (plugin base
-  `9f899fafeb18666cc8204f7446120d411491861f`), which the controller exercised as GREEN per §GREEN
-  below. Committed SHA is recorded by the controller after the residual stdio smoke; no commit was
-  made during implementation.
+- Tested source identity: the working tree on branch `feat/issue-180-token-efficiency` (plugin base
+  `9f899fafeb18666cc8204f7446120d411491861f`), exercised by the controller as GREEN (§GREEN) and by
+  the stdio smoke (§Stdio smoke).
+- Committed as `67ad840dcb3163c134cdfec5cbeb85dfbac2f960` — "Task1: one public output representation
+  and honest response-size metrics" — whose parent is the plugin base above. This verification record
+  is committed immediately after that code commit, so the SHA is not duplicated inside it.
 
 ## Contract implemented
 
