@@ -146,6 +146,12 @@ _RESERVED_REFUSAL_KEYS = frozenset({
 })
 
 
+# Native diagnostics that accompany an incomplete read (partial/issues/warnings). They are context,
+# not the value payload: carried when they fit, and reported by count plus an explicit omission when
+# they cannot, so a refusal never silently loses why a read was incomplete.
+_DIAGNOSTIC_ARRAY_KEYS = ("issues", "warnings", "diagnostics")
+
+
 def _selector_context(data: dict, request_params: dict | None) -> dict:
     """Selector/window context for a refusal: native scalars win, request selectors fill gaps.
 
@@ -166,6 +172,11 @@ def _selector_context(data: dict, request_params: dict | None) -> dict:
         if key in _RESERVED_REFUSAL_KEYS or key.startswith("_") or isinstance(value, (list, dict)):
             continue
         context[key] = value
+    for key in _DIAGNOSTIC_ARRAY_KEYS:
+        value = data.get(key)
+        if isinstance(value, list):
+            context[f"{key}_count"] = len(value)
+            context[key] = value
     return context
 
 

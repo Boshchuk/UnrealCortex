@@ -11,6 +11,7 @@ authoring branch. Wiring-only constant copies, raw cursor encoding pins and cach
 are deliberately not asserted.
 """
 
+import base64
 import json
 from unittest.mock import MagicMock
 
@@ -594,4 +595,101 @@ class TestRefusalContextBudget:
         assert payload["offset"] == 0
         assert payload["total"] == 5000
         assert "actors" not in payload
+        assert len(compact_json(payload)) <= MAX_RESPONSE_CHARS
+
+
+def _retag_cursor(cursor: str, **fields) -> str:
+    """Rewrite an opaque cursor's self-declared provenance (forgery probe)."""
+    raw = json.loads(base64.b64decode(cursor))
+    raw.update(fields)
+    return base64.b64encode(json.dumps(raw).encode()).decode()
+
+
+class TestCachedPageIntegrity:
+    """An empty mapped population is a normal empty page; forged provenance refuses."""
+
+    @pytest.mark.parametrize(
+        ("domain", "command", "array_key", "data"),
+        [
+            ("level", "find_actors", "matches", {"matches": [], "count": 0, "pattern": "Nothing"}),
+            ("data", "list_datatables", "datatables", {"datatables": [], "count": 0}),
+        ],
+    )
+    def test_empty_mapped_population_returns_a_terminal_empty_page(self, domain, command, array_key, data):
+        router, connection = _router(domain, data)
+
+        payload = json.loads(router(command, {"limit": 2}))
+
+        assert payload[array_key] == []
+        assert payload["_pagination"]["returned"] == 0
+        assert payload["_pagination"]["total"] == 0
+        assert payload["_pagination"]["has_more"] is False
+        assert payload["_pagination"]["next_cursor"] is None
+        assert connection.send_command.call_count == 1
+        assert len(compact_json(payload)) <= MAX_RESPONSE_CHARS
+
+    def test_cursor_retagged_to_another_command_refuses_without_dispatch(self):
+        level_router, _ = _router("level", {"matches": _actors(7), "count": 7, "pattern": "Actor"})
+        cursor = json.loads(level_router("find_actors", {"limit": 2}))["_pagination"]["next_cursor"]
+        forged = _retag_cursor(cursor, command="material.list_materials", array="materials")
+
+        material_router, connection = _router("material", {"materials": [{"name": "M_Cached"}]})
+        payload = json.loads(material_router("list_materials", {"cursor": forged}))
+
+        assert payload["_error"] == "INVALID_CURSOR"
+        assert "Actor_" not in compact_json(payload)
+        connection.send_command.assert_not_called()
+
+    def test_cursor_with_wrong_declared_array_refuses(self):
+        router, connection = _router("level", {"matches": _actors(7), "count": 7, "pattern": "Actor"})
+        cursor = json.loads(router("find_actors", {"limit": 2}))["_pagination"]["next_cursor"]
+        forged = _retag_cursor(cursor, array="materials")
+
+        # The first page legitimately dispatched; only the forged-cursor call must not.
+        connection.send_command.reset_mock()
+        payload = json.loads(router("find_actors", {"cursor": forged}))
+
+        assert payload["_error"] == "INVALID_CURSOR"
+        connection.send_command.assert_not_called()
+
+
+class TestRefusalDiagnostics:
+    """A selector refusal never silently loses native issue/diagnostic context."""
+
+    def test_small_native_diagnostics_are_retained(self):
+        data = {
+            "asset_path": "/Game/DA_Diag",
+            "asset_class": "CortexTestDataAsset",
+            "partial": True,
+            "issues": [{"path": "TestProperty", "message": "unsupported export"}],
+            "warnings": ["serialization warning"],
+            "properties": _huge_fields("Field_"),
+        }
+        router, _ = _router("data", data)
+
+        payload = json.loads(router("get_data_asset", {"asset_path": "/Game/DA_Diag"}))
+
+        assert payload["_error"] == "RESPONSE_TOO_LARGE"
+        assert payload["partial"] is True
+        assert payload["issues"] == [{"path": "TestProperty", "message": "unsupported export"}]
+        assert payload["warnings"] == ["serialization warning"]
+        assert "_omitted_context" not in payload
+        assert len(compact_json(payload)) <= MAX_RESPONSE_CHARS
+
+    def test_oversized_native_diagnostics_are_omitted_explicitly(self):
+        data = {
+            "asset_path": "/Game/DA_Diag",
+            "partial": True,
+            "issues": [{"path": "TestProperty", "message": "x" * 60_000}],
+            "properties": _huge_fields("Field_"),
+        }
+        router, _ = _router("data", data)
+
+        payload = json.loads(router("get_data_asset", {"asset_path": "/Game/DA_Diag"}))
+
+        assert payload["_error"] == "RESPONSE_TOO_LARGE"
+        assert payload["partial"] is True
+        assert payload["issues_count"] == 1
+        assert "issues" not in payload
+        assert "issues" in payload["_omitted_context"]
         assert len(compact_json(payload)) <= MAX_RESPONSE_CHARS

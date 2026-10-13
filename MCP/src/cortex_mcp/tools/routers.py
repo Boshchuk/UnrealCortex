@@ -114,6 +114,18 @@ def _invalid_cursor(message: str) -> str:
     return json.dumps({"_error": "INVALID_CURSOR", "_message": message})
 
 
+def _cached_refusal(array_key: str) -> str:
+    return compact_json({
+        "_error": "RESPONSE_TOO_LARGE",
+        "_message": (
+            f"No entry of '{array_key}' fits the {MAX_RESPONSE_CHARS}-character response budget; "
+            "the page was refused."
+        ),
+        "reader_complete": False,
+        "_suggestion": "Reduce the per-entry fields, or query with a smaller scope.",
+    })
+
+
 def _format_cached_page(
     qualified: str,
     array_key: str,
@@ -126,9 +138,16 @@ def _format_cached_page(
     """Emit the largest prefix of a cached page that fits the budget *including* its metadata.
 
     ``returned`` and the continuation are computed from the rows actually emitted, so a bounded
-    page can never skip the rows it omitted. If not even one row fits, refuse without an advancing
-    cursor instead of reporting a zero-row page that claims ``has_more``.
+    page can never skip the rows it omitted. An exhausted snapshot (no rows at this offset) is a
+    normal terminal empty page — zero rows, no continuation, verified against the real template
+    budget — and a zero-row page never reports ``has_more``. If not even one row of a non-empty
+    page fits, refuse instead of reporting a page that claims more.
     """
+    if not page:
+        meta = {"returned": 0, "total": total, "has_more": False, "next_cursor": None}
+        text = compact_json(_pagination_cache.rebuild_response(cache_key, [], meta))
+        return text if len(text) <= MAX_RESPONSE_CHARS else _cached_refusal(array_key)
+
     for count in range(len(page), 0, -1):
         next_offset = offset + count
         has_more = next_offset < total
@@ -145,22 +164,15 @@ def _format_cached_page(
         text = compact_json(_pagination_cache.rebuild_response(cache_key, page[:count], meta))
         if len(text) <= MAX_RESPONSE_CHARS:
             return text
-    return compact_json({
-        "_error": "RESPONSE_TOO_LARGE",
-        "_message": (
-            f"No entry of '{array_key}' fits the {MAX_RESPONSE_CHARS}-character response budget; "
-            "the page was refused."
-        ),
-        "reader_complete": False,
-        "_suggestion": "Reduce the per-entry fields, or query with a smaller scope.",
-    })
+    return _cached_refusal(array_key)
 
 
 def _handle_cursor_request(cursor_token: str, qualified: str) -> str:
     """Handle a subsequent page for the cache-owned read ``qualified``.
 
-    The cursor carries the command that produced it: a cursor for another read, or for a read that
-    is not cache-owned, refuses before anything is dispatched.
+    A cursor must agree with the route mapping **and** with the provenance stored for the snapshot
+    it addresses: a token re-tagged for another read (or another array) refuses before anything is
+    sliced, rebuilt or dispatched, so a foreign payload can never be returned through this read.
     """
     try:
         decoded = decode_cursor(cursor_token)
@@ -176,6 +188,16 @@ def _handle_cursor_request(cursor_token: str, qualified: str) -> str:
 
     array_key = CACHED_PAGE_ARRAYS[qualified]
     key = decoded["key"]
+
+    provenance = _pagination_cache.entry_provenance(key)
+    if provenance is None:
+        return _cursor_expired()
+    stored_command, stored_array = provenance
+    if decoded.get("array") != array_key or stored_command != qualified or stored_array != array_key:
+        return _invalid_cursor(
+            "Cursor does not belong to this read command. Start a new pagination sequence with 'limit'."
+        )
+
     offset = decoded["offset"]
     limit = decoded["limit"]  # embedded in cursor
 

@@ -128,6 +128,21 @@ class PaginationCache:
 
         return page, meta
 
+    def entry_provenance(self, key: str) -> tuple[str, str] | None:
+        """Owner command and primary array of a live entry, or None when missing/expired.
+
+        Used to validate a cursor's self-declared provenance against the snapshot it addresses
+        before any value is sliced or rebuilt.
+        """
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        timestamp, qualified_command, array_key, _full_list, _template = entry
+        if time.monotonic() - timestamp > self._ttl_seconds:
+            del self._entries[key]
+            return None
+        return qualified_command, array_key
+
     def clear(self) -> None:
         """Clear all cache entries. Intended for testing."""
         self._entries.clear()

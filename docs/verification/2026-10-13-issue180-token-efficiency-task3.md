@@ -235,6 +235,97 @@ Controller evidence after the fix (same owned editor PID 39252 / port 8743):
   no fixture/authoring errors, ensures or fatal lines at scan time (the shutdown itself was not yet
   logged). This is not a zero-warning manual-session claim.
 
+## Round 3 — independent review findings: RED and fix
+
+The independent review of `ce303dd..f3207c7` (`local://task-3-review.md`) returned **3 Important
+(P2)** findings, all source-confirmed; the core ownership split, prefix arithmetic and bounded
+scalar refusal design were accepted.
+
+1. **Empty cached population is refused.** `_format_cached_page` (routers.py:132) starts the prefix
+   search at `len(page)` while the loop excludes zero, so a mapped read with an empty primary array
+   (`level.find_actors` with no match, `data.list_datatables` in an empty folder) returns
+   `RESPONSE_TOO_LARGE` instead of an empty terminal page. Required: `returned=0`, `total=0`,
+   `has_more=false`, `next_cursor=null` (never a zero-row page that claims more).
+2. **Cursor provenance is not validated against the stored entry.** `_handle_cursor_request`
+   (routers.py:172-184) compares only the token's self-declared command with the route; the token's
+   array is ignored and `PaginationCache.get_page`/`rebuild_response`
+   (pagination.py:109/141) discard the stored owner, so re-tagging a `level.find_actors` cursor as
+   `material.list_materials` returns the cached actor/matches template through the material read.
+   Required: validate the decoded command **and** array against both the mapping and the entry's
+   stored provenance before slicing/rebuilding, refusing `INVALID_CURSOR` without native dispatch;
+   genuine expiry stays `CURSOR_EXPIRED` (not a signature/alias error).
+3. **Selector refusals silently drop native issue context.** `_selector_context` (response.py:165-168)
+   discards every array before the budget helper runs, so an oversized `data.get_data_asset` refusal
+   keeps `partial=true` but loses native `issues`/`warnings` (emitted together by
+   `CortexDataAssetOps.cpp:189-196`) even when a small list would fit. Required: retain small
+   diagnostic context and, when it cannot fit, expose bounded counts plus an explicit
+   omission/completeness marker.
+
+Consumer RED regressions staged (production untouched at RED time):
+`TestCachedPageIntegrity` — parametrised empty-population terminal page for `level.find_actors` and
+`data.list_datatables`; a cursor re-tagged to `material.list_materials/materials` must refuse
+`INVALID_CURSOR` without dispatch and without leaking the actor payload; a cursor whose declared
+array disagrees with its owner must refuse. `TestRefusalDiagnostics` — small `issues`/`warnings` are
+retained in the refusal with no omission marker; a 60 000-character `issues` entry is omitted with
+`issues_count=1` and `_omitted_context` naming `issues`, still under 40 000 characters.
+
+Controller RED: **6 failed, 130 passed in 1.48 s** (controller-run tool log; no artifact id was
+allocated for this round — `artifact://426` belongs to the earlier context-helper RED of 5 failed /
+124 passed, not to this review round) — empty array returned a false error, the re-tagged/wrong-array
+cursors were accepted, small `issues` were lost and the large `issues` count was missing.
+
+Fix implemented:
+1. `_format_cached_page` (routers.py) emits a **terminal empty page** for an exhausted snapshot
+   (`returned=0`, `total`, `has_more=false`, `next_cursor=null`) verified against the real
+   template+metadata budget, with `_cached_refusal(array_key)` shared by both refusing paths; a
+   zero-row page never reports `has_more`.
+2. `PaginationCache.entry_provenance(key)` (pagination.py) exposes the stored owner command and
+   array; `_handle_cursor_request` validates the decoded command **and** array against the route
+   mapping *and* that stored provenance before slicing/rebuilding → `INVALID_CURSOR` without native
+   dispatch, while a missing/expired snapshot keeps `CURSOR_EXPIRED` (not a signature alias).
+3. `_selector_context` (response.py) carries `issues`/`warnings`/`diagnostics` as bounded context
+   candidates plus `<key>_count` scalars: small diagnostics survive verbatim; an oversized
+   diagnostic array is dropped whole and named in `_omitted_context` with its count retained.
+
+In-process proof script for the controller (task-owned, no native claim — a finite fixture stands at
+the native boundary): `.superpowers/sdd/2026-10-13-token-efficiency-impl/smoke-task3-review-fix.py`
+starts a real FastMCP server, registers the routers through the real `ToolOutputRegistrar`, and
+asserts `EMPTY_PAGE_LEVEL`, `EMPTY_PAGE_DATA`, `FORGED_CURSOR_COMMAND`, `FORGED_CURSOR_ARRAY`,
+`GENUINE_CURSOR_STILL_PAGES`, `DIAGNOSTICS_SMALL_RETAINED`, `DIAGNOSTICS_HUGE_OMITTED_EXPLICITLY`.
+
+First GREEN attempt: **135 passed, 1 failed in 0.55 s**. The single failure was a fixture-setup
+defect in the new test, not product behaviour: the wrong-declared-array case asserted
+`send_command.assert_not_called()` on the same fixture connection that had already legitimately
+dispatched the first page (the wrong array itself was correctly refused `INVALID_CURSOR`). The
+fixture mock is now reset after minting the cursor, so only the forged-cursor call is asserted; no
+production change was needed.
+
+Covering GREEN: **136 passed in 0.46 s**. The in-process smoke then exposed a defect in its own
+throwaway decoder (`CallToolResult` has no `.text`; the helper assumed the legacy bare-text-block
+shape). The helper now unwraps the SDK result's `content` blocks (still accepting the legacy
+tuple/list shapes), requires exactly one text block and asserts `structuredContent is None` for text
+mode — no production change; result-mode encoding itself was already proved in Task 1.
+
+### In-process smoke (controller), all 7 cases PASS
+
+```
+rtk proxy uv run python Plugins/UnrealCortex/.superpowers/sdd/2026-10-13-token-efficiency-impl/smoke-task3-review-fix.py
+```
+
+Real FastMCP server + `ToolOutputRegistrar` + registered routers, called in-process over a **finite
+fixture connection** (no editor, no TCP — these results are Python-contract evidence, not a native
+claim). Runtime 1.24 s, exit 0:
+
+* `EMPTY_PAGE_LEVEL`, `EMPTY_PAGE_DATA` — empty mapped populations return the terminal `0` page
+  (`returned=0`, `total=0`, `has_more=false`, `next_cursor=null`), one dispatch each.
+* `FORGED_CURSOR_COMMAND`, `FORGED_CURSOR_ARRAY` — re-tagged and wrong-array cursors refuse
+  `INVALID_CURSOR` with **no** extra dispatch and no foreign `Actor_` payload.
+* `GENUINE_CURSOR_STILL_PAGES` — the genuine cursor still returns the one remaining `Actor_2`.
+* `DIAGNOSTICS_SMALL_RETAINED` — native `issues` + `warnings` retained inside the refusal
+  (469 characters total).
+* `DIAGNOSTICS_HUGE_OMITTED_EXPLICITLY` — the 60 000-character `issues` entry omitted with
+  `issues_count=1` and `_omitted_context` naming `issues` (341 characters total).
+
 ## Files changed
 
 `MCP/src/cortex_mcp/tools/routers.py`, `MCP/src/cortex_mcp/pagination.py`,
