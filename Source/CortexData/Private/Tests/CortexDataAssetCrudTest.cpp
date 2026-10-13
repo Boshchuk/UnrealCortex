@@ -1,12 +1,22 @@
 #include "Misc/AutomationTest.h"
 #include "Operations/CortexDataAssetOps.h"
+#include "CortexCommandRouter.h"
+#include "CortexDataCommandHandler.h"
 #include "Dom/JsonObject.h"
 #include "Engine/DataAsset.h"
 #include "Misc/PackageName.h"
 #include "UObject/SavePackage.h"
 #include "ObjectTools.h"
 #include "HAL/PlatformFileManager.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
+#include "HAL/FileManager.h"
+#include "Misc/Guid.h"
+#include "Misc/EngineVersionComparison.h"
 #include "Misc/TextBuffer.h"
+#include "Modules/ModuleManager.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UObjectHash.h"
 #include "Tests/CortexTestDataAsset.h"
 
 namespace
@@ -370,5 +380,268 @@ bool FCortexGetDataAssetDeepPayloadTest::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("deep get uses stable issue codes and field paths"), bFoundUnsupportedField);
 
+	return true;
+}
+
+// Consumer-visible regressions for the token-efficiency list_data_assets
+// selector cutover (TE04 / design 3.1): the advertised class_name selector
+// must retain the existing subclass-aware behavior, and the obsolete
+// class_filter name must stop filtering. Fixtures are disposable
+// task-owned packages; no real project asset names.
+
+namespace
+{
+	FCortexCommandRouter CreateListDataRouter()
+	{
+		FCortexCommandRouter Router;
+		Router.RegisterDomain(
+			TEXT("data"),
+			TEXT("Cortex Data"),
+			TEXT("1.0.1"),
+			MakeShared<FCortexDataCommandHandler>());
+		return Router;
+	}
+
+	void ListCleanupLoadedPackage(const FString& PackageName)
+	{
+		UPackage* Package = FindPackage(nullptr, *PackageName);
+		if (Package == nullptr)
+		{
+			return;
+		}
+
+		TArray<UObject*> PackageObjects;
+#if UE_VERSION_OLDER_THAN(5, 8, 0)
+		GetObjectsWithPackage(Package, PackageObjects, false);
+#else
+		GetObjectsWithPackage(Package, PackageObjects, EGetObjectsFlags::None);
+#endif
+		for (UObject* Object : PackageObjects)
+		{
+			if (Object == nullptr)
+			{
+				continue;
+			}
+
+			FAssetRegistryModule::AssetDeleted(Object);
+			Object->ClearFlags(RF_Public | RF_Standalone);
+			Object->MarkAsGarbage();
+		}
+
+		Package->ClearFlags(RF_Public | RF_Standalone);
+		Package->MarkAsGarbage();
+	}
+
+	void ListDeletePackageFile(const FString& PackageName)
+	{
+		const FString Filename = FPackageName::LongPackageNameToFilename(
+			PackageName,
+			FPackageName::GetAssetPackageExtension());
+
+		if (IFileManager::Get().FileExists(*Filename))
+		{
+			IFileManager::Get().Delete(*Filename);
+		}
+	}
+
+	double GetListDataFieldNumber(const FCortexCommandResult& Result, const FString& FieldName)
+	{
+		double Value = -1.0;
+		if (Result.Data.IsValid())
+		{
+			Result.Data->TryGetNumberField(FieldName, Value);
+		}
+		return Value;
+	}
+
+	FString GetListDataFieldString(const FCortexCommandResult& Result, const FString& FieldName)
+	{
+		FString Value;
+		if (Result.Data.IsValid())
+		{
+			Result.Data->TryGetStringField(FieldName, Value);
+		}
+		return Value;
+	}
+
+	/** Dedicated-package list fixture: base + derived asset in one folder. */
+	class FCortexTokenListFixture
+	{
+	public:
+		FCortexTokenListFixture()
+			: RunId(FGuid::NewGuid().ToString(EGuidFormats::Digits))
+		{
+			Folder = FString::Printf(TEXT("/Game/Temp/CortexTokenList_%s"), *RunId);
+			BaseName = FString::Printf(TEXT("CTokenBase_%s"), *RunId);
+			DerivedName = FString::Printf(TEXT("CTokenDerived_%s"), *RunId);
+			BasePackage = Folder + TEXT("/") + BaseName;
+			DerivedPackage = Folder + TEXT("/") + DerivedName;
+		}
+
+		~FCortexTokenListFixture()
+		{
+			Cleanup();
+		}
+
+		void CreateAll()
+		{
+			CreateAndSave<UCortexTestDataAsset>(BasePackage, BaseName);
+			CreateAndSave<UCortexDerivedTestDataAsset>(DerivedPackage, DerivedName);
+		}
+
+		void Cleanup()
+		{
+			if (CreatedPackageNames.Num() == 0)
+			{
+				return;
+			}
+
+			// Gathering may still hold the files opened by the previous frame's save; drain it
+			// before the registry is told the packages are gone.
+			IAssetRegistry& AssetRegistry =
+				FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+			AssetRegistry.WaitForCompletion();
+			FlushAsyncLoading();
+			AssetRegistry.Tick(-1.0f);
+
+			for (int32 Index = CreatedPackageNames.Num() - 1; Index >= 0; --Index)
+			{
+				ListCleanupLoadedPackage(CreatedPackageNames[Index]);
+				ListDeletePackageFile(CreatedPackageNames[Index]);
+			}
+
+			CreatedPackageNames.Empty();
+		}
+
+		FString RunId;
+		FString Folder;
+		FString BaseName;
+		FString DerivedName;
+		FString BasePackage;
+		FString DerivedPackage;
+
+	private:
+		template <typename AssetType>
+		void CreateAndSave(const FString& PackagePath, const FString& AssetName)
+		{
+			UPackage* Package = CreatePackage(*PackagePath);
+			AssetType* Asset = NewObject<AssetType>(
+				Package,
+				AssetType::StaticClass(),
+				FName(*AssetName),
+				RF_Public | RF_Standalone);
+
+			FAssetRegistryModule::AssetCreated(Asset);
+
+			FSavePackageArgs SaveArgs;
+			SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+			const FString Filename = FPackageName::LongPackageNameToFilename(
+				PackagePath,
+				FPackageName::GetAssetPackageExtension());
+			UPackage::SavePackage(Package, Asset, *Filename, SaveArgs);
+
+			CreatedPackageNames.Add(PackagePath);
+		}
+
+		TArray<FString> CreatedPackageNames;
+	};
+
+	/** Retires one list fixture across engine frames. RunTest creates and saves the fixture; this
+	 *  command then yields a full engine frame so the AssetRegistry directory watcher consumes the
+	 *  queued .uasset save events before the fixture is retired. Retiring inside the save frame
+	 *  lets the asynchronous gather re-report a package the same frame already deleted and warn
+	 *  that the deleted package was "modified on disk". */
+	class FCortexListFixtureRetireCommand : public IAutomationLatentCommand
+	{
+	public:
+		explicit FCortexListFixtureRetireCommand(TSharedPtr<FCortexTokenListFixture> InFixture)
+			: Fixture(MoveTemp(InFixture))
+		{
+		}
+
+		virtual bool Update() override
+		{
+			// Separate engine frames are required between the fixture save and its retirement.
+			if (Phase == 0)
+			{
+				++Phase;
+				return false;
+			}
+
+			Fixture.Reset();
+			return true;
+		}
+
+	private:
+		TSharedPtr<FCortexTokenListFixture> Fixture;
+		int32 Phase = 0;
+	};
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexListDataAssetsClassNameSelectorTest,
+	"Cortex.Data.DataAsset.ListClassNameSelector",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexListDataAssetsClassNameSelectorTest::RunTest(const FString& Parameters)
+{
+	TSharedPtr<FCortexTokenListFixture> FixtureOwner = MakeShared<FCortexTokenListFixture>();
+	FCortexTokenListFixture& Fixture = *FixtureOwner;
+	Fixture.CreateAll();
+
+	FCortexCommandRouter Router = CreateListDataRouter();
+
+	// The advertised class_name selector retains subclass-aware behavior.
+	TSharedPtr<FJsonObject> DerivedParams = MakeShared<FJsonObject>();
+	DerivedParams->SetStringField(TEXT("class_name"), TEXT("CortexDerivedTestDataAsset"));
+	DerivedParams->SetStringField(TEXT("path_filter"), Fixture.Folder);
+	const FCortexCommandResult DerivedResult = Router.Execute(TEXT("data.list_data_assets"), DerivedParams);
+	TestTrue(TEXT("class_name derived filter succeeds"), DerivedResult.bSuccess);
+	TestEqual(TEXT("derived class_name returns only the derived asset"),
+		static_cast<int32>(GetListDataFieldNumber(DerivedResult, TEXT("count"))), 1);
+	TestEqual(TEXT("derived class_name resolves the class"),
+		GetListDataFieldString(DerivedResult, TEXT("resolved_class")), TEXT("CortexDerivedTestDataAsset"));
+
+	TSharedPtr<FJsonObject> BaseParams = MakeShared<FJsonObject>();
+	BaseParams->SetStringField(TEXT("class_name"), TEXT("CortexTestDataAsset"));
+	BaseParams->SetStringField(TEXT("path_filter"), Fixture.Folder);
+	const FCortexCommandResult BaseResult = Router.Execute(TEXT("data.list_data_assets"), BaseParams);
+	TestTrue(TEXT("class_name base filter succeeds"), BaseResult.bSuccess);
+	TestEqual(TEXT("base class_name keeps subclass-aware behavior"),
+		static_cast<int32>(GetListDataFieldNumber(BaseResult, TEXT("count"))), 2);
+	TestEqual(TEXT("base class_name resolves the class"),
+		GetListDataFieldString(BaseResult, TEXT("resolved_class")), TEXT("CortexTestDataAsset"));
+
+	ADD_LATENT_AUTOMATION_COMMAND(FCortexListFixtureRetireCommand(FixtureOwner));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexListDataAssetsClassFilterRemovedTest,
+	"Cortex.Data.DataAsset.ListClassFilterRemoved",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexListDataAssetsClassFilterRemovedTest::RunTest(const FString& Parameters)
+{
+	TSharedPtr<FCortexTokenListFixture> FixtureOwner = MakeShared<FCortexTokenListFixture>();
+	FCortexTokenListFixture& Fixture = *FixtureOwner;
+	Fixture.CreateAll();
+
+	FCortexCommandRouter Router = CreateListDataRouter();
+
+	// The obsolete class_filter selector must no longer filter list_data_assets.
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("class_filter"), TEXT("NonExistentClass_CortexTest"));
+	Params->SetStringField(TEXT("path_filter"), Fixture.Folder);
+	const FCortexCommandResult Result = Router.Execute(TEXT("data.list_data_assets"), Params);
+	TestTrue(TEXT("list_data_assets succeeds"), Result.bSuccess);
+	TestEqual(TEXT("obsolete class_filter no longer filters"),
+		static_cast<int32>(GetListDataFieldNumber(Result, TEXT("count"))), 2);
+	TestTrue(TEXT("obsolete class_filter does not resolve a class"),
+		GetListDataFieldString(Result, TEXT("resolved_class")).IsEmpty());
+
+	ADD_LATENT_AUTOMATION_COMMAND(FCortexListFixtureRetireCommand(FixtureOwner));
 	return true;
 }

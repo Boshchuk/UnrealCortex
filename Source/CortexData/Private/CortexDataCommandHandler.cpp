@@ -290,8 +290,11 @@ TArray<FCortexCommandInfo> FCortexDataCommandHandler::GetSupportedCommands() con
             .Optional(TEXT("allow_partial"), TEXT("boolean"), TEXT("Skip invalid operations and apply valid ones")),
         FCortexCommandInfo{ TEXT("search_assets"), TEXT("Asset Registry search") }
             .Optional(TEXT("query"), TEXT("string"), TEXT("Search text"))
-            .Optional(TEXT("class_names"), TEXT("array"), TEXT("Allowed asset classes"))
-            .Optional(TEXT("path_prefixes"), TEXT("array"), TEXT("Allowed asset path prefixes"))
+            .Optional(TEXT("class_names"), TEXT("array"), TEXT("Allowed asset classes (exact class names)"))
+            .Optional(TEXT("path_prefixes"), TEXT("array"), TEXT("Allowed canonical package folders (recursive)"))
+            .Optional(TEXT("fields"), TEXT("array"), TEXT("Projection fields: path, name, class_name, package_path"))
+            .Optional(TEXT("count_only"), TEXT("boolean"), TEXT("Return only the exact match count without rows"))
+            .Optional(TEXT("offset"), TEXT("number"), TEXT("Result offset for paging"))
             .Optional(TEXT("limit"), TEXT("number"), TEXT("Maximum assets to return")),
         FCortexCommandInfo{ TEXT("list_curve_tables"), TEXT("List CurveTables") }
             .Optional(TEXT("path_filter"), TEXT("string"), TEXT("Optional asset path prefix")),

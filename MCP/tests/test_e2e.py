@@ -269,14 +269,84 @@ class TestLocalizationOperations:
 
 @pytest.mark.e2e
 class TestAssetSearch:
+    """Exact filtered discovery over the existing saved fixture folder.
+
+    The population is derived from the native count, so an empty dataset is asserted as an exact
+    complete zero instead of being assumed non-empty or skipped.
+    """
+
+    @staticmethod
+    def _search(connection, params):
+        return connection.send_command("data.search_assets", params)["data"]
+
     def test_search_assets(self, tcp_connection):
-        resp = tcp_connection.send_command(
-            "data.search_assets",
-            {"path_filter": "/Game/Data/"},
+        folder = "/Game/Data"
+
+        count = self._search(tcp_connection, {"path_prefixes": [folder], "count_only": True})
+        population = count["total_matches"]
+        assert count["count"] == 0
+        assert count["assets"] == []
+        assert count["offset"] == 0
+        assert count["is_complete"] is True
+
+        complete = self._search(
+            tcp_connection, {"path_prefixes": [folder], "limit": max(population, 1)}
         )
-        data = resp["data"]
-        assert "assets" in data
-        assert len(data["assets"]) > 0
+        assert complete["total_matches"] == population
+        assert complete["count"] == population
+        assert complete["offset"] == 0
+        assert complete["limit"] == max(population, 1)
+        assert complete["next_offset"] == population
+        assert complete["is_complete"] is True
+
+        rows = complete["assets"]
+        assert len(rows) == population
+        for row in rows:
+            assert set(row) == {"path", "name", "class_name"}
+            package, separator, asset_name = row["path"].partition(".")
+            assert separator == "."
+            assert package == folder or package.startswith(folder + "/")
+            assert asset_name == package.rsplit("/", 1)[-1]
+            assert row["name"] == asset_name
+            assert isinstance(row["class_name"], str) and row["class_name"]
+
+        identities = [row["path"] for row in rows]
+        assert len(set(identities)) == len(identities)
+        assert identities == sorted(identities)
+
+        # class_names selects exactly the derived subset of the complete population.
+        for class_name in sorted({row["class_name"] for row in rows}):
+            subset = [row["path"] for row in rows if row["class_name"] == class_name]
+            filtered = self._search(
+                tcp_connection,
+                {"path_prefixes": [folder], "class_names": [class_name], "limit": len(subset)},
+            )
+            assert filtered["total_matches"] == len(subset)
+            assert [row["path"] for row in filtered["assets"]] == subset
+
+        # A selected projection page equals the projection of the complete first window.
+        page = self._search(tcp_connection, {"path_prefixes": [folder], "fields": ["path"], "limit": 1})
+        first_window = identities[:1]
+        assert page["total_matches"] == population
+        assert page["count"] == len(first_window)
+        assert page["offset"] == 0
+        assert page["limit"] == 1
+        assert page["next_offset"] == len(first_window)
+        assert page["is_complete"] is (len(first_window) >= population)
+        assert [row["path"] for row in page["assets"]] == first_window
+        assert all(set(row) == {"path"} for row in page["assets"])
+
+        # The continuation equals the actual expected window, unconditionally.
+        continuation = self._search(
+            tcp_connection, {"path_prefixes": [folder], "fields": ["path"], "offset": 1, "limit": 1}
+        )
+        next_window = identities[1:2]
+        assert continuation["total_matches"] == population
+        assert continuation["offset"] == 1
+        assert continuation["count"] == len(next_window)
+        assert continuation["next_offset"] == 1 + len(next_window)
+        assert continuation["is_complete"] is (1 + len(next_window) >= population)
+        assert [row["path"] for row in continuation["assets"]] == next_window
 
 
 # ================================================================

@@ -47,7 +47,7 @@ FCortexCommandResult FCortexDataAssetOps::ListDataAssets(const TSharedPtr<FJsonO
 	FString PathFilter;
 	if (Params.IsValid())
 	{
-		Params->TryGetStringField(TEXT("class_filter"), ClassFilter);
+		Params->TryGetStringField(TEXT("class_name"), ClassFilter);
 		Params->TryGetStringField(TEXT("path_filter"), PathFilter);
 	}
 
