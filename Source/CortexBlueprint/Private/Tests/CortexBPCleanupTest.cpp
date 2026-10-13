@@ -13,6 +13,7 @@
 #include "K2Node_CallFunction.h"
 #include "K2Node_CustomEvent.h"
 #include "GameFramework/Actor.h"
+#include "GameFramework/SaveGame.h"
 #include "Components/ActorComponent.h"
 #include "Components/SceneComponent.h"
 #include "Dom/JsonObject.h"
@@ -305,6 +306,32 @@ bool FCortexBPCleanupRejectsInvalidReparentTest::RunTest(const FString& Paramete
 	TestFalse(TEXT("Cleanup should reject invalid reparent"), Result.bSuccess);
 	TestEqual(TEXT("Error code should be INVALID_FIELD"), Result.ErrorCode, CortexErrorCodes::InvalidField);
 	TestTrue(TEXT("Parent class should remain unchanged"), TestBP->ParentClass == OriginalParent);
+
+	UBlueprint* ObjectBP = FKismetEditorUtilities::CreateBlueprint(
+		UObject::StaticClass(),
+		CreateWritableCleanupTestPackage(TEXT("BP_CleanupObjectModel")),
+		FName(TEXT("BP_CleanupObjectModel")),
+		BPTYPE_Normal,
+		UBlueprint::StaticClass(),
+		UBlueprintGeneratedClass::StaticClass());
+	if (!TestNotNull(TEXT("Ordinary object Blueprint is created"), ObjectBP))
+	{
+		TestBP->MarkAsGarbage();
+		return false;
+	}
+	Params->SetStringField(TEXT("asset_path"), ObjectBP->GetPathName());
+	Params->SetStringField(TEXT("new_parent_class"), USaveGame::StaticClass()->GetPathName());
+	Params->SetBoolField(TEXT("compile"), true);
+	Params->SetBoolField(TEXT("save"), false);
+	const FCortexCommandResult ObjectResult = FCortexBPCleanupOps::CleanupMigration(Params);
+	TestTrue(TEXT("Ordinary object model can acquire a native object parent"), ObjectResult.bSuccess);
+	TestTrue(TEXT("Object model has its requested native parent"), ObjectBP->ParentClass == USaveGame::StaticClass());
+	Params->SetStringField(TEXT("new_parent_class"), AActor::StaticClass()->GetPathName());
+	const FCortexCommandResult ObjectToActor = FCortexBPCleanupOps::CleanupMigration(Params);
+	TestFalse(TEXT("Object model cannot become an Actor asset"), ObjectToActor.bSuccess);
+	TestTrue(TEXT("Rejected family change preserves object model parent"),
+		ObjectBP->ParentClass == USaveGame::StaticClass());
+	ObjectBP->MarkAsGarbage();
 
 	TestBP->MarkAsGarbage();
 	return true;

@@ -20,9 +20,14 @@
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/ComponentDelegateBinding.h"
 #include "K2Node_CallFunction.h"
+#include "K2Node_CallParentFunction.h"
+#include "K2Node_BreakStruct.h"
 #include "K2Node_ComponentBoundEvent.h"
 #include "K2Node_CustomEvent.h"
 #include "K2Node_Event.h"
+#include "K2Node_ExecutionSequence.h"
+#include "K2Node_Select.h"
+#include "K2Node_VariableSetRef.h"
 #include "Kismet/KismetStringLibrary.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Kismet2/KismetEditorUtilities.h"
@@ -47,6 +52,8 @@
 #include "Misc/PackageName.h"
 #include "HAL/FileManager.h"
 #include "PackageTools.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 #include "UObject/GarbageCollection.h"
 #include "Dom/JsonObject.h"
 #include "UObject/UnrealType.h"
@@ -1204,6 +1211,8 @@ bool PrepareAdditionalRetirementRequest(
 	OutRequest->SetBoolField(TEXT("allow_noop"), false);
 	TSharedPtr<FJsonObject> Migration = WithAdditionalNodeGuids(Fixture.Migration(Entries), AdditionalGuids);
 	WithAdditionalNodeGuids(Migration, OrphanGuids, TEXT("orphan_component_node_guids"));
+	if (Entries.IsEmpty() && !OrphanGuids.IsEmpty())
+		Migration->GetObjectField(TEXT("source"))->RemoveField(TEXT("entry_node_guids"));
 	OutRequest->SetObjectField(TEXT("migration"), Migration);
 
 	FCortexGraphPreparedPatch Preview;
@@ -6393,6 +6402,13 @@ bool FCortexGraphMigrationRetireClosedOrphanTest::RunTest(const FString& Paramet
 	using namespace CortexGraphMigrationRetireTest;
 	FFixture Fixture;
 	if (!TestTrue(TEXT("fixture built"), Fixture.Build(TEXT("BP_RetireClosedOrphan"), true))) return false;
+	UScriptStruct* const ColorStruct = TBaseStructure<FLinearColor>::Get();
+	FEdGraphPinType ColorType;
+	ColorType.PinCategory = UEdGraphSchema_K2::PC_Struct;
+	ColorType.PinSubCategoryObject = ColorStruct;
+	if (!TestTrue(TEXT("closed struct component has a reflected Blueprint member"),
+		FBlueprintEditorUtils::AddMemberVariable(Fixture.Blueprint, TEXT("OrphanColor"), ColorType)))
+	{ Fixture.Cleanup(); return false; }
 	UK2Node_CustomEvent* OldUpdate = NewObject<UK2Node_CustomEvent>(Fixture.Graph);
 	OldUpdate->CustomFunctionName = TEXT("OldOrphanUpdate");
 	OldUpdate->CreateNewGuid();
@@ -6434,6 +6450,30 @@ bool FCortexGraphMigrationRetireClosedOrphanTest::RunTest(const FString& Paramet
 	Update->CreateNewGuid();
 	Update->AllocateDefaultPins();
 	Fixture.Graph->AddNode(Update, true, false);
+	// Ordinary, fully closed variable/control-flow work must be admitted by the same guarded API.
+	UK2Node_VariableGet* Get = NewObject<UK2Node_VariableGet>(Fixture.Graph);
+	Get->VariableReference.SetSelfMember(TEXT("RetireButtonTarget"));
+	UK2Node_VariableSet* Set = NewObject<UK2Node_VariableSet>(Fixture.Graph);
+	Set->VariableReference.SetSelfMember(TEXT("RetireButtonTarget"));
+	UK2Node_ExecutionSequence* Sequence = NewObject<UK2Node_ExecutionSequence>(Fixture.Graph);
+	UK2Node_Select* Select = NewObject<UK2Node_Select>(Fixture.Graph);
+	UK2Node_Knot* Knot = NewObject<UK2Node_Knot>(Fixture.Graph);
+	UK2Node_VariableGet* ColorGet = NewObject<UK2Node_VariableGet>(Fixture.Graph);
+	ColorGet->VariableReference.SetSelfMember(TEXT("OrphanColor"));
+	UK2Node_BreakStruct* Break = NewObject<UK2Node_BreakStruct>(Fixture.Graph);
+	Break->StructType = ColorStruct;
+	for (UK2Node* Node : TArray<UK2Node*>{Get, Set, Sequence, Select, Knot, ColorGet, Break})
+	{
+		Node->CreateNewGuid();
+		Node->AllocateDefaultPins();
+		Fixture.Graph->AddNode(Node, true, false);
+	}
+	Select->GetIndexPin()->PinType.PinCategory = UEdGraphSchema_K2::PC_Int;
+	Select->PinTypeChanged(Select->GetIndexPin());
+	Select->NodeConnectionListChanged();
+	Select->GetReturnValuePin()->PinType = Get->FindPin(TEXT("RetireButtonTarget"))->PinType;
+	Select->PinTypeChanged(Select->GetReturnValuePin());
+	Select->NodeConnectionListChanged();
 	const UEdGraphSchema* Schema = Fixture.Graph->GetSchema();
 	FString Failure;
 	auto Link = [&](UEdGraphPin* From, UEdGraphPin* To)
@@ -6449,9 +6489,30 @@ bool FCortexGraphMigrationRetireClosedOrphanTest::RunTest(const FString& Paramet
 			FindTypedPin(Assign, EGPD_Input, UEdGraphSchema_K2::PC_Delegate));
 	if (!TestTrue(FString::Printf(TEXT("all six real links connect: %s"), *Failure), bConnected))
 	{ Fixture.Cleanup(); return false; }
-	TestTrue(TEXT("macro entry remains disconnected"), FindTypedPin(Macro, EGPD_Input, UEdGraphSchema_K2::PC_Exec)->LinkedTo.IsEmpty());
+	TArray<UEdGraphPin*> Options;
+	Select->GetOptionPins(Options);
+	const bool bOrdinaryConnected = Options.Num() == 2
+		&& ConnectTypedPins(Schema, Get->FindPin(TEXT("RetireButtonTarget")), Knot->GetInputPin(),
+			TEXT("variable get to knot"), Failure)
+		&& ConnectTypedPins(Schema, Knot->GetOutputPin(), Options[0], TEXT("knot to select option zero"), Failure)
+		&& ConnectTypedPins(Schema, Get->FindPin(TEXT("RetireButtonTarget")), Options[1],
+			TEXT("variable get to select option one"), Failure)
+		&& ConnectTypedPins(Schema, Select->GetReturnValuePin(), Set->FindPin(TEXT("RetireButtonTarget")),
+			TEXT("select to variable set"), Failure)
+		&& ConnectTypedPins(Schema, Sequence->GetThenPinGivenIndex(0), Set->FindPin(TEXT("execute")),
+			TEXT("sequence to variable set"), Failure)
+		&& ConnectTypedPins(Schema, Set->FindPin(TEXT("then")),
+			FindTypedPin(Macro, EGPD_Input, UEdGraphSchema_K2::PC_Exec), TEXT("variable set to macro"), Failure)
+		&& ConnectTypedPins(Schema, ColorGet->FindPin(TEXT("OrphanColor")),
+			FindTypedPin(Break, EGPD_Input, UEdGraphSchema_K2::PC_Struct), TEXT("struct getter to break struct"), Failure);
+	if (!TestTrue(FString::Printf(TEXT("ordinary closed component connects through real typed pins (options=%d): %s"),
+		Options.Num(), *Failure), bOrdinaryConnected))
+	{ Fixture.Cleanup(); return false; }
+	TestTrue(TEXT("ordinary component entry remains disconnected"), Sequence->FindPin(TEXT("execute"))->LinkedTo.IsEmpty());
 	const TArray<FString> Orphans = {Router->NodeGuid.ToString(), Macro->NodeGuid.ToString(),
-		Assign->NodeGuid.ToString(), Create->NodeGuid.ToString(), Update->NodeGuid.ToString()};
+		Assign->NodeGuid.ToString(), Create->NodeGuid.ToString(), Update->NodeGuid.ToString(),
+		Get->NodeGuid.ToString(), Set->NodeGuid.ToString(), Sequence->NodeGuid.ToString(),
+		Select->NodeGuid.ToString(), Knot->NodeGuid.ToString(), ColorGet->NodeGuid.ToString(), Break->NodeGuid.ToString()};
 	const TArray<FString> Entries = {Fixture.AlphaGuid.ToString(), Fixture.BetaGuid.ToString(), OldUpdate->NodeGuid.ToString()};
 	TestTrue(TEXT("disk-backed fixture saved"), Fixture.SaveToDisk());
 	const TArray<uint8> DiskBefore = ReadBytes(Fixture.Filename());
@@ -6488,16 +6549,61 @@ bool FCortexGraphMigrationRetireClosedOrphanTest::RunTest(const FString& Paramet
 	TArray<FString> Forbidden = Orphans;
 	Forbidden.Add(Fixture.RetainedGuid.ToString());
 	RefusesWithoutMutation(TEXT("authored entry cannot be an orphan member"), Forbidden);
+	const FMemberReference SetReference = Set->VariableReference;
+	Set->VariableReference.SetSelfMember(TEXT("MissingUnreviewedVariable"));
+	RefusesWithoutMutation(TEXT("unresolved ordinary setter refused"), Orphans);
+	Set->VariableReference = SetReference;
+	const FMemberReference ColorReference = ColorGet->VariableReference;
+	ColorGet->VariableReference.SetLocalMember(TEXT("OrphanColor"), TEXT("MissingScope"), FGuid());
+	RefusesWithoutMutation(TEXT("local-scope access cannot use class-property admission"), Orphans);
+	ColorGet->VariableReference = ColorReference;
 	UK2Node_VariableGet* Unproved = NewObject<UK2Node_VariableGet>(Fixture.Graph);
-	Unproved->VariableReference.SetSelfMember(TEXT("RetireButtonTarget"));
+	Unproved->VariableReference.SetSelfMember(TEXT("MissingUnreviewedVariable"));
 	Unproved->CreateNewGuid();
 	Unproved->AllocateDefaultPins();
 	Fixture.Graph->AddNode(Unproved, true, false);
 	Forbidden = Orphans;
 	Forbidden.Add(Unproved->NodeGuid.ToString());
-	RefusesWithoutMutation(TEXT("unproved class refused even when disconnected"), Forbidden);
+	RefusesWithoutMutation(TEXT("unresolved variable refused even when disconnected"), Forbidden);
 	Fixture.Graph->RemoveNode(Unproved);
 	Unproved->MarkAsGarbage();
+	UK2Node_VariableSetRef* Unsupported = NewObject<UK2Node_VariableSetRef>(Fixture.Graph);
+	Unsupported->CreateNewGuid();
+	Unsupported->AllocateDefaultPins();
+	Fixture.Graph->AddNode(Unsupported, true, false);
+	Forbidden = Orphans;
+	Forbidden.Add(Unsupported->NodeGuid.ToString());
+	RefusesWithoutMutation(TEXT("unsupported exact reference-write class refused"), Forbidden);
+	Fixture.Graph->RemoveNode(Unsupported);
+	Unsupported->MarkAsGarbage();
+	UK2Node_CallParentFunction* UnsupportedSubclass = NewObject<UK2Node_CallParentFunction>(Fixture.Graph);
+	UnsupportedSubclass->FunctionReference.SetExternalMember(TEXT("OnLegacyAlpha"), Fixture.Blueprint->ParentClass);
+	UnsupportedSubclass->CreateNewGuid();
+	UnsupportedSubclass->AllocateDefaultPins();
+	Fixture.Graph->AddNode(UnsupportedSubclass, true, false);
+	Forbidden = Orphans;
+	Forbidden.Add(UnsupportedSubclass->NodeGuid.ToString());
+	RefusesWithoutMutation(TEXT("ordinary call subclass cannot inherit exact-class admission"), Forbidden);
+	Fixture.Graph->RemoveNode(UnsupportedSubclass);
+	UnsupportedSubclass->MarkAsGarbage();
+	UK2Node_Composite* GraphOwner = NewObject<UK2Node_Composite>(Fixture.Graph);
+	GraphOwner->CreateNewGuid();
+	GraphOwner->BoundGraph = NewObject<UEdGraph>(GraphOwner);
+	Fixture.Graph->AddNode(GraphOwner, true, false);
+	Forbidden = Orphans;
+	Forbidden.Add(GraphOwner->NodeGuid.ToString());
+	RefusesWithoutMutation(TEXT("structural bound-graph owner refused"), Forbidden);
+	Fixture.Graph->RemoveNode(GraphOwner);
+	GraphOwner->MarkAsGarbage();
+	UK2Node_BreakStruct* UnresolvedStruct = NewObject<UK2Node_BreakStruct>(Fixture.Graph);
+	UnresolvedStruct->CreateNewGuid();
+	UnresolvedStruct->AllocateDefaultPins();
+	Fixture.Graph->AddNode(UnresolvedStruct, true, false);
+	Forbidden = Orphans;
+	Forbidden.Add(UnresolvedStruct->NodeGuid.ToString());
+	RefusesWithoutMutation(TEXT("unresolved reflected struct refused"), Forbidden);
+	Fixture.Graph->RemoveNode(UnresolvedStruct);
+	UnresolvedStruct->MarkAsGarbage();
 	UK2Node_CallFunction* Unresolved = NewObject<UK2Node_CallFunction>(Fixture.Graph);
 	Unresolved->FunctionReference.SetSelfMember(TEXT("MissingUnreviewedFunction"));
 	Unresolved->CreateNewGuid();
@@ -6509,7 +6615,7 @@ bool FCortexGraphMigrationRetireClosedOrphanTest::RunTest(const FString& Paramet
 	Fixture.Graph->RemoveNode(Unresolved);
 	Unresolved->MarkAsGarbage();
 	UEdGraphPin* OutsideExec = Fixture.Retained->FindPin(TEXT("then"));
-	UEdGraphPin* InsideExec = FindTypedPin(Macro, EGPD_Input, UEdGraphSchema_K2::PC_Exec);
+	UEdGraphPin* InsideExec = Sequence->FindPin(TEXT("execute"));
 	OutsideExec->MakeLinkTo(InsideExec);
 	RefusesWithoutMutation(TEXT("execution boundary refused"), Orphans);
 	OutsideExec->BreakLinkTo(InsideExec);
@@ -6546,9 +6652,37 @@ bool FCortexGraphMigrationRetireClosedOrphanTest::RunTest(const FString& Paramet
 			Request, Approved, Error, true, false, Orphans))) { Fixture.Cleanup(); return false; }
 	FCortexGraphPreparedPatch Preview;
 	TestTrue(TEXT("reviewed preview remains valid"), FCortexGraphPatchOps::Preflight(Fixture.Blueprint, Request, Preview, Error));
-	TestEqual(TEXT("all five proofs published"), JsonStringArray(
-		FCortexGraphMigrationOps::MakeRetirementInventory(Preview.RetirementPlan), TEXT("orphan_component_nodes")).Num(), 5);
+	TestEqual(TEXT("all twelve class-specific proofs published"), JsonStringArray(
+		FCortexGraphMigrationOps::MakeRetirementInventory(Preview.RetirementPlan), TEXT("orphan_component_nodes")).Num(), 12);
 	TestTrue(TEXT("compiled statements and generated function require compilation"), Preview.RetirementPlan->GetBoolField(TEXT("requires_compile")));
+	auto CaptureEnumeration = [&]()
+	{
+		TArray<FString> Enumeration;
+		TArray<UEdGraph*> Graphs;
+		Fixture.Blueprint->GetAllGraphs(Graphs);
+		for (UEdGraph* Graph : Graphs)
+		{
+			if (!Graph) continue;
+			Enumeration.Add(TEXT("graph|") + Graph->GraphGuid.ToString());
+			for (UEdGraphNode* Node : Graph->Nodes)
+			{
+				if (!Node) continue;
+				Enumeration.Add(TEXT("node|") + Node->NodeGuid.ToString() + TEXT("|") + Node->GetClass()->GetName());
+				for (UEdGraphPin* Pin : Node->Pins)
+				{
+					if (!Pin) continue;
+					Enumeration.Add(TEXT("pin|") + Pin->PinId.ToString() + TEXT("|") + Pin->PinName.ToString());
+					for (UEdGraphPin* Linked : Pin->LinkedTo)
+						Enumeration.Add(Linked && Linked->GetOwningNode()
+							? TEXT("link|") + Linked->GetOwningNode()->NodeGuid.ToString() + TEXT("|")
+								+ Linked->PinId.ToString() + TEXT("|") + Linked->PinName.ToString()
+							: TEXT("link|null"));
+				}
+			}
+		}
+		return Enumeration;
+	};
+	const TArray<FString> OriginalEnumeration = CaptureEnumeration();
 	Router->NodePosX++;
 	const FString StaleHash = FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)->GetStringField(TEXT("graph_authoring_hash"));
 	const int32 StaleCount = Fixture.Graph->Nodes.Num();
@@ -6560,7 +6694,34 @@ bool FCortexGraphMigrationRetireClosedOrphanTest::RunTest(const FString& Paramet
 	TestEqual(TEXT("stale refusal preserves dirty state"), Fixture.Package->IsDirty(), bStaleDirty);
 	TestTrue(TEXT("stale refusal preserves disk"), SameBytes(DiskBefore, ReadBytes(Fixture.Filename())));
 	Router->NodePosX--;
-	TestTrue(TEXT("reviewed atomic removal applies"), FCortexGraphPatchOps::Execute(Fixture.Blueprint, Request, Outcome, Error));
+	const FString BeforeRemoval = CaptureNativeGraph(Fixture.Graph);
+	const bool bDirtyBeforeRemoval = Fixture.Package->IsDirty();
+	FCortexGraphPatchOps::SetApplyFaultPointForTesting(TEXT("migration_retire_after_removals"));
+	TestFalse(TEXT("post-removal fault refuses the closed ordinary component atomically"),
+		FCortexGraphPatchOps::Execute(Fixture.Blueprint, Request, Outcome, Error));
+	FCortexGraphPatchOps::ClearApplyFaultPointForTesting();
+	TestEqual(TEXT("closed ordinary component rollback restores transaction"), Outcome.RollbackStatus, FString(TEXT("restored")));
+	TestFalse(TEXT("verified rollback does not block the asset"), Outcome.bBlocked);
+	TestEqual(TEXT("rollback restores every ordinary node and physical link"), CaptureNativeGraph(Fixture.Graph), BeforeRemoval);
+	TestEqual(TEXT("rollback restores dirty state"), Fixture.Package->IsDirty(), bDirtyBeforeRemoval);
+	TestTrue(TEXT("rollback preserves original disk"), SameBytes(DiskBefore, ReadBytes(Fixture.Filename())));
+	FCortexGraphPreparedPatch RecoveryPreview;
+	FCortexCommandResult RecoveryError;
+	const bool bRecoveryValid = FCortexGraphPatchOps::Preflight(Fixture.Blueprint, Request, RecoveryPreview, RecoveryError);
+	TestTrue(TEXT("rollback preserves exact graph, node, pin and physical link enumeration"),
+		CaptureEnumeration() == OriginalEnumeration);
+	TestTrue(FString::Printf(TEXT("restored component preserves the reviewed apply precondition: %s"),
+		*RecoveryError.ErrorMessage), bRecoveryValid);
+	TestEqual(TEXT("rollback preserves the exact reviewed validation token"), RecoveryPreview.ValidationHash, Preview.ValidationHash);
+	const bool bApplied = FCortexGraphPatchOps::Execute(Fixture.Blueprint, Request, Outcome, Error);
+	FString ErrorDetails;
+	if (Error.ErrorDetails.IsValid())
+		FJsonSerializer::Serialize(Error.ErrorDetails.ToSharedRef(), TJsonWriterFactory<>::Create(&ErrorDetails));
+	if (!TestTrue(FString::Printf(
+		TEXT("reviewed atomic removal applies: code=%s message=%s details=%s apply=%s compile=%s rollback=%s diagnostics=%s"),
+		*Error.ErrorCode, *Error.ErrorMessage, *ErrorDetails, *Outcome.ApplyStatus, *Outcome.CompileStatus,
+		*Outcome.RollbackStatus, *FString::Join(Outcome.Diagnostics, TEXT("; "))), bApplied))
+	{ Fixture.Cleanup(); return false; }
 	TestTrue(TEXT("final compiled Blueprint is valid"), Fixture.Blueprint->Status == BS_UpToDate
 		|| Fixture.Blueprint->Status == BS_UpToDateWithWarnings);
 	TestNull(TEXT("retired generated function removed by final compile"),
@@ -6573,9 +6734,111 @@ bool FCortexGraphMigrationRetireClosedOrphanTest::RunTest(const FString& Paramet
 	}
 	TestEqual(TEXT("hover presentation and shared producer preserved"), CaptureNativeGraph(Fixture.Graph, &Retained), RetainedBefore);
 	TestEqual(TEXT("shared macro graph untouched"), CaptureNativeGraph(MacroGraph), SharedMacroBefore);
+	TestNotNull(TEXT("retiring variable nodes preserves the native property"),
+		FindFProperty<FProperty>(Fixture.Blueprint->GeneratedClass, TEXT("RetireButtonTarget")));
+	const FStructProperty* const PreservedColor =
+		FindFProperty<FStructProperty>(Fixture.Blueprint->GeneratedClass, TEXT("OrphanColor"));
+	if (TestNotNull(TEXT("retiring struct nodes preserves the reflected Blueprint member"), PreservedColor))
+		TestEqual(TEXT("retiring struct access preserves its shared reflected type"), PreservedColor->Struct.Get(), ColorStruct);
+	TestTrue(TEXT("retiring ordinary work preserves the primary EventGraph"),
+		Fixture.Blueprint->UbergraphPages.Contains(Fixture.Graph));
 	TestTrue(TEXT("unsaved apply keeps original disk"), SameBytes(DiskBefore, ReadBytes(Fixture.Filename())));
 	TestTrue(TEXT("unsaved apply keeps package dirty"), Fixture.Package->IsDirty());
 	Fixture.Cleanup();
+
+	// A previously migrated graph can have closed obsolete work but no obsolete entry left.
+	FFixture OrphanOnly;
+	if (!TestTrue(TEXT("orphan-only fixture built"), OrphanOnly.Build(TEXT("BP_RetireOrphanOnly"), true))) return false;
+	FKismetEditorUtilities::CompileBlueprint(OrphanOnly.Blueprint);
+	TSet<FGuid> ExistingGuids;
+	for (UEdGraphNode* Node : OrphanOnly.Graph->Nodes) if (Node) ExistingGuids.Add(Node->NodeGuid);
+	const FString ExistingBefore = CaptureNativeGraph(OrphanOnly.Graph, &ExistingGuids);
+	UK2Node_VariableGet* OnlyGet = NewObject<UK2Node_VariableGet>(OrphanOnly.Graph);
+	OnlyGet->VariableReference.SetSelfMember(TEXT("RetireButtonTarget"));
+	UK2Node_VariableSet* OnlySet = NewObject<UK2Node_VariableSet>(OrphanOnly.Graph);
+	OnlySet->VariableReference.SetSelfMember(TEXT("RetireButtonTarget"));
+	for (UK2Node* Node : TArray<UK2Node*>{OnlyGet, OnlySet})
+	{
+		Node->CreateNewGuid();
+		Node->AllocateDefaultPins();
+		OrphanOnly.Graph->AddNode(Node, true, false);
+	}
+	if (!TestTrue(TEXT("orphan-only ordinary component connects"),
+		OrphanOnly.LinkPins(OnlyGet, TEXT("RetireButtonTarget"), OnlySet, TEXT("RetireButtonTarget"))))
+	{ OrphanOnly.Cleanup(); return false; }
+	const TArray<FString> OnlyGuids = {OnlyGet->NodeGuid.ToString(), OnlySet->NodeGuid.ToString()};
+	TestTrue(TEXT("orphan-only baseline saved"), OrphanOnly.SaveToDisk());
+	const TArray<uint8> OnlyDiskBefore = ReadBytes(OrphanOnly.Filename());
+	OrphanOnly.Package->SetDirtyFlag(true);
+	auto OnlyMigration = [&]()
+	{
+		TSharedPtr<FJsonObject> Value = WithAdditionalNodeGuids(
+			OrphanOnly.Migration({}), OnlyGuids, TEXT("orphan_component_node_guids"));
+		Value->GetObjectField(TEXT("source"))->RemoveField(TEXT("entry_node_guids"));
+		return Value;
+	};
+	auto RefuseEmptySelection = [&](const TCHAR* Label, const TSharedPtr<FJsonObject>& Value)
+	{
+		const FString Before = CaptureNativeGraph(OrphanOnly.Graph);
+		const bool bDirty = OrphanOnly.Package->IsDirty();
+		FCortexGraphMigrationRetirePlan PlanValue;
+		FCortexCommandResult Refusal;
+		bool bReused = false;
+		TestFalse(Label, FCortexGraphMigrationOps::PlanRetirement(
+			OrphanOnly.Blueprint, Value, PlanValue, bReused, Refusal));
+		TestEqual(TEXT("empty-selection refusal preserves graph"), CaptureNativeGraph(OrphanOnly.Graph), Before);
+		TestEqual(TEXT("empty-selection refusal preserves dirty state"), OrphanOnly.Package->IsDirty(), bDirty);
+		TestTrue(TEXT("empty-selection refusal preserves disk"), SameBytes(OnlyDiskBefore, ReadBytes(OrphanOnly.Filename())));
+	};
+	TSharedPtr<FJsonObject> EmptySelection = OnlyMigration();
+	EmptySelection->GetObjectField(TEXT("source"))->RemoveField(TEXT("orphan_component_node_guids"));
+	RefuseEmptySelection(TEXT("absent entry and absent orphan selection refused"), EmptySelection);
+	EmptySelection = OnlyMigration();
+	EmptySelection->GetObjectField(TEXT("source"))->SetArrayField(TEXT("orphan_component_node_guids"), {});
+	RefuseEmptySelection(TEXT("absent entries and empty orphan selection refused"), EmptySelection);
+	EmptySelection = OnlyMigration();
+	EmptySelection->GetObjectField(TEXT("source"))->SetArrayField(TEXT("entry_node_guids"), {});
+	RefuseEmptySelection(TEXT("explicit empty entry selection remains invalid with nonempty orphans"), EmptySelection);
+	EmptySelection = WithAdditionalNodeGuids(OnlyMigration(), {OrphanOnly.ProducerGuid.ToString()});
+	RefuseEmptySelection(TEXT("additional nodes cannot join an entryless orphan retirement"), EmptySelection);
+	UEdGraphPin* RetainedExec = OrphanOnly.Retained->FindPin(TEXT("then"));
+	UEdGraphPin* OrphanExec = OnlySet->FindPin(TEXT("execute"));
+	RetainedExec->MakeLinkTo(OrphanExec);
+	RefuseEmptySelection(TEXT("orphan-only inventory still rejects a retained execution boundary"), OnlyMigration());
+	RetainedExec->BreakLinkTo(OrphanExec);
+	TSharedPtr<FJsonObject> OnlyRequest;
+	TArray<FString> OnlyApproved;
+	FCortexCommandResult OnlyError;
+	const bool bOnlyPrepared = PrepareAdditionalRetirementRequest(OrphanOnly, {}, {},
+		TEXT("00000000-0000-0000-0000-000000114802"), OnlyRequest, OnlyApproved, OnlyError, true, false, OnlyGuids);
+	if (!TestTrue(FString::Printf(TEXT("orphan-only preview and exact approval succeed: %s"), *OnlyError.ErrorMessage), bOnlyPrepared))
+	{ OrphanOnly.Cleanup(); return false; }
+	FCortexGraphPreparedPatch OnlyPreview;
+	TestTrue(TEXT("orphan-only reviewed preflight succeeds"),
+		FCortexGraphPatchOps::Preflight(OrphanOnly.Blueprint, OnlyRequest, OnlyPreview, OnlyError));
+	TestEqual(TEXT("orphan-only inventory publishes no selected entries"),
+		JsonStringArray(OnlyPreview.RetirementPlan, TEXT("selected_entry_guids")).Num(), 0);
+	TestEqual(TEXT("orphan-only exact approval includes only closed inventory"), OnlyApproved.Num(), 2);
+	FCortexGraphPatchOutcome OnlyOutcome;
+	const bool bOnlyApplied = FCortexGraphPatchOps::Execute(OrphanOnly.Blueprint, OnlyRequest, OnlyOutcome, OnlyError);
+	if (!TestTrue(FString::Printf(TEXT("orphan-only guarded removal applies: %s"), *OnlyError.ErrorMessage), bOnlyApplied))
+	{ OrphanOnly.Cleanup(); return false; }
+	for (const FString& Text : OnlyGuids)
+	{
+		FGuid Guid;
+		FGuid::Parse(Text, Guid);
+		TestNull(TEXT("orphan-only approved node removed"), FCortexGraphMigrationOps::FindNodeByGuid(OrphanOnly.Blueprint, Guid));
+	}
+	for (const FGuid& Guid : ExistingGuids)
+		TestNotNull(TEXT("orphan-only removal retains every authored entry and existing body"),
+			FCortexGraphMigrationOps::FindNodeByGuid(OrphanOnly.Blueprint, Guid));
+	TestEqual(TEXT("orphan-only removal preserves all existing nodes"), CaptureNativeGraph(OrphanOnly.Graph, &ExistingGuids), ExistingBefore);
+	TestTrue(TEXT("orphan-only removal preserves primary EventGraph"), OrphanOnly.Blueprint->UbergraphPages.Contains(OrphanOnly.Graph));
+	TestTrue(TEXT("orphan-only final compile succeeds"), OrphanOnly.Blueprint->Status == BS_UpToDate
+		|| OrphanOnly.Blueprint->Status == BS_UpToDateWithWarnings);
+	TestTrue(TEXT("orphan-only unsaved removal preserves disk"), SameBytes(OnlyDiskBefore, ReadBytes(OrphanOnly.Filename())));
+	TestFalse(TEXT("orphan-only removal does not claim a save"), OnlyOutcome.bSaved);
+	OrphanOnly.Cleanup();
 	return true;
 }
 

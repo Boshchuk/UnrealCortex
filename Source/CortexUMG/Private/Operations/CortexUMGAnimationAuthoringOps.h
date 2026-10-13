@@ -8,8 +8,9 @@
  * Native guarded authoring for UMG widget animations (issue176).
  *
  * umg.ensure_animation_binding  — creates/returns the ordinary Designer-widget binding record.
- * umg.set_animation_property_track — creates/replaces/clears exactly one float or linear-color
- *   native property track on an existing ordinary binding.
+ * umg.set_animation_property_track — creates/replaces/clears exactly one float, linear-color or
+ *   Slate-color native property track on an existing ordinary binding. Sections default to
+ *   RestoreState; explicit KeepState retains the authored value after completion.
  *
  * Both commands validate the full request and expected fingerprint before any Modify, run inside a
  * single transaction with a GC-safe journal, verify the live result and (on failure) restore and

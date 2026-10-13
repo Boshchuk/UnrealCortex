@@ -303,12 +303,12 @@ TArray<FCortexCommandInfo> FCortexUMGCommandHandler::GetSupportedCommands() cons
             .Required(TEXT("widget_name"), TEXT("string"), TEXT("Exact case-sensitive Designer widget name"))
             .Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Content guard fingerprint from prior read"))
             .Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("If true, previews changes without mutating (default: true)")),
-        FCortexCommandInfo{ TEXT("set_animation_property_track"), TEXT("Create, replace or clear one float/linear-color property track on an existing binding") }
+        FCortexCommandInfo{ TEXT("set_animation_property_track"), TEXT("Create, replace or clear one float/linear-color/Slate-color property track on an existing binding") }
             .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
             .Required(TEXT("animation_name"), TEXT("string"), TEXT("Animation name"))
             .Required(TEXT("selector"), TEXT("object"), TEXT("Exact binding selector"))
             .Required(TEXT("property_path"), TEXT("string"), TEXT("Exact reflected property path"))
-            .Required(TEXT("track"), TEXT("object"), TEXT("Track object, or explicit null to clear the one property track"))
+            .Required(TEXT("track"), TEXT("object"), TEXT("Track object with optional section completion_mode 'RestoreState' (default) or 'KeepState', or explicit null to clear the one property track"))
             .Required(TEXT("expected_fingerprint"), TEXT("object"), TEXT("Content guard fingerprint from prior read"))
             .Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("If true, previews changes without mutating (default: true)")),
     };

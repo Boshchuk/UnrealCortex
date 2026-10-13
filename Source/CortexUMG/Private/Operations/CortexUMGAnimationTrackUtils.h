@@ -16,7 +16,7 @@
 class UMovieSceneTrack;
 
 /**
- * Authoring-side helpers for ordinary float / FLinearColor property tracks (issue176).
+ * Authoring-side helpers for ordinary float / FLinearColor / FSlateColor property tracks.
  *
  * Owns strict JSON parsing/validation into bounded typed records, checked frame quantization,
  * canonical native track/section/channel construction, conservative pretty-response accounting,
@@ -50,6 +50,7 @@ namespace CortexUMGAnimationTrackUtils
     {
         FFrameNumber Start;
         FFrameNumber End; // exclusive half-open evaluation bound
+        EMovieSceneCompletionMode CompletionMode = EMovieSceneCompletionMode::RestoreState;
         TArray<FKeySpec> Keys;
     };
 

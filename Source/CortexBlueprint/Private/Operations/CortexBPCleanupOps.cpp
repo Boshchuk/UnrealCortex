@@ -13,6 +13,8 @@
 #include "EdGraph/EdGraph.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "KismetCompilerModule.h"
+#include "Modules/ModuleManager.h"
 #include "Components/ActorComponent.h"
 #include "Components/SceneComponent.h"
 #include "Components/TimelineComponent.h"
@@ -338,14 +340,28 @@ FCortexCommandResult FCortexBPCleanupOps::CleanupMigration(const TSharedPtr<FJso
 		const bool bNewIsActor = NewParentClass->IsChildOf(AActor::StaticClass());
 		const bool bNewIsComponent = NewParentClass->IsChildOf(UActorComponent::StaticClass());
 		const bool bNewIsWidget = UserWidgetClass && NewParentClass->IsChildOf(UserWidgetClass);
+		bool bOrdinaryObjectFamily = false;
+		if (CurrentParent && BP->GetClass() == UBlueprint::StaticClass() && BP->BlueprintType == BPTYPE_Normal
+			&& !bCurrentIsActor && !bCurrentIsComponent && !bCurrentIsWidget
+			&& !bNewIsActor && !bNewIsComponent && !bNewIsWidget
+			&& !NewParentClass->HasAnyClassFlags(CLASS_Interface)
+			&& FKismetEditorUtilities::CanCreateBlueprintOfClass(NewParentClass))
+		{
+			UClass* BlueprintClass = nullptr;
+			UClass* GeneratedClass = nullptr;
+			FModuleManager::LoadModuleChecked<IKismetCompilerInterface>(TEXT("KismetCompiler"))
+				.GetBlueprintTypesForClass(NewParentClass, BlueprintClass, GeneratedClass);
+			bOrdinaryObjectFamily = BlueprintClass == UBlueprint::StaticClass()
+				&& GeneratedClass == UBlueprintGeneratedClass::StaticClass();
+		}
 
 		if (!((bCurrentIsActor && bNewIsActor) ||
 			  (bCurrentIsComponent && bNewIsComponent) ||
-			  (bCurrentIsWidget && bNewIsWidget)))
+			  (bCurrentIsWidget && bNewIsWidget) || bOrdinaryObjectFamily))
 		{
 			return FCortexCommandRouter::Error(
 				CortexErrorCodes::InvalidField,
-				TEXT("Type mismatch: reparenting is only supported within the same type family (Actor->Actor, Component->Component, Widget->Widget)"));
+				TEXT("Type mismatch: reparenting requires the same Actor, Component, Widget, or ordinary Object Blueprint family"));
 		}
 	}
 

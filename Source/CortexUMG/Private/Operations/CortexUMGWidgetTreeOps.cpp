@@ -335,6 +335,11 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::AddWidget(const TSharedPtr<FJsonOb
         ActualParent = ParentName;
     }
 
+    if (!WBP->WidgetVariableNameToGuidMap.Contains(NewWidget->GetFName()))
+    {
+        WBP->OnVariableAdded(NewWidget->GetFName());
+    }
+
     FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
 
     // Retrieve the actual name UE assigned (may differ from the requested name)
@@ -380,6 +385,7 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::GetTree(const TSharedPtr<FJsonObje
         Data->SetNumberField(TEXT("total_widgets"), 0);
     }
 
+    Data->SetObjectField(TEXT("fingerprint"), MakeWidgetBlueprintFingerprint(WBP).ToJson());
     return FCortexCommandRouter::Success(Data);
 }
 
