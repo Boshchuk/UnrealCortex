@@ -130,11 +130,13 @@ Every mutation wrapped in `FScopedTransaction`. Large responses auto-truncate wi
 
 <br>
 
-**PIE lifecycle:** Start, stop, pause, resume, and restart Play-In-Editor sessions.
+**PIE lifecycle:** Start, stop, pause, resume, and restart Play-In-Editor sessions. Deferred cancellation is correlated with its start-request generation: late cleanup from a stopped session cannot terminate a newer start or its input/callback ownership. Duplicate cancellation coalesces to one owned deferred ticker; genuine current-request cancellation still reports termination and performs cleanup.
 
 **Viewport:** Get and set editor-client camera position/rotation, capture the active viewport with explicit source/provenance, and switch render modes (including Lit + MeshEdges wire overlay). Possessed PIE rejects editor-camera movement by default; `allow_during_pie: true` changes only the transient editor client, not the game camera. Game captures do not invent camera poses; ejected/SIE editor views remain controllable.
 
 **Input injection:** Press keys or inject typed Enhanced Input values using canonical `action_name` and a scalar or `{x,y,z}`. Single-shot and timed sequences share validation. `inject_input_continuous` supports immediate start/update/stop and deferred positive `duration_ms` starts. Ownership follows the actual subsystem/action pair; stop, PIE teardown, owner destruction, and any client disconnect cancel Cortex-owned runs. Ownership is session-wide, not per-client isolation; game-managed injection is not stopped by an unowned Cortex stop, and already queued input may drain afterward.
+
+**Mouse input:** `inject_mouse` requires `action: "click"`, `"move"` or `"scroll"`. Optional `x`/`y` are screen-space coordinates; omitted coordinates use the current cursor position. Click defaults to `button: "left"` (also `"right"`/`"middle"`); scroll requires numeric `delta`. This operation has no `duration_ms` contract. Its `dispatched` result reports Slate event dispatch, not proof that the intended gameplay UI target handled a click.
 
 **Editor management:** Execute console commands. Adjust time dilation. Shutdown/restart editor.
 

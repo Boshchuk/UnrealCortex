@@ -160,11 +160,12 @@ TArray<FCortexCommandInfo> FCortexEditorCommandHandler::GetSupportedCommands() c
 			.Required(TEXT("key"), TEXT("string"), TEXT("Key to inject"))
 			.Optional(TEXT("action"), TEXT("string"), TEXT("tap, press, or release"))
 			.Optional(TEXT("duration_ms"), TEXT("number"), TEXT("Press duration in milliseconds")),
-		FCortexCommandInfo{ TEXT("inject_mouse"), TEXT("Inject mouse input into PIE") }
-			.Required(TEXT("button"), TEXT("string"), TEXT("Mouse button to inject"))
-			.Optional(TEXT("action"), TEXT("string"), TEXT("tap, press, or release"))
-			.Optional(TEXT("duration_ms"), TEXT("number"), TEXT("Press duration in milliseconds"))
-			.Optional(TEXT("delta"), TEXT("object"), TEXT("Optional relative mouse delta")),
+		FCortexCommandInfo{ TEXT("inject_mouse"), TEXT("Inject Slate mouse input into PIE") }
+			.Required(TEXT("action"), TEXT("string"), TEXT("click, move, or scroll"))
+			.Optional(TEXT("button"), TEXT("string"), TEXT("left (default), right, or middle; used for click"))
+			.Optional(TEXT("x"), TEXT("number"), TEXT("Screen-space X coordinate; defaults to current cursor X"))
+			.Optional(TEXT("y"), TEXT("number"), TEXT("Screen-space Y coordinate; defaults to current cursor Y"))
+			.Optional(TEXT("delta"), TEXT("number"), TEXT("Scroll delta; required for scroll")),
 		FCortexCommandInfo{ TEXT("inject_input_action"), TEXT("Inject one frame of Enhanced Input into active PIE") }
 			.Required(TEXT("action_name"), TEXT("string"), TEXT("Input action asset path or loaded name"))
 			.Optional(TEXT("value"), TEXT("any"), TEXT("Number or x/y/z numeric object; action type determines axes; defaults to 1")),
