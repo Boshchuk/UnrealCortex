@@ -1,6 +1,7 @@
 #include "Operations/CortexMaterialGraphOps.h"
 #include "Operations/CortexMaterialAssetOps.h"
 #include "CortexMaterialModule.h"
+#include "CortexPropertyUtils.h"
 #include "Misc/EngineVersionComparison.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialExpression.h"
@@ -205,30 +206,87 @@ FCortexCommandResult FCortexMaterialGraphOps::GetNode(const TSharedPtr<FJsonObje
 	Data->SetObjectField(TEXT("position"), Position);
 
 	TSharedPtr<FJsonObject> Properties = MakeShared<FJsonObject>();
-	for (TFieldIterator<FProperty> It(Expression->GetClass()); It; ++It)
+
+	// Optional editable-property selection (token-efficiency TE05). Absent/empty keeps the
+	// current full read of every editable property; malformed selectors refuse instead of being
+	// ignored and unknown/unreadable names refuse instead of falling back to the full read.
+	TArray<FString> SelectedProperties;
+	if (Params->HasField(TEXT("properties")))
 	{
-		FProperty* Property = *It;
-		if (!Property)
+		const TArray<TSharedPtr<FJsonValue>>* PropertiesArray = nullptr;
+		if (!Params->TryGetArrayField(TEXT("properties"), PropertiesArray) || PropertiesArray == nullptr)
 		{
-			continue;
+			return FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidField,
+				TEXT("'properties' must be an array of editable property names"));
 		}
 
-		if (!Property->HasAnyPropertyFlags(CPF_Edit)
-			|| Property->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated | CPF_DisableEditOnInstance))
+		SelectedProperties.Reserve(PropertiesArray->Num());
+		for (const TSharedPtr<FJsonValue>& PropertyValue : *PropertiesArray)
 		{
-			continue;
+			if (!PropertyValue.IsValid() || PropertyValue->Type != EJson::String || PropertyValue->AsString().IsEmpty())
+			{
+				return FCortexCommandRouter::Error(
+					CortexErrorCodes::InvalidField,
+					TEXT("'properties' entries must be non-empty property names"));
+			}
+			SelectedProperties.Add(PropertyValue->AsString());
 		}
+	}
 
-		const void* ValuePtr = Property->ContainerPtrToValuePtr<void>(Expression);
-		if (!ValuePtr)
+	if (SelectedProperties.Num() == 0)
+	{
+		for (TFieldIterator<FProperty> It(Expression->GetClass()); It; ++It)
 		{
-			continue;
+			FProperty* Property = *It;
+			if (!Property)
+			{
+				continue;
+			}
+
+			if (!Property->HasAnyPropertyFlags(CPF_Edit)
+				|| Property->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated | CPF_DisableEditOnInstance))
+			{
+				continue;
+			}
+
+			const void* ValuePtr = Property->ContainerPtrToValuePtr<void>(Expression);
+			if (!ValuePtr)
+			{
+				continue;
+			}
+
+			const TSharedPtr<FJsonValue> SerializedValue = FCortexSerializer::PropertyToJson(Property, ValuePtr);
+			if (SerializedValue.IsValid())
+			{
+				Properties->SetField(Property->GetName(), SerializedValue);
+			}
 		}
-
-		const TSharedPtr<FJsonValue> SerializedValue = FCortexSerializer::PropertyToJson(Property, ValuePtr);
-		if (SerializedValue.IsValid())
+	}
+	else
+	{
+		for (const FString& PropertyName : SelectedProperties)
 		{
-			Properties->SetField(Property->GetName(), SerializedValue);
+			FProperty* Property = nullptr;
+			void* ValuePtr = nullptr;
+			const bool bResolved = FCortexPropertyUtils::ResolvePropertyPath(
+				Expression, PropertyName, Property, ValuePtr);
+			if (!bResolved
+				|| Property == nullptr
+				|| ValuePtr == nullptr
+				|| !Property->HasAnyPropertyFlags(CPF_Edit)
+				|| Property->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated | CPF_DisableEditOnInstance))
+			{
+				return FCortexCommandRouter::Error(
+					CortexErrorCodes::PropertyNotFound,
+					FString::Printf(TEXT("Editable node property not found: %s"), *PropertyName));
+			}
+
+			const TSharedPtr<FJsonValue> SerializedValue = FCortexSerializer::PropertyToJson(Property, ValuePtr);
+			if (SerializedValue.IsValid())
+			{
+				Properties->SetField(PropertyName, SerializedValue);
+			}
 		}
 	}
 	Data->SetObjectField(TEXT("properties"), Properties);

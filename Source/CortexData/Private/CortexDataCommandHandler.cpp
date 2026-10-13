@@ -260,8 +260,9 @@ TArray<FCortexCommandInfo> FCortexDataCommandHandler::GetSupportedCommands() con
         FCortexCommandInfo{ TEXT("list_data_assets"), TEXT("List DataAssets") }
             .Optional(TEXT("class_name"), TEXT("string"), TEXT("Optional class filter"))
             .Optional(TEXT("path_filter"), TEXT("string"), TEXT("Optional asset path prefix")),
-        FCortexCommandInfo{ TEXT("get_data_asset"), TEXT("Get deep DataAsset properties with partial/issues diagnostics") }
-            .Required(TEXT("asset_path"), TEXT("string"), TEXT("DataAsset path")),
+        FCortexCommandInfo{ TEXT("get_data_asset"), TEXT("Get deep DataAsset properties with partial/issues diagnostics; optional fields selects property paths") }
+            .Required(TEXT("asset_path"), TEXT("string"), TEXT("DataAsset path"))
+            .Optional(TEXT("fields"), TEXT("array"), TEXT("Property paths to select (dotted struct paths allowed). Omitted or empty reads every reflected property; unknown paths are refused.")),
         FCortexCommandInfo{ TEXT("update_data_asset"), TEXT("Update DataAsset properties") }
             .Required(TEXT("asset_path"), TEXT("string"), TEXT("DataAsset path"))
             .Required(TEXT("properties"), TEXT("object"), TEXT("Properties to update"))
