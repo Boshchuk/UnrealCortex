@@ -162,9 +162,11 @@ Covering run `tests/test_tool_output.py` + `tests/test_tcp_client.py`: **57/57 p
 sync/async/strict-refusal/opaque-error cases, so no broad suite rerun was required for this scoped
 correction.
 
-Attribution smoke outside pytest (real stdio against the shipped server with a temporary local
-project): accept `core_cmd(schema_status)`, then the strict refusal of `core_cmd` with an unexpected
-top-level field.
+Attribution smoke outside pytest: this one ran **in-process** — real `FastMCP.call_tool` (server +
+registrar), real `UEConnection` and the shipped core router against a temporary local project — not a
+stdio run. (The mode smoke and the composite smoke recorded above *were* actual stdio runs; this label
+corrects an earlier overstatement.) It accepted `core_cmd(schema_status)`, then the strict refusal of
+`core_cmd` with an unexpected top-level field.
 
 | Observation | Value |
 |---|---|
