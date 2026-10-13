@@ -267,6 +267,25 @@ FCortexCommandResult FCortexMaterialGraphOps::GetNode(const TSharedPtr<FJsonObje
 	{
 		for (const FString& PropertyName : SelectedProperties)
 		{
+			// A dotted selector must not cross a root the full read excludes: validate the root
+			// segment on the expression with the SAME editable admission before traversing, so a
+			// non-editable root (for example the expression's plain `Material` pointer,
+			// MaterialExpression.h:179-184) cannot expose the owning material's editable fields
+			// under this key. The terminal admission below is retained for the resolved leaf.
+			int32 RootDotIndex = INDEX_NONE;
+			const FString RootName = PropertyName.FindChar(TEXT('.'), RootDotIndex)
+				? PropertyName.Left(RootDotIndex)
+				: PropertyName;
+			FProperty* RootProperty = Expression->GetClass()->FindPropertyByName(FName(*RootName));
+			if (RootProperty == nullptr
+				|| !RootProperty->HasAnyPropertyFlags(CPF_Edit)
+				|| RootProperty->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated | CPF_DisableEditOnInstance))
+			{
+				return FCortexCommandRouter::Error(
+					CortexErrorCodes::PropertyNotFound,
+					FString::Printf(TEXT("Editable node property not found: %s"), *PropertyName));
+			}
+
 			FProperty* Property = nullptr;
 			void* ValuePtr = nullptr;
 			const bool bResolved = FCortexPropertyUtils::ResolvePropertyPath(

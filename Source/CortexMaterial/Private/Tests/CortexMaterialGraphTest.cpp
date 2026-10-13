@@ -5,6 +5,7 @@
 #include "Materials/Material.h"
 #include "Materials/MaterialExpression.h"
 #include "Materials/MaterialExpressionSceneTexture.h"
+#include "UObject/UnrealType.h"
 #include "CortexBatchScope.h"
 #include "CortexCommandRouter.h"
 #include "Operations/CortexMaterialGraphOps.h"
@@ -1947,6 +1948,8 @@ bool FCortexMaterialGetNodeSelectedPropertiesTest::RunTest(const FString& Parame
 		MakeShared<FJsonValueString>(TEXT("CortexTask5NoSuchProperty")) });
 	const FCortexCommandResult Unknown = Handler.Execute(TEXT("get_node"), UnknownParams);
 	TestFalse(TEXT("unknown selected property refuses"), Unknown.bSuccess);
+	TestEqual(TEXT("unknown selected property refuses with PROPERTY_NOT_FOUND"),
+		Unknown.ErrorCode, CortexErrorCodes::PropertyNotFound);
 	TestTrue(TEXT("unknown selected property refusal does not fall back to the full read"),
 		!Unknown.Data.IsValid() || !Unknown.Data->HasField(TEXT("properties")));
 
@@ -1956,6 +1959,138 @@ bool FCortexMaterialGetNodeSelectedPropertiesTest::RunTest(const FString& Parame
 
 	UObject* LoadedMpc = LoadObject<UObject>(nullptr, *MpcPath);
 	if (LoadedMpc) LoadedMpc->MarkAsGarbage();
+
+	return true;
+}
+
+// Task-5 review fix: the material selector validates the ROOT segment with the same editable
+// admission before traversing, so a dotted selector cannot cross a non-editable root into the
+// owning material. `MaterialExpression::Material` is a plain `UPROPERTY()` pointer
+// (MaterialExpression.h:179-184) that the full node read excludes, while the owning material's
+// `TwoSided` is editable (Material.h:559-561): the pair is exactly the reviewed
+// excluded-root/editable-leaf case.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexMaterialGetNodeSelectedPropertiesExcludedRootTest,
+	"Cortex.Material.Graph.GetNode.SelectedPropertiesExcludedRoot",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexMaterialGetNodeSelectedPropertiesExcludedRootTest::RunTest(const FString& Parameters)
+{
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
+	const FString MatName = FString::Printf(TEXT("M_TestGetNodeRoot_%s"), *Suffix);
+	const FString MatDir = FString::Printf(TEXT("/Game/Temp/CortexMatTest_GetNodeRoot_%s"), *Suffix);
+	const FString MatPath = FString::Printf(TEXT("%s/%s"), *MatDir, *MatName);
+
+	FCortexMaterialCommandHandler Handler;
+
+	TSharedPtr<FJsonObject> CreateParams = MakeShared<FJsonObject>();
+	CreateParams->SetStringField(TEXT("asset_path"), MatDir);
+	CreateParams->SetStringField(TEXT("name"), MatName);
+	Handler.Execute(TEXT("create_material"), CreateParams);
+
+	TSharedPtr<FJsonObject> AddParams = MakeShared<FJsonObject>();
+	AddParams->SetStringField(TEXT("asset_path"), MatPath);
+	AddParams->SetStringField(TEXT("expression_class"), TEXT("MaterialExpressionScalarParameter"));
+	const FCortexCommandResult AddResult = Handler.Execute(TEXT("add_node"), AddParams);
+	TestTrue(TEXT("scalar parameter node is added"), AddResult.bSuccess);
+	FString NodeId;
+	if (AddResult.Data.IsValid())
+	{
+		AddResult.Data->TryGetStringField(TEXT("node_id"), NodeId);
+	}
+	TestFalse(TEXT("node_id is populated"), NodeId.IsEmpty());
+
+	UMaterial* Material = LoadObject<UMaterial>(nullptr, *MatPath);
+	TestNotNull(TEXT("material fixture loads"), Material);
+	if (Material == nullptr)
+	{
+		return false;
+	}
+
+	UMaterialExpression* Expr = nullptr;
+	for (UMaterialExpression* Candidate : Material->GetExpressions())
+	{
+		if (Candidate != nullptr && Candidate->GetName() == NodeId)
+		{
+			Expr = Candidate;
+			break;
+		}
+	}
+	TestNotNull(TEXT("fixture expression resolves"), Expr);
+	if (Expr == nullptr)
+	{
+		Material->MarkAsGarbage();
+		return false;
+	}
+
+	// Fixture setup: the engine sets `MaterialExpression::Material` when an expression is
+	// loaded/duplicated (MaterialExpressions.cpp:896). A freshly created expression in this editor
+	// session may not have it yet, so establish the same engine state explicitly — the regression
+	// must exercise the root admission, never a null object pointer.
+	if (Expr->Material == nullptr)
+	{
+		Expr->Material = Material;
+	}
+	TestNotNull(TEXT("fixture expression has a populated Material root"), Expr->Material.Get());
+
+	// Pin the exact reviewed shape: the root is excluded by the readable admission while the leaf
+	// it reaches is editable.
+	FProperty* RootProperty = Expr->GetClass()->FindPropertyByName(FName(TEXT("Material")));
+	TestNotNull(TEXT("excluded root property exists on the expression"), RootProperty);
+	if (RootProperty != nullptr)
+	{
+		TestTrue(TEXT("root property is excluded by the editable admission"),
+			!RootProperty->HasAnyPropertyFlags(CPF_Edit)
+			|| RootProperty->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated | CPF_DisableEditOnInstance));
+	}
+	FProperty* LeafProperty = UMaterial::StaticClass()->FindPropertyByName(FName(TEXT("TwoSided")));
+	TestNotNull(TEXT("editable leaf property exists on the owning material"), LeafProperty);
+	if (LeafProperty != nullptr)
+	{
+		TestTrue(TEXT("leaf property is editable"), LeafProperty->HasAnyPropertyFlags(CPF_Edit));
+	}
+
+	// The full node read excludes the non-editable root entirely.
+	{
+		TSharedPtr<FJsonObject> FullParams = MakeShared<FJsonObject>();
+		FullParams->SetStringField(TEXT("asset_path"), MatPath);
+		FullParams->SetStringField(TEXT("node_id"), NodeId);
+		const FCortexCommandResult Full = Handler.Execute(TEXT("get_node"), FullParams);
+		TestTrue(TEXT("full read succeeds"), Full.bSuccess);
+		if (Full.Data.IsValid())
+		{
+			const TSharedPtr<FJsonObject>* FullProperties = nullptr;
+			const bool bHasFullProperties =
+				Full.Data->TryGetObjectField(TEXT("properties"), FullProperties)
+				&& FullProperties != nullptr && FullProperties->IsValid();
+			TestTrue(TEXT("full read keeps the properties object"), bHasFullProperties);
+			if (bHasFullProperties)
+			{
+				TestFalse(TEXT("full read excludes the non-editable Material root"),
+					(*FullProperties)->HasField(TEXT("Material")));
+			}
+		}
+	}
+
+	// A dotted selector through that excluded root refuses with no properties payload.
+	{
+		TSharedPtr<FJsonObject> SelectedParams = MakeShared<FJsonObject>();
+		SelectedParams->SetStringField(TEXT("asset_path"), MatPath);
+		SelectedParams->SetStringField(TEXT("node_id"), NodeId);
+		SelectedParams->SetArrayField(TEXT("properties"), {
+			MakeShared<FJsonValueString>(TEXT("Material.TwoSided")) });
+		const FCortexCommandResult Selected = Handler.Execute(TEXT("get_node"), SelectedParams);
+		TestFalse(TEXT("selector through an excluded root refuses"), Selected.bSuccess);
+		TestEqual(TEXT("excluded-root refusal uses PROPERTY_NOT_FOUND"),
+			Selected.ErrorCode, CortexErrorCodes::PropertyNotFound);
+		TestTrue(TEXT("excluded-root refusal carries no properties payload"),
+			!Selected.Data.IsValid() || !Selected.Data->HasField(TEXT("properties")));
+	}
+
+	// Cleanup
+	UObject* LoadedMat = LoadObject<UMaterial>(nullptr, *MatPath);
+	if (LoadedMat) LoadedMat->MarkAsGarbage();
 
 	return true;
 }

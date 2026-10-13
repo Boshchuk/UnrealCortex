@@ -23,11 +23,11 @@ Changed files (this task; all uncommitted at record time):
 |---|---|
 | `Source/CortexData/Private/Operations/CortexDataAssetOps.cpp` | `+ #include "CortexPropertyUtils.h"`. `GetDataAsset` parses the optional `fields` array fail-closed and builds the read: absent/empty keeps `ObjectToJsonDeep`; otherwise each path is resolved with `FCortexPropertyUtils::ResolvePropertyPath(DataAsset, …)` and serialized with `FCortexSerializer::PropertyToJsonDeep(Property, ValuePtr, MakeReflectedReadPolicy(), FieldPath)` into a **path-keyed** `properties` object, aggregating only the selected values' issues/`partial`. |
 | `Source/CortexData/Private/CortexDataCommandHandler.cpp` | `get_data_asset` operation metadata advertises the optional `fields` array and the omitted/unknown-path contract. |
-| `Source/CortexMaterial/Private/Operations/CortexMaterialGraphOps.cpp` | `+ #include "CortexPropertyUtils.h"`. `GetNode` parses the optional `properties` array fail-closed; absent/empty keeps the existing `CPF_Edit` loop; otherwise each requested name is resolved with `FCortexPropertyUtils::ResolvePropertyPath(Expression, …)` and must also pass the existing editable admission (`CPF_Edit`, not `CPF_Transient`/`CPF_Deprecated`/`CPF_DisableEditOnInstance`). `node_id` / `expression_class` / `position` / `collection_path` / `parameter_name` are produced by the untouched code paths. |
+| `Source/CortexMaterial/Private/Operations/CortexMaterialGraphOps.cpp` | `+ #include "CortexPropertyUtils.h"`. `GetNode` parses the optional `properties` array fail-closed; absent/empty keeps the existing `CPF_Edit` loop; otherwise each requested name is first gated on its **root segment** (the text before the first `.`, or the whole name) resolved with `Expression->GetClass()->FindPropertyByName` and admitted with the same flags (`CPF_Edit`, not `CPF_Transient`/`CPF_Deprecated`/`CPF_DisableEditOnInstance`), then resolved with `FCortexPropertyUtils::ResolvePropertyPath(Expression, …)` and re-admitted on the terminal leaf. `node_id` / `expression_class` / `position` / `collection_path` / `parameter_name` are produced by the untouched code paths. |
 | `Source/CortexMaterial/Private/CortexMaterialCommandHandler.cpp` | `get_node` operation metadata advertises the optional `properties` array. |
 | `Source/CortexData/Private/Tests/CortexTestDataAsset.h` | New dedicated fixture `UCortexTask5SelectedValuesAsset : public UCortexTestDataAsset` (`TestFlag=false`, `TestObjectRef=nullptr`, `FText TestLocalizedText`); the shared `UCortexTestDataAsset` used by the export/import/diff/search fixtures is unchanged. |
 | `Source/CortexData/Private/Tests/CortexDataAssetCrudTest.cpp` | Three selected-read regressions (`Cortex.Data.DataAsset.GetSelectedFields`, `.GetSelectedFieldDiagnostics`, `.GetSelectedFieldUnknownRefusal`), all value reads typed/guarded. |
-| `Source/CortexMaterial/Private/Tests/CortexMaterialGraphTest.cpp` | `Cortex.Material.Graph.GetNode.SelectedProperties` regression. |
+| `Source/CortexMaterial/Private/Tests/CortexMaterialGraphTest.cpp` | `+ #include "UObject/UnrealType.h"`. `Cortex.Material.Graph.GetNode.SelectedProperties` (now also pinning the unknown-property `PROPERTY_NOT_FOUND` code) and `Cortex.Material.Graph.GetNode.SelectedPropertiesExcludedRoot` (the review-fix regression below). |
 | `.superpowers/sdd/2026-10-13-token-efficiency-impl/{task-5-report.md,smoke-task5-selected-values.py}` | Task coordination report and the throwaway public-route smoke (that directory is git-ignored; not part of any commit). |
 | `Plugins/UnrealCortex/docs/verification/2026-10-13-issue180-token-efficiency-task5.md` | This record. |
 
@@ -60,9 +60,11 @@ the Data/Material documents — Task 17 owns those.
 * New optional param `properties` (array of strings). Present-but-not-an-array / non-string /
   empty entry returns `INVALID_FIELD`.
 * Absent or empty keeps the current full read of every editable expression property.
-* Otherwise only the requested names are serialized. A name must resolve on the expression **and**
-  pass the loop's editable admission; otherwise `PROPERTY_NOT_FOUND` is returned with no
-  `properties` payload.
+* Otherwise only the requested names are serialized. A name's **root segment** (the text before the
+  first `.`, or the whole name) must resolve on the expression and pass the loop's editable
+  admission, and the resolved terminal leaf must pass the same admission; otherwise
+  `PROPERTY_NOT_FOUND` is returned with no `properties` payload. The root gate is what stops a
+  dotted selector from crossing a non-editable root into another object's editable fields.
 * Values use the same `FCortexSerializer::PropertyToJson` call as the full loop, so a selected
   value is byte-identical to the full read's value for that property.
 * Node identity (`node_id`, `expression_class`), `position` and the special
@@ -120,6 +122,45 @@ nested objects and `Type == EJson::String` before `AsString()`.
   editor's optional-DLL load messages (`aqProf`/`VtuneApi`/`WinPixGpuCapturer`/`Wintab32`) and the
   engine's own `UE::UnifiedErrorTest` startup fixtures, both unrelated to this task and present in
   every run.
+
+## Review fix (P2): material root-segment admission
+
+Review `review-f27c48b..d88ebc8` found that the material branch applied the editable admission only
+to the **terminal** resolved property, so a dotted selector crossing a non-editable root was
+admitted. Concretely, `properties=["Material.TwoSided"]` resolved the expression's
+`MaterialExpression::Material` — a plain `UPROPERTY() TObjectPtr<UMaterial>` with no edit flags
+(`MaterialExpression.h:179-184`, public: the engine assigns it from other classes, e.g.
+`Material.cpp:3624`) — and returned the owning material's editable
+`UPROPERTY(EditAnywhere, Category=Material) uint8 TwoSided : 1` (`Material.h:559-561`) under that
+key, although the full node read excludes `Material` entirely.
+
+Fix (material branch only, `CortexMaterialGraphOps.cpp`): before traversing a requested name, its
+root segment is resolved with `Expression->GetClass()->FindPropertyByName` and must pass the same
+original admission flags (`CPF_Edit`, not
+`CPF_Transient`/`CPF_Deprecated`/`CPF_DisableEditOnInstance`); the terminal admission is retained. An
+excluded or missing root returns `PROPERTY_NOT_FOUND` with no `properties` payload. For a flat
+selector the root segment is the name itself, so that path is unchanged. The Data path, the material
+full/absent-selector behavior and the identity fields are untouched.
+
+Regression: `Cortex.Material.Graph.GetNode.SelectedPropertiesExcludedRoot` — the full node read must
+omit `Material`; the fixture pins the exact reviewed shape (root excluded by the admission, leaf
+editable) by reflection on both properties; and `properties=["Material.TwoSided"]` must refuse with
+`PROPERTY_NOT_FOUND` and no `properties` payload.
+
+Fixture note (as required by the review): the engine populates `MaterialExpression::Material` when an
+expression is loaded/duplicated (`MaterialExpressions.cpp:896`). A freshly created expression in the
+same editor session does not necessarily have it yet, so the fixture explicitly establishes that
+engine state (`if (Expr->Material == nullptr) { Expr->Material = Material; }`) and then **asserts it
+is non-null**, so the refusal can only come from the root admission and never from a null object
+pointer. No other non-editable-root/editable-leaf pair was needed.
+
+Also pinned: the existing unknown-property regression now asserts the material refusal code
+(`PROPERTY_NOT_FOUND`), matching the documented contract.
+
+Controller observation for the fix: `Cortex.Material.Graph.GetNode+` (5 tests) and the unchanged
+`Cortex.Data.DataAsset+` (14 tests). The new regression is expected **RED before the fix** (the
+selected read succeeded and returned the material's `TwoSided`) and **GREEN after it**; this record
+claims no runtime result for the fix, the controller owns the compile and the run.
 
 ## Registered smoke (controller-owned; NOT executed by the implementer)
 
