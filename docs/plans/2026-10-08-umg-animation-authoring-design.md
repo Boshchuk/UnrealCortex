@@ -176,3 +176,9 @@ Both original reviewers re-read the corrected contracts and returned no unresolv
 - [x] Simplicity first — two routed commands and opt-in existing inspection; native MovieScene owners and existing removal reused.
 - [x] Surgical changes — ordinary widget float/color authoring only; unrelated domains, composite creation and parent gitlinks excluded.
 - [x] Goal-driven execution — five supported design findings corrected and rechecked by both reviewers; controller source checks and formatter smoke recorded above. User approved the written specification. Implementation/runtime acceptance remains explicitly unverified.
+
+## Compiler compatibility correction — PR178
+
+JSON object iteration uses `const auto&` so UE 5.8's shared-string keys do not create temporary FString-keyed map pairs. Consumed keys use the existing `CortexEngineCompat::JsonKeyToString` version adapter; inspection field names, nested values and conservative response budgets remain unchanged. No command, schema, durable format or lifecycle change.
+
+Independent compiler and runtime evidence: [PR178 verification](../verification/2026-10-13-pr178.md). Linux build/test results remain attributed to contributor @Boshchuk.
