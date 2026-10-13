@@ -35,7 +35,7 @@ namespace
 		{
 			Root = FString::Printf(
 				TEXT("/CortexReadOnlyDiscovery%s"),
-				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
+				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8));
 			PhysicalDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("CortexReadOnlyBlueprintTests") / Root.RightChop(1));
 			IFileManager::Get().MakeDirectory(*PhysicalDir, true);
 			FPackageName::RegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));

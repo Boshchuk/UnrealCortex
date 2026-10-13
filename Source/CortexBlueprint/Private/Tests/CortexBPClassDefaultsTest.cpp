@@ -87,7 +87,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPGetClassDefaultsDiscoveryTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	FCortexBPCommandHandler Handler;
 	const FString AssetPath = CreateTestBlueprint(Handler, Suffix);
 	TestFalse(TEXT("Test Blueprint should be created"), AssetPath.IsEmpty());
@@ -129,7 +129,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPGetClassDefaultsAssetPathTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	FCortexBPCommandHandler Handler;
 	const FString AssetPath = CreateTestBlueprint(Handler, Suffix);
 	TestFalse(TEXT("Test Blueprint should be created"), AssetPath.IsEmpty());
@@ -164,7 +164,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPGetClassDefaultsSpecificPropertyTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	FCortexBPCommandHandler Handler;
 	const FString AssetPath = CreateTestBlueprint(Handler, Suffix);
 	TestFalse(TEXT("Test Blueprint should be created"), AssetPath.IsEmpty());
@@ -215,7 +215,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPGetClassDefaultsPropertyNotFoundTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	FCortexBPCommandHandler Handler;
 	const FString AssetPath = CreateTestBlueprint(Handler, Suffix);
 	TestFalse(TEXT("Test Blueprint should be created"), AssetPath.IsEmpty());
@@ -276,7 +276,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPSetClassDefaultsPropertyNotFoundTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	FCortexBPCommandHandler Handler;
 	const FString AssetPath = CreateTestBlueprint(Handler, Suffix);
 	TestFalse(TEXT("Test Blueprint should be created"), AssetPath.IsEmpty());
@@ -312,7 +312,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPSetClassDefaultsTypeMismatchTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	FCortexBPCommandHandler Handler;
 	const FString AssetPath = CreateTestBlueprint(Handler, Suffix);
 	TestFalse(TEXT("Test Blueprint should be created"), AssetPath.IsEmpty());
@@ -348,7 +348,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPSetClassDefaultsSuccessTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	FCortexBPCommandHandler Handler;
 	const FString AssetPath = CreateTestBlueprint(Handler, Suffix);
 	TestFalse(TEXT("Test Blueprint should be created"), AssetPath.IsEmpty());
@@ -401,7 +401,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPSetClassDefaultsSingleStaleFingerprintTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	FCortexBPCommandHandler Handler;
 	const FString AssetPath = CreateTestBlueprint(Handler, Suffix);
 	TestFalse(TEXT("Test Blueprint should be created"), AssetPath.IsEmpty());
@@ -443,7 +443,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPSetClassDefaultsSingleStaleFingerprintBlueprintPathAliasTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	FCortexBPCommandHandler Handler;
 	const FString AssetPath = CreateTestBlueprint(Handler, Suffix);
 	TestFalse(TEXT("Test Blueprint should be created"), AssetPath.IsEmpty());
@@ -485,7 +485,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPClassDefaultsNestedDiscoveryTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	FCortexBPCommandHandler Handler;
 	const FString AssetPath = CreateTestBlueprint(Handler, Suffix);
 	TestFalse(TEXT("Test Blueprint should be created"), AssetPath.IsEmpty());
@@ -547,7 +547,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPClassDefaultsNestedFuzzySearchTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	FCortexBPCommandHandler Handler;
 	const FString AssetPath = CreateTestBlueprint(Handler, Suffix);
 	TestFalse(TEXT("Test Blueprint should be created"), AssetPath.IsEmpty());

@@ -14,7 +14,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCortexBPListTest::RunTest(const FString& Parameters)
 {
 	// Setup - Create test Blueprint first
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	const FString BlueprintName = FString::Printf(TEXT("BP_TestList_%s"), *Suffix);
 	const FString BlueprintDir = FString::Printf(TEXT("/Game/Temp/CortexBPTest_List_%s"), *Suffix);
 	const FString BlueprintPath = FString::Printf(TEXT("%s/%s"), *BlueprintDir, *BlueprintName);
@@ -96,7 +96,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCortexBPListFilterPathTest::RunTest(const FString& Parameters)
 {
 	// Setup - Create test Blueprint in specific path
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	const FString BlueprintName = FString::Printf(TEXT("BP_TestListFilter_%s"), *Suffix);
 	const FString BlueprintDir = FString::Printf(TEXT("/Game/Temp/CortexBPTest_ListFilter_%s"), *Suffix);
 	const FString BlueprintPath = FString::Printf(TEXT("%s/%s"), *BlueprintDir, *BlueprintName);
