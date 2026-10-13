@@ -5,7 +5,12 @@ import os
 import sys
 import json
 from mcp.server.fastmcp import FastMCP
-from .capabilities import build_router_docstrings, get_registered_domains, load_capabilities_cache
+from .capabilities import (
+    build_router_docstrings,
+    get_registered_domains,
+    load_capabilities_cache,
+    resolve_toolset,
+)
 from .project import resolve_project_dir as _resolve_project_dir
 from .response import format_response
 from .schema_generator import _decode_data
@@ -60,16 +65,22 @@ def _resolve_response_metrics() -> bool:
     return os.environ.get("CORTEX_RESPONSE_METRICS", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _resolve_toolset(registered_domains) -> frozenset[str] | None:
+    """Resolve the startup toolset allowlist; unknown settings refuse server startup."""
+    return resolve_toolset(os.environ.get("CORTEX_TOOLSET", "all"), registered_domains)
+
+
 def _register_explicit_tools(mcp_server, connection) -> None:
     """Register the consolidated MCP tool surface through the public output adapter."""
+    capabilities = load_capabilities_cache()
+    registered = get_registered_domains(capabilities)
     registrar = ToolOutputRegistrar(
         mcp_server,
         connection,
         response_mode=_resolve_response_mode(),
+        allowed_tools=_resolve_toolset(registered),
         metrics=_resolve_response_metrics(),
     )
-    capabilities = load_capabilities_cache()
-    registered = get_registered_domains(capabilities)
     docstrings = build_router_docstrings(capabilities)
     register_router_tools(registrar, connection, docstrings, registered)
     register_blueprint_compose_tools(registrar, connection)

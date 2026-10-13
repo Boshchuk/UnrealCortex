@@ -43,17 +43,9 @@ def register_reflect_detail_tools(mcp, connection: UEConnection):
     ) -> str:
         """Use when you need complete information about a single class.
 
-        Returns properties, functions, interfaces, components, and source file path.
-        Use detail='summary' for just name/type/parent, 'properties' for property list,
-        'full' for everything including function signatures.
-
-        Args:
-            class_name: Class name (e.g., 'AMyCharacter') or Blueprint asset path.
-            include_inherited: Include inherited properties/functions (default False).
-            detail: Detail level — 'summary', 'properties', or 'full' (default 'full').
-
-        Returns:
-            Class metadata at the requested detail level.
+        Returns properties, functions, interfaces, components and source file path. `detail` is
+        'summary' (name/type/parent), 'properties' (property list) or 'full' (everything including
+        function signatures); `include_inherited=true` adds inherited members.
         """
         try:
             response = connection.send_command_cached(

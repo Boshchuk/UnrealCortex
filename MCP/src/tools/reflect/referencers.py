@@ -20,22 +20,13 @@ def register_reflect_referencer_tools(mcp, connection: UEConnection):
     ) -> str:
         """Use when you need a quick list of what references an asset.
 
-        This is package-level and fast (Asset Registry, no loading). Use BEFORE
-        destructive operations on any asset.
-
-        For detailed graph-level usage (which nodes, read/write/call), use
-        `query_usages`. For full risk-scored analysis before C++ changes, use
+        Package-level and fast (Asset Registry, no loading); use BEFORE destructive operations on any
+        asset. `category` filters to 'all' or 'package'. For detailed graph-level usage (which nodes,
+        read/write/call) use `query_usages`; for full risk-scored analysis before C++ changes use
         `impact_analysis`.
 
-        Args:
-            asset_path: Asset or package path to check referencers for.
-                Object paths with .AssetName suffix are OK.
-            category: Filter referencers - 'all' or 'package' (default 'all').
-            limit: Maximum referencers to return (default 100).
-
-        Returns:
-            List of referencers with package name, type (hard/soft), is_code flag,
-            and module name or asset_class.
+        Returns the referencer list with package name, hard/soft type, is_code flag, and module name
+        or asset_class.
         """
         try:
             response = connection.send_command_cached(

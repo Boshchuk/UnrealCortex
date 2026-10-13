@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -30,7 +31,22 @@ from mcp.client.stdio import stdio_client
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
 
+from cortex_mcp._fallback_generated import FALLBACK_COMMANDS as _FALLBACK_STRUCTURED
 from cortex_mcp.tcp_client import UEConnection
+
+# Design §2.2 toolset memberships are shared with the capabilities unit tests.
+from test_capabilities import (
+    BLUEPRINT_TOOLSET,
+    DATA_TOOLSET,
+    DEFAULT_TOOLSET_SURFACE,
+    UI_TOOLSET,
+)
+
+# A rendered parameter signature (``dry_run: boolean = optional``) must never reach a public
+# description again; the metadata stays in the cache/fallback structures, not the text.
+_SIGNATURE_TOKEN = re.compile(
+    r"\b[a-z_][a-z0-9_]*: (?:string|boolean|number|integer|array|object|any)\b"
+)
 
 # ``compact_json``/``ToolOutputRegistrar`` belong to the Task-1 boundary and are imported at
 # their point of use so the shipped-server cases below still RUN (and fail) while the
@@ -78,17 +94,25 @@ async def open_test_client(project_dir, response_mode="text", toolset="all", met
             yield session
 
 
-def _write_project(tmp_path, *, gen=False) -> Path:
-    """Create a disposable project so the shipped server reads local files only."""
+def _write_project(tmp_path, *, gen=False, cache=True) -> Path:
+    """Create a disposable project so the shipped server reads local files only.
+
+    ``cache=False`` omits the capabilities cache (fallback description path); a ``dict`` is
+    written verbatim as the capabilities cache.
+    """
     project = tmp_path / UNICODE_PROJECT_NAME
     (project / "Saved" / "Cortex").mkdir(parents=True)
     (project / ".cortex" / "schema").mkdir(parents=True)
     (project / f"{UNICODE_PROJECT_NAME}.uproject").write_text("{}", encoding="utf-8")
-    domains: dict[str, Any] = {"gen": {"commands": []}} if gen else {}
-    cache = {"version": 1, "domains": domains}
-    (project / "Saved" / "Cortex" / "capabilities-cache.json").write_text(
-        json.dumps(cache), encoding="utf-8",
-    )
+    if cache is not False:
+        if isinstance(cache, dict):
+            payload = cache
+        else:
+            domains: dict[str, Any] = {"gen": {"commands": []}} if gen else {}
+            payload = {"version": 1, "domains": domains}
+        (project / "Saved" / "Cortex" / "capabilities-cache.json").write_text(
+            json.dumps(payload), encoding="utf-8",
+        )
     (project / ".cortex" / "schema" / "_catalog.md").write_text(
         "# schema catalog\n", encoding="utf-8",
     )
@@ -565,3 +589,229 @@ class TestInvocationLocalSizeAttribution:
             "beta": 1,
         }
         assert sizes["total"]["calls"] == 2
+
+
+# --------------------------------------------------------------------------------------
+# Startup toolsets and short descriptions (design §2.2)
+# --------------------------------------------------------------------------------------
+
+async def _list_tool_names(session) -> set[str]:
+    return {tool.name for tool in (await session.list_tools()).tools}
+
+
+@pytest.mark.parametrize(
+    "toolset, expected",
+    [
+        ("all", DEFAULT_TOOLSET_SURFACE),
+        ("ui", UI_TOOLSET),
+        ("blueprint", BLUEPRINT_TOOLSET),
+        ("data", DATA_TOOLSET),
+    ],
+)
+def test_startup_toolset_exposes_exactly_the_design_surface(tmp_path, toolset, expected):
+    project = _write_project(tmp_path)
+
+    async def scenario():
+        async with open_test_client(project, toolset=toolset) as session:
+            names = await _list_tool_names(session)
+            assert names == set(expected)
+
+            # Exercise the exposed routing surface instead of snapshotting names.
+            result = await session.call_tool("core_cmd", {"command": "schema_status", "params": {}})
+            assert json.loads(_single_text(result))["exists"] is True
+
+            # The strict {command, params} envelope survives every preset.
+            refused = await session.call_tool(
+                "core_cmd", {"command": "schema_status", "params": {}, "unexpected": 1}
+            )
+            assert json.loads(_single_text(refused))["_error"] == "INVALID_INVOCATION_SHAPE"
+
+            # On-demand schema discovery stays reachable in every preset through the core router
+            # (the live native contract is later/live-editor work).
+            assert "core_cmd" in names
+            schema_probe = _single_text(await session.call_tool(
+                "core_cmd",
+                {
+                    "command": "get_operation_schema",
+                    "params": {"domain": "core", "command": "schema_status"},
+                },
+            ))
+            # No editor: the route reached the native boundary instead of being refused locally.
+            assert schema_probe.startswith("Error:"), schema_probe
+
+            # The profile facade is registered exactly where the preset advertises it.
+            assert ("profile_operation_schema" in names) == (
+                "profile_operation_schema" in set(expected)
+            )
+
+    _run(scenario)
+
+
+def test_all_toolset_exposes_optional_gen_only_when_available(tmp_path):
+    bare = _write_project(tmp_path / "bare")
+    with_gen = _write_project(tmp_path / "with_gen", gen=True)
+
+    async def scenario():
+        async with open_test_client(bare) as session:
+            names = await _list_tool_names(session)
+            assert "gen_cmd" not in names
+            assert "gen_compose" not in names
+        async with open_test_client(with_gen) as session:
+            names = await _list_tool_names(session)
+            assert {"gen_cmd", "gen_compose"} <= names
+
+    _run(scenario)
+
+
+def test_tools_list_falls_back_without_a_capabilities_cache(tmp_path):
+    project = _write_project(tmp_path, cache=False)
+
+    async def scenario():
+        async with open_test_client(project) as session:
+            tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+            assert set(tools) == set(DEFAULT_TOOLSET_SURFACE)
+
+            core_desc = tools["core_cmd"].description or ""
+            for command in _FALLBACK_STRUCTURED["core"]:
+                assert command["name"] in core_desc
+            assert " = optional" not in core_desc
+            assert _SIGNATURE_TOKEN.search(core_desc) is None
+
+            result = await session.call_tool("core_cmd", {"command": "schema_status", "params": {}})
+            assert json.loads(_single_text(result))["exists"] is True
+
+    _run(scenario)
+
+
+def test_tools_list_uses_the_capabilities_cache_description_path(tmp_path):
+    cache = {
+        "version": 1,
+        "domains": {
+            "core": {
+                "commands": [
+                    {"name": "schema_status", "params": []},
+                    {
+                        "name": "get_operation_schema",
+                        "params": [{"name": "domain", "type": "string", "required": True}],
+                    },
+                ],
+            },
+        },
+    }
+    project = _write_project(tmp_path, cache=cache)
+
+    async def scenario():
+        async with open_test_client(project) as session:
+            tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+            assert set(tools) == set(DEFAULT_TOOLSET_SURFACE)
+
+            core_desc = tools["core_cmd"].description or ""
+            assert "get_operation_schema" in core_desc
+            assert "schema_status" in core_desc
+            assert " = optional" not in core_desc
+            assert _SIGNATURE_TOKEN.search(core_desc) is None
+
+    _run(scenario)
+
+
+def test_over_stdio_router_descriptions_drop_parameter_signatures(tmp_path):
+    project = _write_project(tmp_path)
+
+    async def scenario():
+        async with open_test_client(project) as session:
+            tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+            for name, tool in tools.items():
+                if not name.endswith("_cmd"):
+                    continue
+                desc = tool.description or ""
+                assert " = optional" not in desc, name
+                assert _SIGNATURE_TOKEN.search(desc) is None, name
+
+    _run(scenario)
+
+
+def test_ui_preset_exposes_the_umg_router_and_its_router_dependencies(tmp_path):
+    """The ui preset must expose the umg router with the Blueprint/Data routers it depends on.
+
+    This proves availability and a native-boundary refusal without an editor; it is NOT a live
+    UI style read (the controller proves an actual widget style read against an owned editor).
+    """
+    project = _write_project(tmp_path)
+
+    async def scenario():
+        async with open_test_client(project, toolset="ui") as session:
+            names = await _list_tool_names(session)
+            assert names == set(UI_TOOLSET)
+            # A UI style read needs the Blueprint and Data routers in the same preset.
+            assert {"blueprint_cmd", "data_cmd", "umg_cmd"} <= names
+
+            result = await session.call_tool(
+                "umg_cmd",
+                {
+                    "command": "get_property",
+                    "params": {
+                        "asset_path": "/Game/UI/WBP_Style.WBP_Style",
+                        "widget_name": "Root",
+                        "property_path": "ColorAndOpacity",
+                    },
+                },
+            )
+            text = _single_text(result)
+            assert result.structuredContent is None
+            # No editor is reachable, so the route failed at the native boundary instead of
+            # being refused locally as an unknown tool or command.
+            assert text.startswith("Error:")
+
+    _run(scenario)
+
+
+def test_unknown_toolset_refuses_server_startup(tmp_path):
+    project = _write_project(tmp_path)
+
+    async def scenario():
+        with pytest.raises(Exception):
+            async with open_test_client(project, toolset="bogus_toolset"):
+                pass  # pragma: no cover - startup must refuse before the session is usable
+
+    _run(scenario)
+
+
+def test_unknown_response_mode_refuses_server_startup(tmp_path):
+    project = _write_project(tmp_path)
+
+    async def scenario():
+        with pytest.raises(Exception):
+            async with open_test_client(project, response_mode="bogus_mode"):
+                pass  # pragma: no cover - startup must refuse before the session is usable
+
+    _run(scenario)
+
+
+def test_registration_allowlist_excludes_unlisted_tools_without_wrapping():
+    async def scenario():
+        from cortex_mcp.tool_output import ToolOutputRegistrar
+
+        mcp = FastMCP("cortex-allowlist-probe")
+        recorder = _SizeRecorder()
+        registrar = ToolOutputRegistrar(
+            mcp, recorder, allowed_tools=frozenset({"probe_allowed"})
+        )
+
+        @registrar.tool(name="probe_allowed", description="probe allowed")
+        def probe_allowed() -> str:
+            return json.dumps({"allowed": True})
+
+        @registrar.tool(name="probe_excluded", description="probe excluded")
+        def probe_excluded() -> str:
+            return json.dumps({"allowed": False})
+
+        names = {tool.name for tool in await mcp.list_tools()}
+        assert names == {"probe_allowed"}
+        # The excluded decorator returns the raw callable without emitting a public tool.
+        assert probe_excluded() == json.dumps({"allowed": False})
+
+        result = await mcp.call_tool("probe_allowed", {})
+        assert json.loads(_single_text(result)) == {"allowed": True}
+        assert recorder.recorded == []
+
+    _run(scenario)

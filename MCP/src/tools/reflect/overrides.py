@@ -20,17 +20,12 @@ def register_reflect_override_tools(mcp, connection: UEConnection):
     ) -> str:
         """Use when you need to see what Blueprint children override from a parent class.
 
-        Shows overridden functions/events and custom additions per child Blueprint.
-        Essential for understanding how Blueprints extend C++ base classes.
+        Shows overridden functions/events and custom additions per child Blueprint — essential for
+        understanding how Blueprints extend C++ base classes. `depth` is the inheritance levels to
+        check and `limit` caps the returned children.
 
-        Args:
-            class_name: Parent class name or Blueprint asset path.
-            depth: How many inheritance levels to check (default 2).
-            limit: Maximum number of children to return (default 20).
-
-        Returns:
-            Per-child list of overridden_functions, overridden_events,
-            custom_functions, custom_variables, plus total_overrides.
+        Returns the per-child overridden_functions, overridden_events, custom_functions and
+        custom_variables plus total_overrides.
         """
         try:
             response = connection.send_command_cached(

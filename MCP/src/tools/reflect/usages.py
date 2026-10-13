@@ -24,27 +24,16 @@ def register_reflect_usage_tools(mcp, connection: UEConnection):
     ) -> str:
         """Use when you need detailed graph-level symbol references across Blueprints.
 
-        Goes deeper than get_referencers by returning exact node types
-        (read/write/call/cast/spawn/component). Essential before renaming,
-        removing, or changing a C++ member. Use deep_scan=true to load
-        unloaded Blueprints for fuller coverage.
+        Goes deeper than `get_referencers` by returning exact node types
+        (read/write/call/cast/spawn/component). Essential before renaming, removing, or changing a
+        C++ member. `scope` is 'all' (default) or 'derived' (inheriting Blueprints only);
+        `deep_scan=true` loads unloaded Blueprints for fuller coverage; `path_filter` scopes the scan.
 
-        For a quick package-level dependency list, use get_referencers.
-        For full risk-scored change assessment, use impact_analysis.
+        For a quick package-level dependency list use `get_referencers`; for full risk-scored change
+        assessment use `impact_analysis`.
 
-        Args:
-            symbol: Property or function name to search for (e.g., 'Health', 'TakeDamage').
-            class_name: The class that defines the symbol.
-            scope: 'all' scans all referencing BPs (default),
-                'derived' scans only inheriting BPs.
-            deep_scan: If true, loads unloaded Blueprints for complete coverage.
-            path_filter: Only search Blueprints under this path (e.g., '/Game/Blueprints/').
-            limit: Maximum number of Blueprint classes to return (default 20).
-            max_blueprints: Maximum number of Blueprint graphs to scan (default 50).
-
-        Returns:
-            Per-Blueprint reference list with context and reference type, plus
-            scan metadata (scope, blueprints_scanned, not_scanned).
+        Returns the per-Blueprint reference list with context and reference type, plus scan metadata
+        (scope, blueprints_scanned, not_scanned).
         """
         try:
             response = connection.send_command_cached(

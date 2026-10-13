@@ -20,16 +20,9 @@ def register_reflect_context_tools(mcp, connection: UEConnection):
     ) -> str:
         """Use when you need the full picture of a class: its parent, its own details, and its children.
 
-        Saves 3 separate calls. Returns parent summary + self detail + children summaries
-        in a single response.
-
-        Args:
-            class_name: Class name or Blueprint asset path.
-            detail: Detail level for the main class — 'summary', 'properties', or 'full'.
-                   Parent and children always use 'summary' level.
-
-        Returns:
-            Composite: parent (summary), self (at requested detail), children (summaries).
+        Saves 3 separate calls: returns the parent summary, self at the requested `detail` level
+        ('summary', 'properties', or 'full'), and children summaries in a single response. Parent
+        and children always use the 'summary' level.
         """
         try:
             # Get full detail for the class (cached)
