@@ -183,9 +183,12 @@ TArray<FCortexCommandInfo> FCortexUMGCommandHandler::GetSupportedCommands() cons
             .Required(TEXT("widget_name"), TEXT("string"), TEXT("Widget to move"))
             .Required(TEXT("new_parent"), TEXT("string"), TEXT("Destination parent widget"))
             .Optional(TEXT("slot_index"), TEXT("number"), TEXT("Insertion index within the new parent")),
-        FCortexCommandInfo{ TEXT("get_tree"), TEXT("Get full widget hierarchy") }
+        FCortexCommandInfo{ TEXT("get_tree"), TEXT("Get widget hierarchy (bounded depth/max_nodes, names_only projection)") }
             .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
-            .Optional(TEXT("include_property_bindings"), TEXT("boolean"), TEXT("Read complete serialized Designer bindings including orphan targets and guard fingerprint")),
+            .Optional(TEXT("include_property_bindings"), TEXT("boolean"), TEXT("Read complete serialized Designer bindings including orphan targets and guard fingerprint"))
+            .Optional(TEXT("depth"), TEXT("number"), TEXT("Deepest retained level; root is 0. Omitted keeps full depth"))
+            .Optional(TEXT("max_nodes"), TEXT("number"), TEXT("Maximum emitted widgets, root included; integer >= 1"))
+            .Optional(TEXT("names_only"), TEXT("boolean"), TEXT("Keep hierarchy/name/child counts and drop class identity")),
         FCortexCommandInfo{ TEXT("get_widget"), TEXT("Get single widget details") }
             .Required(TEXT("asset_path"), TEXT("string"), TEXT("Widget Blueprint asset path"))
             .Required(TEXT("widget_name"), TEXT("string"), TEXT("Widget to inspect"))
