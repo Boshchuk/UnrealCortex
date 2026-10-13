@@ -269,10 +269,12 @@ class TestLocalizationOperations:
 
 @pytest.mark.e2e
 class TestAssetSearch:
-    """Exact filtered discovery over the existing saved fixture folder.
+    """Exact filtered discovery anchored to the known saved fixtures under /Game/Data.
 
-    The population is derived from the native count, so an empty dataset is asserted as an exact
-    complete zero instead of being assumed non-empty or skipped.
+    ``Content/Data`` holds exactly CT_TestCurve, DT_TestSimple and ST_TestStrings, so the population
+    is anchored to independently known identities and the class filter is discriminating. A discovery
+    regression to an empty or short population therefore fails instead of passing vacuously, while
+    the paging/projection/continuation assertions sit on top of that anchor.
     """
 
     @staticmethod
@@ -314,15 +316,31 @@ class TestAssetSearch:
         assert len(set(identities)) == len(identities)
         assert identities == sorted(identities)
 
-        # class_names selects exactly the derived subset of the complete population.
-        for class_name in sorted({row["class_name"] for row in rows}):
-            subset = [row["path"] for row in rows if row["class_name"] == class_name]
-            filtered = self._search(
-                tcp_connection,
-                {"path_prefixes": [folder], "class_names": [class_name], "limit": len(subset)},
-            )
-            assert filtered["total_matches"] == len(subset)
-            assert [row["path"] for row in filtered["assets"]] == subset
+        # Independent anchor: the known saved fixtures must be discovered, so an empty or short
+        # discovery regression cannot pass vacuously.
+        data_table = "/Game/Data/DT_TestSimple.DT_TestSimple"
+        expected_identities = sorted(
+            [
+                "/Game/Data/CT_TestCurve.CT_TestCurve",
+                data_table,
+                "/Game/Data/ST_TestStrings.ST_TestStrings",
+            ]
+        )
+        assert identities == expected_identities
+        assert data_table in identities
+        assert len({row["class_name"] for row in rows}) == len(expected_identities)
+
+        # The class filter must discriminate exactly: the three fixtures have distinct classes, and
+        # the DataTable filter returns exactly the known DataTable identity, excluding the
+        # CurveTable and StringTable fixtures present in the same population.
+        data_tables = self._search(
+            tcp_connection,
+            {"path_prefixes": [folder], "class_names": ["DataTable"], "limit": population},
+        )
+        assert data_tables["total_matches"] == 1
+        assert data_tables["count"] == 1
+        assert data_tables["is_complete"] is True
+        assert [row["path"] for row in data_tables["assets"]] == [data_table]
 
         # A selected projection page equals the projection of the complete first window.
         page = self._search(tcp_connection, {"path_prefixes": [folder], "fields": ["path"], "limit": 1})

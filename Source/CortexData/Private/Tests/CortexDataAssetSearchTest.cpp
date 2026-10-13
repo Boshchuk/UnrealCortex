@@ -350,6 +350,7 @@ bool FCortexDataAssetSearchFolderClassFilterTest::RunTest(const FString& Paramet
 	// Only the canonical Inside folder / exact class matches are returned.
 	const TArray<TSharedPtr<FJsonValue>>* Assets = GetSearchAssetsArray(Result);
 	TestNotNull(TEXT("assets array present"), Assets);
+	TestEqual(TEXT("folder/class page length is one"), Assets != nullptr ? Assets->Num() : -1, 1);
 	if (Assets != nullptr && Assets->Num() == 1)
 	{
 		const TSharedPtr<FJsonObject>* EntryObject = nullptr;
@@ -400,6 +401,7 @@ bool FCortexDataAssetSearchExactClassTest::RunTest(const FString& Parameters)
 
 	const TArray<TSharedPtr<FJsonValue>>* Assets = GetSearchAssetsArray(Result);
 	TestNotNull(TEXT("assets array present"), Assets);
+	TestEqual(TEXT("exact-class page length is two"), Assets != nullptr ? Assets->Num() : -1, 2);
 	if (Assets != nullptr)
 	{
 		const TArray<FString> ExpectedPaths = { Fixture.AlphaObjectPath(), Fixture.BetaObjectPath() };
@@ -435,6 +437,7 @@ bool FCortexDataAssetSearchExactClassTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("derived asset is registered inside the same folder"),
 		GetSearchNumberOrDefault(DerivedOnlyResult, TEXT("total_matches")), 1.0);
 	const TArray<TSharedPtr<FJsonValue>>* DerivedAssets = GetSearchAssetsArray(DerivedOnlyResult);
+	TestEqual(TEXT("derived positive control length is one"), DerivedAssets != nullptr ? DerivedAssets->Num() : -1, 1);
 	if (DerivedAssets != nullptr && DerivedAssets->Num() == 1)
 	{
 		TestEqual(TEXT("derived identity is exactly the fixture asset"),
@@ -449,6 +452,7 @@ bool FCortexDataAssetSearchExactClassTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("sibling asset is registered in the sibling folder"),
 		GetSearchNumberOrDefault(SiblingOnlyResult, TEXT("total_matches")), 1.0);
 	const TArray<TSharedPtr<FJsonValue>>* SiblingAssets = GetSearchAssetsArray(SiblingOnlyResult);
+	TestEqual(TEXT("sibling positive control length is one"), SiblingAssets != nullptr ? SiblingAssets->Num() : -1, 1);
 	if (SiblingAssets != nullptr && SiblingAssets->Num() == 1)
 	{
 		TestEqual(TEXT("sibling identity is exactly the fixture asset"),
@@ -544,6 +548,7 @@ bool FCortexDataAssetSearchPagingTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("first page total is exact"), GetSearchNumberOrDefault(Result1, TEXT("total_matches")), 2.0);
 	const TArray<TSharedPtr<FJsonValue>>* Assets1 = GetSearchAssetsArray(Result1);
 	TestNotNull(TEXT("first page assets present"), Assets1);
+	TestEqual(TEXT("first page array length is one"), Assets1 != nullptr ? Assets1->Num() : -1, 1);
 	if (Assets1 != nullptr && Assets1->Num() == 1)
 	{
 		TestEqual(TEXT("first page is the first sorted asset"), GetSearchEntryPath((*Assets1)[0]), Fixture.AlphaObjectPath());
@@ -565,6 +570,7 @@ bool FCortexDataAssetSearchPagingTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("second page total is stable"), GetSearchNumberOrDefault(Result2, TEXT("total_matches")), 2.0);
 	const TArray<TSharedPtr<FJsonValue>>* Assets2 = GetSearchAssetsArray(Result2);
 	TestNotNull(TEXT("second page assets present"), Assets2);
+	TestEqual(TEXT("second page array length is one"), Assets2 != nullptr ? Assets2->Num() : -1, 1);
 	if (Assets2 != nullptr && Assets2->Num() == 1)
 	{
 		TestEqual(TEXT("second page is the next sorted asset"), GetSearchEntryPath((*Assets2)[0]), Fixture.BetaObjectPath());
@@ -604,10 +610,7 @@ bool FCortexDataAssetSearchCountOnlyTest::RunTest(const FString& Parameters)
 
 	const TArray<TSharedPtr<FJsonValue>>* Assets = GetSearchAssetsArray(Result);
 	TestNotNull(TEXT("count_only assets array present"), Assets);
-	if (Assets != nullptr)
-	{
-		TestEqual(TEXT("count_only emits no rows even with a small limit"), Assets->Num(), 0);
-	}
+	TestEqual(TEXT("count_only emits no rows even with a small limit"), Assets != nullptr ? Assets->Num() : -1, 0);
 
 	bool bComplete = false;
 	TestTrue(TEXT("count_only is_complete exists"), Result.Data.IsValid() && Result.Data->TryGetBoolField(TEXT("is_complete"), bComplete));
@@ -808,6 +811,7 @@ bool FCortexDataAssetSearchQueryIdentityTest::RunTest(const FString& Parameters)
 
 	const TArray<TSharedPtr<FJsonValue>>* Assets = GetSearchAssetsArray(Result);
 	TestNotNull(TEXT("query assets present"), Assets);
+	TestEqual(TEXT("query page array length is one"), Assets != nullptr ? Assets->Num() : -1, 1);
 	if (Assets != nullptr && Assets->Num() == 1)
 	{
 		TestEqual(TEXT("query excludes every unrelated identity"), GetSearchEntryPath((*Assets)[0]), Fixture.AlphaObjectPath());
