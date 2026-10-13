@@ -326,6 +326,69 @@ claim). Runtime 1.24 s, exit 0:
 * `DIAGNOSTICS_HUGE_OMITTED_EXPLICITLY` — the 60 000-character `issues` entry omitted with
   `issues_count=1` and `_omitted_context` naming `issues` (341 characters total).
 
+## Round 4 — scoped re-review `f3207c7..4f0c631`: new finding, RED and fix
+
+The scoped re-review (`local://task-3-fix-review.md`) confirmed all three original findings
+**ADDRESSED** (empty page rebuilt from the real template with its own budget check; cursor
+command/array validated against the route mapping and the live stored entry before slicing, with
+genuine expiry still `CURSOR_EXPIRED`; native `issues`/`warnings`/`diagnostics` carried as bounded
+context with real list-length counts and whole-field omission), and raised one **new Important (P2)**:
+
+* **Require exhaustion before emitting an empty terminal page** (`routers.py:146-149`). The new
+  `if not page:` branch treats *every* empty slice as an exhausted snapshot. A genuine seven-row
+  `level.find_actors` sequence with `limit=2` whose decoded cursor has only its `limit` changed to
+  `0` keeps its key/command/array/offset, passes `decode_cursor` and the new provenance checks, and
+  `get_page` slices `full_list[2:2]` — the branch then returns a successful empty page with
+  `total=7`, `has_more=false`, `next_cursor=null` while five rows remain. Before the fix that path
+  refused instead of falsely terminating the read. The reviewer notes the cursor's numeric validation
+  weakness is relevant only as the reachable input to this new behaviour (no separate pre-existing
+  finding).
+
+Consumer RED regression staged (production untouched):
+`TestCachedPageIntegrity::test_cursor_with_out_of_range_embedded_limit_refuses`, parametrised over
+`0`, `-1` and `5000` — a provenance-valid cursor carrying an out-of-range embedded limit must refuse
+`INVALID_CURSOR` with no `matches`/`_pagination` payload and no dispatch. A minted cursor always
+carries a 1..200 limit, so all three values are impossible from a genuine cursor; the `>200` case
+exercises the same 1..200 invariant. Expected RED: **3 failed, 136 passed** (the suite is 136
+passing). The existing `EMPTY_PAGE_LEVEL`/`EMPTY_PAGE_DATA` regressions and the in-process smoke
+empty-page cases continue to pin the genuine exhausted empty page (`total == 0`, `offset >= total`).
+
+Controller RED (exact command and counts, no artifact id allocated):
+```
+rtk proxy uv run pytest tests/test_pagination_contract.py tests/test_routers.py tests/test_response.py -v
+```
+**3 failed, 136 passed in 1.35 s** — the zero, negative and 5000 embedded limits all returned either a
+false complete empty page or an unbounded 5-row page instead of `INVALID_CURSOR`.
+
+Fix implemented (`routers.py`, no retries or aliases):
+1. `_handle_cursor_request` re-validates the decoded cursor's embedded `limit` as 1..`_MAX_LIMIT`
+   **before** any cache slicing and refuses `INVALID_CURSOR` otherwise (a minted cursor always
+   carries a 1..200 limit, so an out-of-range value can only come from a forged token).
+2. `_format_cached_page` emits the successful terminal empty page **only** when `offset >= total`
+   (genuine exhaustion); an empty slice that is not exhausted goes to the bounded refusal instead of
+   claiming the read is complete.
+
+In-process proof script for the controller (task-owned, no native claim — finite fixture at the
+native boundary): `.superpowers/sdd/2026-10-13-token-efficiency-impl/smoke-task3-cursor-range.py`
+starts a real FastMCP server, registers the routers through the real `ToolOutputRegistrar` and
+asserts `GENUINE_CURSOR_REMAINING_ROWS` (2 remaining rows, `has_more=false`),
+`FORGED_LIMIT_0`, `FORGED_LIMIT_NEGATIVE`, `FORGED_LIMIT_HIGH` (all `INVALID_CURSOR`, no
+`matches`/`_pagination`, no extra dispatch) and `EMPTY_POPULATION_TERMINAL_PAGE`.
+
+### Round 4 covering GREEN and in-process smoke
+
+```
+rtk proxy uv run pytest tests/test_pagination_contract.py tests/test_routers.py tests/test_response.py -v
+rtk proxy uv run python Plugins/UnrealCortex/.superpowers/sdd/2026-10-13-token-efficiency-impl/smoke-task3-cursor-range.py
+```
+
+* Named suite: **139 passed in 0.40 s**.
+* In-process registered cursor-range smoke: **5 cases PASS in 1.13 s** — a genuine seven-row cursor
+  returns the remaining `Actor_5`/`Actor_6` (`returned=2`, `total=7`, `has_more=false`), the forged
+  embedded `0`/`-1`/`5000` limits refuse `INVALID_CURSOR` with no false-complete data, and a genuine
+  empty population returns the terminal `0` page. Real FastMCP + `ToolOutputRegistrar` + registered
+  routers over a finite fixture connection — no editor, no TCP, **no native claim**.
+
 ## Files changed
 
 `MCP/src/cortex_mcp/tools/routers.py`, `MCP/src/cortex_mcp/pagination.py`,

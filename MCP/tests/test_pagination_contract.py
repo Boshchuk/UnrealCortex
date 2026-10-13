@@ -652,6 +652,22 @@ class TestCachedPageIntegrity:
         assert payload["_error"] == "INVALID_CURSOR"
         connection.send_command.assert_not_called()
 
+    @pytest.mark.parametrize("bad_limit", [0, -1, 5000])
+    def test_cursor_with_out_of_range_embedded_limit_refuses(self, bad_limit):
+        # A minted cursor always carries a 1..200 limit. A forged 0/negative limit slices an empty
+        # page while rows remain, so it must refuse instead of reporting a complete empty read.
+        router, connection = _router("level", {"matches": _actors(7), "count": 7, "pattern": "Actor"})
+        cursor = json.loads(router("find_actors", {"limit": 2}))["_pagination"]["next_cursor"]
+        forged = _retag_cursor(cursor, limit=bad_limit)
+
+        connection.send_command.reset_mock()
+        payload = json.loads(router("find_actors", {"cursor": forged}))
+
+        assert payload["_error"] == "INVALID_CURSOR"
+        assert "matches" not in payload
+        assert "_pagination" not in payload
+        connection.send_command.assert_not_called()
+
 
 class TestRefusalDiagnostics:
     """A selector refusal never silently loses native issue/diagnostic context."""

@@ -138,15 +138,18 @@ def _format_cached_page(
     """Emit the largest prefix of a cached page that fits the budget *including* its metadata.
 
     ``returned`` and the continuation are computed from the rows actually emitted, so a bounded
-    page can never skip the rows it omitted. An exhausted snapshot (no rows at this offset) is a
-    normal terminal empty page — zero rows, no continuation, verified against the real template
-    budget — and a zero-row page never reports ``has_more``. If not even one row of a non-empty
-    page fits, refuse instead of reporting a page that claims more.
+    page can never skip the rows it omitted. An exhausted snapshot (the offset is past the end) is
+    a normal terminal empty page — zero rows, no continuation, verified against the real template
+    budget — and a zero-row page never reports ``has_more``. An empty slice that is *not* exhausted
+    (only reachable from a malformed cursor) refuses instead of claiming the read is complete, and
+    if not even one row of a non-empty page fits it refuses likewise.
     """
     if not page:
-        meta = {"returned": 0, "total": total, "has_more": False, "next_cursor": None}
-        text = compact_json(_pagination_cache.rebuild_response(cache_key, [], meta))
-        return text if len(text) <= MAX_RESPONSE_CHARS else _cached_refusal(array_key)
+        if offset >= total:
+            meta = {"returned": 0, "total": total, "has_more": False, "next_cursor": None}
+            text = compact_json(_pagination_cache.rebuild_response(cache_key, [], meta))
+            return text if len(text) <= MAX_RESPONSE_CHARS else _cached_refusal(array_key)
+        return _cached_refusal(array_key)
 
     for count in range(len(page), 0, -1):
         next_offset = offset + count
@@ -199,7 +202,11 @@ def _handle_cursor_request(cursor_token: str, qualified: str) -> str:
         )
 
     offset = decoded["offset"]
-    limit = decoded["limit"]  # embedded in cursor
+    limit = decoded["limit"]  # embedded in cursor; re-validated against the minted contract
+    if limit < 1 or limit > _MAX_LIMIT:
+        return _invalid_cursor(
+            "Cursor is malformed. Pass a cursor value returned from a previous response."
+        )
 
     try:
         page, meta = _pagination_cache.get_page(key, offset, limit)
