@@ -417,24 +417,44 @@ bool FCortexGenCommandHandlerListJobsPromptEmissionTest::RunTest(const FString& 
     OmitParams->SetBoolField(TEXT("include_prompt"), false);
     const FCortexCommandResult OmitResult = Handler.Execute(TEXT("list_jobs"), OmitParams);
     TestTrue(TEXT("list_jobs include_prompt=false succeeds"), OmitResult.bSuccess);
-    if (OmitResult.Data.IsValid())
+    TestTrue(TEXT("include_prompt=false returns response data"), OmitResult.Data.IsValid());
+    const TArray<TSharedPtr<FJsonValue>>* OmitJobs = nullptr;
+    TestTrue(TEXT("include_prompt=false returns jobs array"),
+        OmitResult.Data.IsValid() && OmitResult.Data->TryGetArrayField(TEXT("jobs"), OmitJobs));
+    double OmitCount = -1.0;
+    TestTrue(TEXT("include_prompt=false count present"),
+        OmitResult.Data.IsValid() && OmitResult.Data->TryGetNumberField(TEXT("count"), OmitCount));
+    TestEqual(TEXT("include_prompt=false count equals returned rows"), OmitCount, 2.0);
+    if (OmitJobs)
     {
-        const TArray<TSharedPtr<FJsonValue>>* OmitJobs = nullptr;
-        TestTrue(TEXT("include_prompt=false returns jobs array"),
-            OmitResult.Data->TryGetArrayField(TEXT("jobs"), OmitJobs));
-        if (OmitJobs)
+        TestEqual(TEXT("include_prompt=false returns every job"), OmitJobs->Num(), 2);
+
+        bool bAnyRowCarriedPrompt = false;
+        for (const TSharedPtr<FJsonValue>& Item : *OmitJobs)
         {
-            bool bAnyRowCarriedPrompt = false;
-            for (const TSharedPtr<FJsonValue>& Item : *OmitJobs)
+            const TSharedPtr<FJsonObject> Obj = Item.IsValid() ? Item->AsObject() : nullptr;
+            TestTrue(TEXT("include_prompt=false row is an object"), Obj.IsValid());
+            if (Obj.IsValid())
             {
-                const TSharedPtr<FJsonObject> Obj = Item.IsValid() ? Item->AsObject() : nullptr;
-                if (Obj.IsValid() && Obj->HasField(TEXT("prompt")))
+                TestTrue(TEXT("include_prompt=false row retains job_id"),
+                    Obj->HasTypedField<EJson::String>(TEXT("job_id")));
+                TestTrue(TEXT("include_prompt=false row retains provider"),
+                    Obj->HasTypedField<EJson::String>(TEXT("provider")));
+                TestTrue(TEXT("include_prompt=false row retains status"),
+                    Obj->HasTypedField<EJson::String>(TEXT("status")));
+                TestTrue(TEXT("include_prompt=false row retains progress"),
+                    Obj->HasTypedField<EJson::Number>(TEXT("progress")));
+                TestTrue(TEXT("include_prompt=false row retains created_at"),
+                    Obj->HasTypedField<EJson::String>(TEXT("created_at")));
+                TestTrue(TEXT("include_prompt=false row retains completed_at"),
+                    Obj->HasTypedField<EJson::String>(TEXT("completed_at")));
+                if (Obj->HasField(TEXT("prompt")))
                 {
                     bAnyRowCarriedPrompt = true;
                 }
             }
-            TestFalse(TEXT("explicit include_prompt=false omits every prompt body"), bAnyRowCarriedPrompt);
         }
+        TestFalse(TEXT("explicit include_prompt=false omits every prompt body"), bAnyRowCarriedPrompt);
     }
 
     // --- include_prompt=true restores the full prompt body ---
@@ -442,28 +462,63 @@ bool FCortexGenCommandHandlerListJobsPromptEmissionTest::RunTest(const FString& 
     PromptParams->SetBoolField(TEXT("include_prompt"), true);
     const FCortexCommandResult PromptResult = Handler.Execute(TEXT("list_jobs"), PromptParams);
     TestTrue(TEXT("list_jobs include_prompt=true succeeds"), PromptResult.bSuccess);
-    if (PromptResult.Data.IsValid() && State1)
+    TestTrue(TEXT("include_prompt=true returns response data"), PromptResult.Data.IsValid());
+    const TArray<TSharedPtr<FJsonValue>>* PromptJobs = nullptr;
+    TestTrue(TEXT("include_prompt=true returns jobs array"),
+        PromptResult.Data.IsValid() && PromptResult.Data->TryGetArrayField(TEXT("jobs"), PromptJobs));
+    double PromptCount = -1.0;
+    TestTrue(TEXT("include_prompt=true count present"),
+        PromptResult.Data.IsValid() && PromptResult.Data->TryGetNumberField(TEXT("count"), PromptCount));
+    TestEqual(TEXT("include_prompt=true count equals returned rows"), PromptCount, 2.0);
+    if (PromptJobs)
     {
-        const TArray<TSharedPtr<FJsonValue>>* PromptJobs = nullptr;
-        TestTrue(TEXT("include_prompt=true returns jobs array"),
-            PromptResult.Data->TryGetArrayField(TEXT("jobs"), PromptJobs));
-        if (PromptJobs)
-        {
-            const TSharedPtr<FJsonValue>* PromptRow = PromptJobs->FindByPredicate(
-                [&JobId1](const TSharedPtr<FJsonValue>& Item)
-                {
-                    FString Id;
-                    const TSharedPtr<FJsonObject> Obj = Item.IsValid() ? Item->AsObject() : nullptr;
-                    return Obj.IsValid() && Obj->TryGetStringField(TEXT("job_id"), Id) && Id == JobId1;
-                });
-            TestNotNull(TEXT("submitted job retained"), PromptRow);
-            if (PromptRow)
+        TestEqual(TEXT("include_prompt=true returns every job"), PromptJobs->Num(), 2);
+
+        const TSharedPtr<FJsonValue>* PromptRow = PromptJobs->FindByPredicate(
+            [&JobId1](const TSharedPtr<FJsonValue>& Item)
             {
-                const TSharedPtr<FJsonObject> Obj = (*PromptRow)->AsObject();
+                FString Id;
+                const TSharedPtr<FJsonObject> Obj = Item.IsValid() ? Item->AsObject() : nullptr;
+                return Obj.IsValid() && Obj->TryGetStringField(TEXT("job_id"), Id) && Id == JobId1;
+            });
+        TestNotNull(TEXT("submitted job retained"), PromptRow);
+        if (PromptRow)
+        {
+            const TSharedPtr<FJsonObject> Obj = PromptRow->IsValid() ? (*PromptRow)->AsObject() : nullptr;
+            TestTrue(TEXT("include_prompt=true row is an object"), Obj.IsValid());
+            if (Obj.IsValid())
+            {
+                FString RowId, RowProvider, RowStatus, RowCreatedAt, RowCompletedAt;
+                double RowProgress = -1.0;
+                TestTrue(TEXT("include_prompt=true row retains job_id"),
+                    Obj->TryGetStringField(TEXT("job_id"), RowId));
+                TestEqual(TEXT("include_prompt=true row job_id matches"), RowId, JobId1);
+                TestTrue(TEXT("include_prompt=true row retains provider"),
+                    Obj->TryGetStringField(TEXT("provider"), RowProvider));
+                TestEqual(TEXT("include_prompt=true row provider matches"), RowProvider, FString(TEXT("test")));
+                TestTrue(TEXT("include_prompt=true row retains status"),
+                    Obj->TryGetStringField(TEXT("status"), RowStatus));
+                TestEqual(TEXT("include_prompt=true row status matches canonical"), RowStatus,
+                    FString(TEXT("cancelled")));
+                TestTrue(TEXT("include_prompt=true row retains progress"),
+                    Obj->TryGetNumberField(TEXT("progress"), RowProgress));
+                TestTrue(TEXT("include_prompt=true row retains created_at"),
+                    Obj->TryGetStringField(TEXT("created_at"), RowCreatedAt));
+                TestTrue(TEXT("include_prompt=true row retains completed_at"),
+                    Obj->TryGetStringField(TEXT("completed_at"), RowCompletedAt));
+
                 FString RowPrompt;
                 TestTrue(TEXT("prompt present on request"),
-                    Obj.IsValid() && Obj->TryGetStringField(TEXT("prompt"), RowPrompt));
-                TestEqual(TEXT("prompt retained on request"), RowPrompt, State1->Prompt);
+                    Obj->TryGetStringField(TEXT("prompt"), RowPrompt));
+                const FCortexGenJobState* Expected = State1;
+                TestEqual(TEXT("prompt retained on request"), RowPrompt,
+                    Expected ? Expected->Prompt : FString(TEXT("<missing canonical state>")));
+                TestEqual(TEXT("include_prompt=true row progress matches canonical"), RowProgress,
+                    Expected ? static_cast<double>(Expected->Progress) : -1.0);
+                TestEqual(TEXT("include_prompt=true row created_at matches canonical"), RowCreatedAt,
+                    Expected ? Expected->CreatedAt : FString(TEXT("<missing canonical state>")));
+                TestEqual(TEXT("include_prompt=true row completed_at matches canonical"), RowCompletedAt,
+                    Expected ? Expected->CompletedAt : FString(TEXT("<missing canonical state>")));
             }
         }
     }
@@ -557,13 +612,19 @@ bool FCortexGenCommandHandlerJobStatusPromptRetainedTest::RunTest(const FString&
     Params->SetStringField(TEXT("job_id"), JobId);
     const FCortexCommandResult Result = Handler.Execute(TEXT("job_status"), Params);
     TestTrue(TEXT("job_status succeeds"), Result.bSuccess);
-    if (Result.Data.IsValid() && State)
-    {
-        FString RowPrompt;
-        TestTrue(TEXT("job_status retains prompt field"),
-            Result.Data->TryGetStringField(TEXT("prompt"), RowPrompt));
-        TestEqual(TEXT("job_status retains the full prompt"), RowPrompt, State->Prompt);
-    }
+    TestTrue(TEXT("job_status returns response data"), Result.Data.IsValid());
+
+    FString RowId, RowStatus, RowPrompt;
+    TestTrue(TEXT("job_status retains job_id field"),
+        Result.Data.IsValid() && Result.Data->TryGetStringField(TEXT("job_id"), RowId));
+    TestEqual(TEXT("job_status job_id matches"), RowId, JobId);
+    TestTrue(TEXT("job_status retains status field"),
+        Result.Data.IsValid() && Result.Data->TryGetStringField(TEXT("status"), RowStatus));
+    TestEqual(TEXT("job_status status matches canonical"), RowStatus, FString(TEXT("cancelled")));
+    TestTrue(TEXT("job_status retains prompt field"),
+        Result.Data.IsValid() && Result.Data->TryGetStringField(TEXT("prompt"), RowPrompt));
+    TestEqual(TEXT("job_status retains the full prompt"), RowPrompt,
+        State ? State->Prompt : FString(TEXT("<missing canonical state>")));
 
     return true;
 }
