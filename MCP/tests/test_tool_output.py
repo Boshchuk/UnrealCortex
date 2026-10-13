@@ -439,3 +439,129 @@ def test_metrics_are_reported_once_per_public_return_excluding_telemetry():
         assert (json_chars, utf8_bytes) == (len(text), len(text.encode("utf-8")))
 
     _run(scenario)
+
+
+# --------------------------------------------------------------------------------------
+# Invocation-local size attribution (review finding P2)
+# --------------------------------------------------------------------------------------
+
+def _attribution_project(tmp_path, monkeypatch) -> None:
+    """A project with Saved/ only, so a real UEConnection resolves port 0 deterministically."""
+    project = tmp_path / "CortexAttributionProject"
+    (project / "Saved").mkdir(parents=True)
+    (project / ".cortex" / "schema").mkdir(parents=True)
+    monkeypatch.setenv("CORTEX_PROJECT_DIR", str(project))
+
+
+def _real_connection() -> UEConnection:
+    """Auto-discovery against the temporary project finds no port file, so dispatch fails locally."""
+    return UEConnection(host="127.0.0.1")
+
+
+def _core_router_server(connection):
+    """Real FastMCP + real registrar + the shipped core router (local schema_status route)."""
+    from cortex_mcp.tool_output import ToolOutputRegistrar
+    from cortex_mcp.tools.routers import register_router_tools
+
+    mcp = FastMCP("cortex-attribution")
+    registrar = ToolOutputRegistrar(mcp, connection, metrics=True)
+    register_router_tools(registrar, connection, {"core": "core docs"}, domains=("core",))
+    return mcp
+
+
+def _response_sizes(connection) -> dict:
+    return connection.get_call_metrics()["response_sizes"]
+
+
+class TestInvocationLocalSizeAttribution:
+    """`by_command` must describe the invocation that produced the bytes, not call history."""
+
+    def test_strict_refusal_does_not_grow_the_previous_command_attribution(self, tmp_path, monkeypatch):
+        _attribution_project(tmp_path, monkeypatch)
+        connection = _real_connection()
+        mcp = _core_router_server(connection)
+
+        async def scenario():
+            accepted = await mcp.call_tool("core_cmd", {"command": "schema_status", "params": {}})
+            refused = await mcp.call_tool(
+                "core_cmd",
+                {"command": "schema_status", "params": {}, "unexpected_top_level": 1},
+            )
+            return _single_text(accepted), _single_text(refused)
+
+        accepted_text, refused_text = asyncio.run(scenario())
+        sizes = _response_sizes(connection)
+
+        # The refusal really took the strict path and routed nothing.
+        assert json.loads(refused_text)["_error"] == "INVALID_INVOCATION_SHAPE"
+
+        # It is still one counted public return for the tool.
+        assert sizes["total"]["calls"] == 2
+        assert sizes["total"]["json_chars"] == len(accepted_text) + len(refused_text)
+        assert sizes["by_tool"]["core_cmd"]["calls"] == 2
+
+        # It never routed a command, so the previous command's bucket must not grow. Whether the
+        # refusal lands in its own unknown/refused bucket or nowhere is the implementation's
+        # choice; blaming schema_status is not.
+        assert sizes["by_command"]["core.schema_status"]["calls"] == 1
+        assert sizes["by_command"]["core.schema_status"]["json_chars"] == len(accepted_text)
+
+    def test_command_attribution_does_not_carry_between_invocations(self, tmp_path, monkeypatch):
+        _attribution_project(tmp_path, monkeypatch)
+        connection = _real_connection()
+        mcp = _core_router_server(connection)
+
+        async def scenario():
+            status = await mcp.call_tool("core_cmd", {"command": "schema_status", "params": {}})
+            other = await mcp.call_tool("core_cmd", {"command": "get_status", "params": {}})
+            refused = await mcp.call_tool(
+                "core_cmd",
+                {"command": "schema_status", "params": {}, "unexpected_top_level": 1},
+            )
+            return _single_text(status), _single_text(other), _single_text(refused)
+
+        status_text, other_text, refused_text = asyncio.run(scenario())
+        sizes = _response_sizes(connection)
+
+        # No editor: the second route records its own command and then fails opaquely.
+        assert other_text.startswith("Error:")
+        assert json.loads(refused_text)["_error"] == "INVALID_INVOCATION_SHAPE"
+
+        assert sizes["total"]["calls"] == 3
+        assert sizes["by_command"]["core.schema_status"]["calls"] == 1
+        assert sizes["by_command"]["core.schema_status"]["json_chars"] == len(status_text)
+        assert sizes["by_command"]["get_status"]["calls"] == 1
+        assert sizes["by_command"]["get_status"]["json_chars"] == len(other_text)
+
+    def test_concurrent_async_invocations_keep_their_own_command_attribution(self, tmp_path, monkeypatch):
+        _attribution_project(tmp_path, monkeypatch)
+        connection = _real_connection()
+        from cortex_mcp.tool_output import ToolOutputRegistrar
+
+        mcp = FastMCP("cortex-attribution-async")
+        registrar = ToolOutputRegistrar(mcp, connection, metrics=True)
+
+        @registrar.tool(name="probe_async_attribution", description="async attribution probe")
+        async def probe_async_attribution(command: str) -> str:
+            connection.record_tool_invocation("probe_async_attribution", command)
+            await asyncio.sleep(0)  # let the sibling invocation run between record and return
+            return json.dumps({"command": command})
+
+        async def scenario():
+            first, second = await asyncio.gather(
+                mcp.call_tool("probe_async_attribution", {"command": "alpha"}),
+                mcp.call_tool("probe_async_attribution", {"command": "beta"}),
+            )
+            return _single_text(first), _single_text(second)
+
+        first_text, second_text = asyncio.run(scenario())
+        sizes = _response_sizes(connection)
+
+        assert json.loads(first_text) == {"command": "alpha"}
+        assert json.loads(second_text) == {"command": "beta"}
+        # Both invocations recorded a command, so no unknown bucket is possible here.
+        assert {name: entry["calls"] for name, entry in sizes["by_command"].items()} == {
+            "alpha": 1,
+            "beta": 1,
+        }
+        assert sizes["total"]["calls"] == 2

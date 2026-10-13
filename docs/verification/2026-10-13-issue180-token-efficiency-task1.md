@@ -129,3 +129,72 @@ The script was deleted after proof; these reports are preserved. Provenance: pyt
 smoke values above are the controller's; the compact/pretty fixture arithmetic was computed by me with
 the WSL stdlib `json`; my local `py_compile`/`compileall` runs were syntax-only self-checks and are not
 build or behavioural acceptance. No native compile/runtime result is claimed.
+
+## Review round 1 — P2 fix (RED and GREEN observed)
+
+Task-1 review (`local://task-1-review.md`) found one Important P2 defect: response-size attribution
+used the connection's retained previous command, so a strict refusal (which returns before the router
+records an invocation) was reported as a `core.schema_status` response. Consumer regression staged in
+`MCP/tests/test_tool_output.py::TestInvocationLocalSizeAttribution` (real `FastMCP`, real
+`ToolOutputRegistrar`, shipped router, real `UEConnection` on a temporary port-0 project).
+
+Controller-observed RED (3/3 failed, 0.74 s): `by_command["core.schema_status"]["calls"] == 2`
+(expected 1); `by_command["get_status"]["calls"] == 2` (expected 1); concurrent probe
+`{"beta": 2}` (expected `{"alpha": 1, "beta": 1}`).
+
+Fix: `tcp_client.INVOCATION_COMMAND` (`contextvars.ContextVar[str]`, default `""` = explicit
+unknown/refused state) written by `record_tool_invocation`; the `ToolOutputRegistrar` wrappers open and
+reset that scope per invocation (sync and async) and attribute the size to the command routed inside
+that invocation; `_last_tool_commands` and `last_command_for_tool` are removed with no compatibility
+accessor. `total`/`by_tool` still count every public return; `by_command` only holds invocations that
+routed a known command.
+
+```
+rtk proxy uv run --no-sync pytest tests/test_tool_output.py -v --basetemp=.superpowers/sdd/2026-10-13-token-efficiency-impl/pytest-green-6
+```
+
+GREEN is pending this run; no pass is claimed here.
+
+### Observed GREEN
+
+Covering run `tests/test_tool_output.py` + `tests/test_tcp_client.py`: **57/57 passed in 7.60 s**
+(Windows `uv run --no-sync`, task-owned basetemp); the covering set includes the actual stdio
+sync/async/strict-refusal/opaque-error cases, so no broad suite rerun was required for this scoped
+correction.
+
+Attribution smoke outside pytest (real stdio against the shipped server with a temporary local
+project): accept `core_cmd(schema_status)`, then the strict refusal of `core_cmd` with an unexpected
+top-level field.
+
+| Observation | Value |
+|---|---|
+| `by_command["core.schema_status"]` | `json_chars=255`, `utf8_bytes=255`, `calls=1` — unchanged by the refusal |
+| `by_tool["core_cmd"]` / `total` | `json_chars=497`, `utf8_bytes=497`, `calls=2` |
+
+So the refusal remains one counted public return (242 characters, derived from 497 − 255) while the
+accepted command's bucket does not grow. The smoke script was removed after this record preserved its
+evidence. Scoped correction commit: `MCP/src/cortex_mcp/tool_output.py`,
+`MCP/src/cortex_mcp/tcp_client.py`, `MCP/tests/test_tool_output.py`, this file.
+
+## Additional controller acceptance
+
+* Existing native decoder runners against unchanged compiled native source: `StreamEvent` 15/15
+  (`Saved/TestLogs/AutomationTest_2026-10-13_184301.log`) and `CodexAppServer.Protocol` 10/10
+  (`Saved/TestLogs/AutomationTest_2026-10-13_184502.log`), raw severity grep clean
+  (no Warning/Error/ensure/fatal). Source branches were inspected for the Claude text-block and Codex
+  result-object paths; this is not a new decoder test.
+* Real disposable composite in **both** public modes through fresh stdio on a task-owned UE5.8.3
+  editor (PID 23672): `/Game/Temp/CortexMCPTest/Bench_20261013_184825/BP_PublicOutput_text` and
+  `..._structured` with a `TokenFlag` bool — `success=true`, `variable_count=1`,
+  `verification.verified=true`; native `get_info` confirmed `TokenFlag` and `is_compiled=true`;
+  compact text, structured decoded equality and metadata sizes verified every call; both assets
+  removed via `core.delete_asset` (`deleted=true`); editor shutdown initiated with `force=false`
+  (`artifact://168`).
+* Honest log classification: that smoke's only diagnostics are shutdown `LogHttp` warnings
+  (lines 2399–2400, outstanding Epic telemetry POST); there are no authoring diagnostics, and this is
+  **not** presented as a zero-warning manual-editor run.
+* Cleanup: the controller's `workspace/smoke-composite.py` is removed once this record preserved the
+  evidence; the disposable assets were deleted by the smoke itself.
+
+Coverage still not exercised (no defect asserted): the toolset allowlist path (Task 2) and an invalid
+`CORTEX_RESPONSE_MODE` startup refusal.

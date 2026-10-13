@@ -8,9 +8,11 @@ facade owns the public encoding:
 * ``structured``: the same compact text plus the decoded object under ``structuredContent``.
 
 Explicit ``CallToolResult``/image content is passed through untouched, and text that is not
-JSON stays an opaque text block with its original meaning. This is a registration adapter,
-not a general plugin framework and not a semantic truncator: domain owners keep their
-meaning, guards and outcome envelopes.
+JSON stays an opaque text block with its original meaning. Response-size telemetry is attributed
+to the command routed *inside the current invocation* (an invocation-local scope, so concurrent
+async invocations stay isolated and a refusal that routes nothing reports the explicit unknown
+state). This is a registration adapter, not a general plugin framework and not a semantic
+truncator: domain owners keep their meaning, guards and outcome envelopes.
 """
 
 from __future__ import annotations
@@ -18,14 +20,12 @@ from __future__ import annotations
 import functools
 import inspect
 import json
-import logging
 from typing import Any, Callable
 
 from mcp.types import CallToolResult, TextContent
 
 from .response import compact_json
-
-logger = logging.getLogger(__name__)
+from .tcp_client import INVOCATION_COMMAND
 
 _TEXT_MODE = "text"
 _STRUCTURED_MODE = "structured"
@@ -84,19 +84,31 @@ class ToolOutputRegistrar:
 
             @functools.wraps(fn)
             async def async_wrapper(*args, **kwargs) -> CallToolResult:
-                return self._build_result(tool_name, await fn(*args, **kwargs))
+                token = INVOCATION_COMMAND.set("")
+                try:
+                    value = await fn(*args, **kwargs)
+                    routed_command = INVOCATION_COMMAND.get()
+                finally:
+                    INVOCATION_COMMAND.reset(token)
+                return self._build_result(tool_name, value, routed_command)
 
             return async_wrapper
 
         @functools.wraps(fn)
         def sync_wrapper(*args, **kwargs) -> CallToolResult:
-            return self._build_result(tool_name, fn(*args, **kwargs))
+            token = INVOCATION_COMMAND.set("")
+            try:
+                value = fn(*args, **kwargs)
+                routed_command = INVOCATION_COMMAND.get()
+            finally:
+                INVOCATION_COMMAND.reset(token)
+            return self._build_result(tool_name, value, routed_command)
 
         return sync_wrapper
 
-    def _build_result(self, tool_name: str, value: Any) -> CallToolResult:
+    def _build_result(self, tool_name: str, value: Any, routed_command: str) -> CallToolResult:
         if isinstance(value, CallToolResult):
-            return self._with_metrics(tool_name, value, self._text_of(value))
+            return self._with_metrics(tool_name, value, self._text_of(value), routed_command)
 
         data, text, decoded = self._normalize(value)
         structured = (
@@ -106,7 +118,7 @@ class ToolOutputRegistrar:
             content=[TextContent(type="text", text=text)],
             structuredContent=structured,
         )
-        return self._with_metrics(tool_name, result, text)
+        return self._with_metrics(tool_name, result, text, routed_command)
 
     @staticmethod
     def _normalize(value: Any) -> tuple[Any, str, bool]:
@@ -131,7 +143,9 @@ class ToolOutputRegistrar:
                 return text
         return ""
 
-    def _with_metrics(self, tool_name: str, result: CallToolResult, text: str) -> CallToolResult:
+    def _with_metrics(
+        self, tool_name: str, result: CallToolResult, text: str, routed_command: str
+    ) -> CallToolResult:
         if not self._metrics:
             return result
 
@@ -147,13 +161,7 @@ class ToolOutputRegistrar:
 
         record = getattr(self._connection, "record_response_size", None)
         if callable(record):
-            record(tool_name, self._qualified_command(tool_name), json_chars, utf8_bytes)
+            # The command routed inside this invocation, or "" for the explicit unknown/refused
+            # state; the size is attributed to nothing rather than to call history.
+            record(tool_name, routed_command, json_chars, utf8_bytes)
         return result
-
-    def _qualified_command(self, tool_name: str) -> str:
-        getter = getattr(self._connection, "last_command_for_tool", None)
-        if callable(getter):
-            command = getter(tool_name)
-            if isinstance(command, str):
-                return command
-        return ""
