@@ -133,6 +133,23 @@ class TestGetClassDefaults:
             },
         )
 
+    def test_legacy_three_positional_arguments_still_forward(self):
+        """The original (asset_path, properties, blueprint_path) positional order is preserved."""
+        connection = MagicMock()
+        connection.send_command.return_value = _fake_success_data()
+
+        tools = _register_tools(connection)
+        tools["get_class_defaults"]("/Game/Test/BP_Test", ["bReplicates"], "/Game/Test/BP_IgnoredAlias")
+
+        connection.send_command.assert_called_once_with(
+            "blueprint.get_class_defaults",
+            {
+                "asset_path": "/Game/Test/BP_Test",
+                "blueprint_path": "/Game/Test/BP_Test",
+                "properties": ["bReplicates"],
+            },
+        )
+
 
 class TestSetClassDefaults:
     def test_default_compile_and_save_true(self):

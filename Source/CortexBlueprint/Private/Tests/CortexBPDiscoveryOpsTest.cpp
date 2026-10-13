@@ -505,6 +505,86 @@ bool FCortexBPDiscoveryInvalidReadControlsTest::RunTest(const FString& Parameter
 			Result.ErrorCode, CortexErrorCodes::InvalidField);
 	}
 
+	// A present non-array selector must refuse instead of degrading to an unfiltered read.
+	{
+		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("asset_path"), BP->GetPathName());
+		Params->SetStringField(TEXT("properties"), TEXT("Mesh"));
+		const FCortexCommandResult Result = FCortexBPClassDefaultsOps::ListSettableDefaults(Params);
+		TestFalse(TEXT("list_settable_defaults refuses a string property selector"), Result.bSuccess);
+		TestEqual(TEXT("string property selector should refuse with INVALID_FIELD"),
+			Result.ErrorCode, CortexErrorCodes::InvalidField);
+	}
+
+	{
+		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("asset_path"), BP->GetPathName());
+		TSharedPtr<FJsonObject> Selector = MakeShared<FJsonObject>();
+		Selector->SetBoolField(TEXT("Mesh"), true);
+		Params->SetObjectField(TEXT("properties"), Selector);
+		Params->SetBoolField(TEXT("include_values"), true);
+		const FCortexCommandResult Result = FCortexBPClassDefaultsOps::ListSettableDefaults(Params);
+		TestFalse(TEXT("list_settable_defaults refuses an object selector with include_values"), Result.bSuccess);
+		TestEqual(TEXT("object property selector should refuse with INVALID_FIELD"),
+			Result.ErrorCode, CortexErrorCodes::InvalidField);
+	}
+
+	{
+		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("asset_path"), BP->GetPathName());
+		Params->SetField(TEXT("properties"), MakeShared<FJsonValueNull>());
+		const FCortexCommandResult Result = FCortexBPClassDefaultsOps::ListInheritedProperties(Params);
+		TestFalse(TEXT("list_inherited_properties refuses a null property selector"), Result.bSuccess);
+		TestEqual(TEXT("null property selector should refuse with INVALID_FIELD"),
+			Result.ErrorCode, CortexErrorCodes::InvalidField);
+	}
+
+	// Controls are validated before any asset lookup: a resolvable path is never resolved or
+	// compiled, and a nonexistent path never reports a lookup failure.
+	{
+		const FString RawPath = FString::Printf(TEXT("/Game/Temp/CortexBPDiscoveryNoClass_%s"),
+			*FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8));
+		UPackage* RawPackage = CreatePackage(*RawPath);
+		UBlueprint* RawBlueprint = RawPackage
+			? NewObject<UBlueprint>(RawPackage, FName(*FPackageName::GetShortName(RawPath)),
+				RF_Public | RF_Standalone | RF_Transactional | RF_LoadCompleted)
+			: nullptr;
+		if (!TestNotNull(TEXT("compile-less discovery Blueprint fixture should be created"), RawBlueprint))
+		{
+			if (RawPackage)
+			{
+				RawPackage->MarkAsGarbage();
+			}
+		}
+		else
+		{
+			TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+			Params->SetStringField(TEXT("asset_path"), RawBlueprint->GetPathName());
+			Params->SetStringField(TEXT("include_values"), TEXT("yes"));
+			const FCortexCommandResult Result = FCortexBPClassDefaultsOps::ListSettableDefaults(Params);
+			TestFalse(TEXT("malformed control should refuse a Blueprint without a generated class"),
+				Result.bSuccess);
+			TestEqual(TEXT("malformed list control should refuse with INVALID_FIELD"),
+				Result.ErrorCode, CortexErrorCodes::InvalidField);
+			TestTrue(TEXT("malformed list control must not create a generated class"),
+				RawBlueprint->GeneratedClass.Get() == nullptr);
+
+			RawBlueprint->MarkAsGarbage();
+			RawPackage->MarkAsGarbage();
+		}
+	}
+
+	{
+		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("asset_path"), FString::Printf(TEXT("/Game/Temp/CortexBPDiscoveryMissing_%s"),
+			*FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8)));
+		Params->SetNumberField(TEXT("discovery_limit"), 0);
+		const FCortexCommandResult Result = FCortexBPClassDefaultsOps::ListInheritedProperties(Params);
+		TestFalse(TEXT("malformed list control should refuse a nonexistent path"), Result.bSuccess);
+		TestEqual(TEXT("malformed list control should refuse before lookup with INVALID_FIELD"),
+			Result.ErrorCode, CortexErrorCodes::InvalidField);
+	}
+
 	BP->MarkAsGarbage();
 	return true;
 }

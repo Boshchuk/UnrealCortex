@@ -38,11 +38,12 @@ toolkit/parent-repo documents — Task 17 owns those.
 All three reads — `get_class_defaults`, `list_settable_defaults`, `list_inherited_properties` — gain the
 same controls (`properties`, `include_values`, `include_members`, `discovery_offset`, `discovery_limit`).
 
-* **Parsing/refusals happen first**, before any property is admitted: a present field that is not a JSON
-  boolean (`include_values`, `include_members`) or not an integral JSON number in range
-  (`discovery_limit` 1..200, `discovery_offset` >= 0) refuses with `INVALID_FIELD`; a non-string
-  `properties` element refuses the same way. Field presence/type is read with
-  `FJsonObject::TryGetField`.
+* **Parsing/refusals happen first**, before any property is admitted and before any asset load or
+  Blueprint compile: a present field that is not a JSON boolean (`include_values`, `include_members`) or
+  not an integral JSON number in range (`discovery_limit` 1..200, `discovery_offset` >= 0) refuses with
+  `INVALID_FIELD`; a present `properties` that is not an array, or an array element that is not a string,
+  refuses the same way (it never degrades to an unfiltered read). Field presence/type is read with
+  `FJsonObject::TryGetField` / `HasField`.
 * **`include_values` default is context-dependent**: a nonempty `properties` selector on
   `get_class_defaults` defaults to `true` (effective-value read); an unfiltered read and both list reads
   default to `false` (metadata discovery). An explicit value always wins, so an explicit
@@ -114,6 +115,36 @@ Serial covering runs (one runner at a time), after the compile fix:
 Raw `Warning|Ensure|Fatal|Assertion` severity scan of the run logs: clean (no unexpected diagnostics).
 The staged fixtures create no disk assets, call no global GC and retire only their own dedicated
 package, so no package/directory-watcher warnings are expected or observed.
+
+## Post-review corrections (review round 1)
+
+Three controller-source-confirmed review findings were fixed minimally after the GREEN above; the
+covering filters must be re-observed (controller-owned) against this revision:
+
+1. **Present non-array `properties` degraded to an unfiltered read.** `ReadOptionalPropertySelector`
+   (shared by all three reads) now checks presence first and refuses a present non-array selector with
+   `INVALID_FIELD` (`FJsonObject::HasField` + `TryGetArrayField`); only absent means "no selector".
+2. **Controls were validated after asset loading.** Both entrypoints now parse the controls and the
+   selector immediately after the params/path presence check and before `LoadBlueprint`/`GetBlueprintCDO`,
+   so a malformed flag/limit/selector refuses with `INVALID_FIELD` instead of compiling the Blueprint or
+   reporting `BLUEPRINT_NOT_FOUND`/`COMPILE_FAILED`.
+3. **The MCP tool broke positional callers.** `get_class_defaults` restored the original
+   `(asset_path, properties, blueprint_path)` positional order and placed the four new controls after
+   `blueprint_path`; keyword use is unaffected.
+
+Targeted regressions added (all staged before this fix round):
+
+* Both `InvalidReadControlsRefuse` tests gained present string/object/null `properties` cases (including
+  `include_values=true` on one) requiring `INVALID_FIELD`.
+* Both tests gained a compile-less Blueprint fixture (dedicated package, `NewObject<UBlueprint>` with the
+  same public flags as `CreateBlueprint` but no generated class) plus a malformed control: the read must
+  refuse with `INVALID_FIELD` and must leave `GeneratedClass` null. The `get_class_defaults` case also
+  asserts the path resolves through `FCortexBPAssetOps::LoadBlueprint` **without compiling**, so the
+  fixture is a genuinely resolvable Blueprint that lacks a generated class.
+* Both tests gained a nonexistent-path + malformed-control case refusing with `INVALID_FIELD` (never
+  `BLUEPRINT_NOT_FOUND`), proving the refusal precedes the lookup.
+* `MCP/tests/test_class_defaults.py` gained the legacy three-positional call asserting normal asset-path
+  forwarding.
 
 ## Registered smoke (controller-owned)
 

@@ -15,11 +15,11 @@ def register_blueprint_class_defaults_tools(mcp, connection: UEConnection):
     def get_class_defaults(
         asset_path: str = "",
         properties: list[str] | None = None,
+        blueprint_path: str = "",
         include_values: bool | None = None,
         include_members: bool | None = None,
         discovery_offset: int | None = None,
         discovery_limit: int | None = None,
-        blueprint_path: str = "",
     ) -> str:
         """Read default properties from a Blueprint's Class Default Object (CDO).
 
@@ -30,9 +30,9 @@ def register_blueprint_class_defaults_tools(mcp, connection: UEConnection):
 
         Args:
             asset_path: Full asset path to the Blueprint (e.g., '/Game/Blueprints/BP_Character')
-            blueprint_path: Deprecated alias for asset_path.
             properties: Optional list of property paths to select. A nonempty list defaults
                 to an effective-value read; omit or pass an empty list for metadata discovery.
+            blueprint_path: Deprecated alias for asset_path.
             include_values: Include effective values. Defaults to true for a selected read
                 and false for discovery. Explicit false keeps a selected read metadata-only.
             include_members: Expand one level of struct member path/type metadata. Member

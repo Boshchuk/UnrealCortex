@@ -500,18 +500,27 @@ namespace
 		return true;
 	}
 
-	// Reads the optional 'properties' selector. Every element must be a string; a malformed selector
-	// refuses instead of silently reading the whole admitted population.
+	// Reads the optional 'properties' selector. A present 'properties' must be an array of strings; a
+	// non-array value or a non-string element refuses, never silently degrading to an unfiltered read.
 	static bool ReadOptionalPropertySelector(
 		const TSharedPtr<FJsonObject>& Params,
 		TArray<FString>& OutSelectors,
 		FCortexCommandResult& OutError)
 	{
-		const TArray<TSharedPtr<FJsonValue>>* Found = nullptr;
-		if (!Params || !Params->TryGetArrayField(TEXT("properties"), Found) || Found == nullptr)
+		if (!Params || !Params->HasField(TEXT("properties")))
 		{
 			return true;
 		}
+
+		const TArray<TSharedPtr<FJsonValue>>* Found = nullptr;
+		if (!Params->TryGetArrayField(TEXT("properties"), Found) || Found == nullptr)
+		{
+			OutError = FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidField,
+				TEXT("'properties' must be an array of strings"));
+			return false;
+		}
+
 		for (const TSharedPtr<FJsonValue>& Value : *Found)
 		{
 			if (!Value.IsValid() || Value->Type != EJson::String)
@@ -898,6 +907,21 @@ FCortexCommandResult FCortexBPClassDefaultsOps::ListDefaults(const TSharedPtr<FJ
 			TEXT("Missing or empty 'asset_path' field"));
 	}
 
+	// Read controls and the property selector are validated before any asset load or Blueprint compile,
+	// so a malformed selector refuses instead of loading, compiling or reporting a lookup failure.
+	FDiscoveryReadControls Controls;
+	FCortexCommandResult ControlError;
+	if (!ParseDiscoveryReadControls(Params, Controls, ControlError))
+	{
+		return ControlError;
+	}
+
+	TArray<FString> Selectors;
+	if (!ReadOptionalPropertySelector(Params, Selectors, ControlError))
+	{
+		return ControlError;
+	}
+
 	FString LoadError;
 	UBlueprint* Blueprint = FCortexBPAssetOps::LoadBlueprint(BlueprintPath, LoadError);
 	if (!Blueprint)
@@ -918,19 +942,6 @@ FCortexCommandResult FCortexBPClassDefaultsOps::ListDefaults(const TSharedPtr<FJ
 		return FCortexCommandRouter::Error(
 			CortexErrorCodes::CompileFailed,
 			TEXT("Blueprint generated class is missing"));
-	}
-
-	FDiscoveryReadControls Controls;
-	FCortexCommandResult ControlError;
-	if (!ParseDiscoveryReadControls(Params, Controls, ControlError))
-	{
-		return ControlError;
-	}
-
-	TArray<FString> Selectors;
-	if (!ReadOptionalPropertySelector(Params, Selectors, ControlError))
-	{
-		return ControlError;
 	}
 
 	const auto MakeNotFound = [GeneratedClass](const FString& Selector)
@@ -1058,6 +1069,21 @@ FCortexCommandResult FCortexBPClassDefaultsOps::GetClassDefaults(const TSharedPt
 			TEXT("Missing or empty 'asset_path' field"));
 	}
 
+	// Read controls and the property selector are validated before any asset load or Blueprint compile,
+	// so a malformed selector refuses instead of loading, compiling or reporting a lookup failure.
+	FDiscoveryReadControls Controls;
+	FCortexCommandResult ControlError;
+	if (!ParseDiscoveryReadControls(Params, Controls, ControlError))
+	{
+		return ControlError;
+	}
+
+	TArray<FString> Selectors;
+	if (!ReadOptionalPropertySelector(Params, Selectors, ControlError))
+	{
+		return ControlError;
+	}
+
 	FString LoadError;
 	UBlueprint* Blueprint = FCortexBPAssetOps::LoadBlueprint(BlueprintPath, LoadError);
 	if (!Blueprint)
@@ -1078,19 +1104,6 @@ FCortexCommandResult FCortexBPClassDefaultsOps::GetClassDefaults(const TSharedPt
 		return FCortexCommandRouter::Error(
 			CortexErrorCodes::CompileFailed,
 			TEXT("Blueprint generated class is missing"));
-	}
-
-	FDiscoveryReadControls Controls;
-	FCortexCommandResult ControlError;
-	if (!ParseDiscoveryReadControls(Params, Controls, ControlError))
-	{
-		return ControlError;
-	}
-
-	TArray<FString> Selectors;
-	if (!ReadOptionalPropertySelector(Params, Selectors, ControlError))
-	{
-		return ControlError;
 	}
 
 	const bool bDiscoveryMode = Selectors.Num() == 0;

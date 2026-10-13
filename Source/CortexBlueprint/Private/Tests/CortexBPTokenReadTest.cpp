@@ -11,6 +11,7 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
+#include "Operations/CortexBPAssetOps.h"
 #include "UObject/Class.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectHash.h"
@@ -712,6 +713,84 @@ bool FCortexBPTokenReadInvalidControlsTest::RunTest(const FString&)
 		Params->SetNumberField(TEXT("discovery_offset"), 1.5);
 		ExpectRefusal(TEXT("a fractional discovery_offset"),
 			Handler.Execute(TEXT("get_class_defaults"), Params));
+	}
+
+	// A present non-array selector must refuse instead of degrading to an unfiltered read.
+	{
+		TSharedPtr<FJsonObject> Params = TokenReadParams(Fixture.AssetPath);
+		Params->SetStringField(TEXT("properties"), TEXT("bReplicates"));
+		ExpectRefusal(TEXT("a string property selector"),
+			Handler.Execute(TEXT("get_class_defaults"), Params));
+	}
+
+	{
+		TSharedPtr<FJsonObject> Params = TokenReadParams(Fixture.AssetPath);
+		TSharedPtr<FJsonObject> Selector = MakeShared<FJsonObject>();
+		Selector->SetBoolField(TEXT("bReplicates"), true);
+		Params->SetObjectField(TEXT("properties"), Selector);
+		ExpectRefusal(TEXT("an object property selector"),
+			Handler.Execute(TEXT("get_class_defaults"), Params));
+	}
+
+	{
+		TSharedPtr<FJsonObject> Params = TokenReadParams(Fixture.AssetPath);
+		Params->SetField(TEXT("properties"), MakeShared<FJsonValueNull>());
+		ExpectRefusal(TEXT("a null property selector"),
+			Handler.Execute(TEXT("get_class_defaults"), Params));
+	}
+
+	// Even with values requested, a malformed selector must refuse rather than extract everything.
+	{
+		TSharedPtr<FJsonObject> Params = TokenReadParams(Fixture.AssetPath);
+		Params->SetStringField(TEXT("properties"), TEXT("bReplicates"));
+		Params->SetBoolField(TEXT("include_values"), true);
+		ExpectRefusal(TEXT("a malformed selector with include_values"),
+			Handler.Execute(TEXT("get_class_defaults"), Params));
+	}
+
+	// Controls are validated before any asset lookup: a resolvable path is never resolved or
+	// compiled, and a nonexistent path never reports a lookup failure.
+	{
+		const FString RawPath = TokenReadUniquePath(TEXT("NoClass"));
+		UPackage* RawPackage = CreatePackage(*RawPath);
+		UBlueprint* RawBlueprint = RawPackage
+			? NewObject<UBlueprint>(RawPackage, FName(*FPackageName::GetShortName(RawPath)),
+				RF_Public | RF_Standalone | RF_Transactional | RF_LoadCompleted)
+			: nullptr;
+		if (!TestNotNull(TEXT("compile-less Blueprint fixture should be created"), RawBlueprint))
+		{
+			if (RawPackage)
+			{
+				RawPackage->MarkAsGarbage();
+			}
+		}
+		else
+		{
+			FString ResolveError;
+			TestTrue(TEXT("compile-less Blueprint path should resolve to its object without compiling"),
+				FCortexBPAssetOps::LoadBlueprint(RawBlueprint->GetPathName(), ResolveError) == RawBlueprint);
+
+			TSharedPtr<FJsonObject> Params = TokenReadParams(RawBlueprint->GetPathName());
+			Params->SetStringField(TEXT("include_values"), TEXT("yes"));
+			const FCortexCommandResult Result = Handler.Execute(TEXT("get_class_defaults"), Params);
+			TestFalse(TEXT("malformed control should refuse for a Blueprint without a generated class"),
+				Result.bSuccess);
+			TestEqual(TEXT("malformed control should refuse with INVALID_FIELD"),
+				Result.ErrorCode, CortexErrorCodes::InvalidField);
+			TestTrue(TEXT("malformed control must not create a generated class"),
+				RawBlueprint->GeneratedClass.Get() == nullptr);
+
+			RetireTokenReadFixture(RawBlueprint);
+		}
+	}
+
+	{
+		TSharedPtr<FJsonObject> Params = TokenReadParams(TokenReadUniquePath(TEXT("Missing")));
+		Params->SetNumberField(TEXT("discovery_limit"), 0);
+		const FCortexCommandResult Result = Handler.Execute(TEXT("get_class_defaults"), Params);
+		TestFalse(TEXT("malformed control should refuse a nonexistent path"), Result.bSuccess);
+		TestEqual(TEXT("malformed control should refuse before lookup with INVALID_FIELD"),
+			Result.ErrorCode, CortexErrorCodes::InvalidField);
 	}
 
 	return true;
