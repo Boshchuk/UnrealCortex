@@ -130,3 +130,14 @@ measurement.
   startup Zen recovery warnings (lines 1063–1064) and shutdown Epic telemetry warnings (2331–2332) —
   no authoring diagnostics — so this is **not** a zero-warning manual-editor claim.
 * The parent-repo `docs/systems/python-mcp.md` change is scoped local (not committed with the plugin).
+
+## Commit identity
+
+* `42700f5c849965536d4054b1e9b7cd8f0d3118e1` — "Task2: names-only router descriptions and optional
+  startup toolsets" (22 files: `capabilities.py`, `server.py`, the composite/standalone/Reflect
+  descriptions, `test_capabilities.py`, `test_tool_output.py`, the deletion of
+  `test_composite_docstrings.py`, and this record; parent
+  `59bb68352f2df39dc1165a06c585a62fc8faff2f`).
+* Committed by explicit path only inside the `Plugins/UnrealCortex` submodule; no parent-repo commit,
+  no gitlink update, no unrelated path. The parent-repo `docs/systems/python-mcp.md` and the
+  git-ignored task workspace (report/ledger/basetemps) stay local.
