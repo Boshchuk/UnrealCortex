@@ -3,9 +3,11 @@
 **Date:** 2026-10-13
 **Repository:** `Plugins/UnrealCortex` (plugin repo; `MCP/` is part of this repo)
 **Branch:** `feat/issue-180-token-efficiency`
-**Base revision:** `ec965e6` (Task 13 completion + its fix round; the last committed HEAD when this
-task's implementation was written). The RED staging and this task's implementation are uncommitted in
-the working tree.
+**Base revision:** `ec965e6` (Task 13 completion + its fix round) — the last committed HEAD when this
+task's implementation was written. The implementation and its RED staging were subsequently committed
+by the controller as `ebfbbdd` ("Task7: ownership-safe inherited default delta", on top of Task 16's
+`c5df2e0`). The controller-confirmed review fix round recorded at the end of this document is
+uncommitted on top of `ebfbbdd`.
 **Owner:** Task 7 implementer (`ImplTask7Delta`) — re-application of the parked Core serializer
 tests, the production implementation, the compile fix-up and this record. All builds, test runs and
 smokes are controller-owned and are recorded here with their observed log identity.
@@ -35,6 +37,13 @@ regression `Cortex.Blueprint.TokenRead.Get.OwnedInheritedDelta` in
 `bReplicates=true`, `InheritedEqual=7`, `InheritedZero=5`, `InheritedText`, non-null
 `InheritedObject`). Not part of this task: the generated MCP fallback/capabilities fixtures and the
 toolkit/root Level documents — Task 17 owns those.
+
+Fix round 1 (uncommitted on top of `ebfbbdd`; 5 files, +270/−4): the completeness classification and
+the echo-level `echo_complete` field in `CortexBPClassDefaultsOps.cpp`, the `changed_only` command
+description, the README delta-completeness sentence, the ten-type nested struct chain plus
+`ACortexBPDeltaParentActor::Deep` in `CortexBPTokenReadDeltaFixture.h`, and the
+`Cortex.Blueprint.TokenRead.Get.DepthLimitedDeltaIsNotEqual` regression (with its fixture-constructor
+seed) in `CortexBPTokenReadTest.cpp`.
 
 ## Contract implemented
 
@@ -85,6 +94,16 @@ toolkit/root Level documents — Task 17 owns those.
   * `changed_only=true` with an explicit `include_values=false` refuses `INVALID_FIELD` before any
     asset load, compile or lookup. An unstated `include_values` cannot turn a delta into metadata: it
     resolves to values.
+  * Completeness classification (review fix round 1): a root is listed in `omitted_equal_properties`
+    only when its serialization was complete (no issue and not partial) **and** truly equal. A root
+    whose comparison could not be completed — a depth-limited struct comparison returns a
+    `MAX_DEPTH_EXCEEDED` issue with `bPartial` and no value — is never an omission: it keeps its
+    entry, carries its own `issues`, is flagged `incomplete: true`, sets the new echo-level
+    `echo_complete=false`, and presents **no** `value` (the entry builder is asked for values only when
+    the comparison produced a usable one, so a failed comparison is never masked by an effective value
+    or by a partial serialization's null placeholder). A usable but non-authoritative value (for
+    example an FText descriptor without namespace/key metadata) is still presented and flagged; no
+    existing field changes value or shape.
 * No `NonDefaultPropertiesToJson`, no private serializer helper, and no member-expansion path is used
   by the delta view.
 
@@ -143,6 +162,11 @@ scan are two unrelated boilerplate lines (`MapCheck: Map check complete: 0 Error
 and a `LogDesktopPlatform: Found project "…/WarningGateEvidence/…" in recently opened files`
 recent-projects line). No unexpected diagnostic of any severity.
 
+These two runs are for the **pre-fix revision** that became `ebfbbdd`; fix round 1 changes the delta
+classification and adds a Blueprint test, so both filters must be re-run on the new revision and their
+logs recorded here. The new expectation for `Cortex.Blueprint.TokenRead+` is 7 tests (the 6 above plus
+`Get.DepthLimitedDeltaIsNotEqual`); `Cortex.Core.Serializer+` is unchanged at 52.
+
 Builds (controller-owned, recorded here for provenance):
 
 * `task-7-16-green-build2.log` — the successful build of the implementation: 0 errors, 0 warnings.
@@ -175,6 +199,48 @@ Builds (controller-owned, recorded here for provenance):
    `StaticFindObject(..., false)` calls at 1665/1701/1755, i.e. they exist at the base revision and
    outside this task's added region. The final successful build (`task-7-16-green-build2.log`) and both
    run logs are free of them.
+
+## Review fix round 1 (controller-confirmed P2)
+
+Finding: the delta branch treated every absent serialized value as an equal-to-baseline omission, but
+`PropertyDifferenceToJson` also returns no value when the comparison could not be completed — a
+depth-limited struct comparison returns `MAX_DEPTH_EXCEEDED` with `bPartial` and no value. Such roots
+were therefore falsely listed as equal omissions, which is a dishonest equality claim.
+
+Fix (Blueprint delta branch only, additive):
+
+* The omission path is gated on an authoritative result:
+  `Serialized.Issues.Num() == 0 && !Serialized.bPartial && !Serialized.JsonValue.IsValid()`.
+* A non-authoritative result keeps its entry, presents **no** `value`, is flagged `incomplete: true`,
+  carries its own `issues` (canonical `SerializationIssuesToJson` shape), and clears the new
+  echo-level `echo_complete` flag. The entry builder is asked for values only when the comparison
+  produced a usable one, so a failed comparison cannot be masked by an effective value or by a partial
+  serialization's null placeholder.
+* A non-authoritative result that still produced a *usable* value keeps that value and is flagged the
+  same way (for example an FText descriptor without namespace/key metadata, or an identity-only object
+  reference); no existing field changes value or shape, so every staged assertion is untouched.
+* `echo_complete` is always emitted in a delta read: `true` only when every examined root's
+  serialization was authoritative.
+
+Second pass of this round: the first pass asked the entry builder for values unconditionally, so an
+entry whose comparison produced none still carried an effective value and the new regression's
+`an incomplete comparison presents no value` assertion failed. The controller observed
+`Cortex.Blueprint.TokenRead+` 6/7 with `…Get.DepthLimitedDeltaIsNotEqual` failing at
+`CortexBPTokenReadTest.cpp:1287`; value extraction is now driven by the comparison's own result.
+
+Regression added: `Cortex.Blueprint.TokenRead.Get.DepthLimitedDeltaIsNotEqual`. The fixture header
+gains a ten-type nested struct chain (`FCortexBPDeltaLevel1`..`FCortexBPDeltaLevel10`, the innermost
+holding `FString Leaf`) exposed as `ACortexBPDeltaParentActor::Deep`, seeded deterministically by the
+fixture constructor. The child overrides only that innermost leaf through the production setter
+(`Deep.Next…Next.Leaf`, nine `Next` segments) — ten struct levels below the CDO root property, past the
+delta comparison depth of 8 — and the test asserts `echo_complete == false`, that `Deep` is **not** in
+`omitted_equal_properties` while the genuinely equal `InheritedEqual` still is (and stays out of
+`properties`), and that the `Deep` entry is present, flagged `incomplete`, carries no `value` field and
+reports a `MAX_DEPTH_EXCEEDED` issue.
+
+Expected observation for this round: `Cortex.Blueprint.TokenRead+` 7/7 and
+`Cortex.Core.Serializer+` 52/52 (both re-run on the new revision), raw-severity clean; the controller
+records the new logs.
 
 ## Behaviour preserved / pins ruled on
 

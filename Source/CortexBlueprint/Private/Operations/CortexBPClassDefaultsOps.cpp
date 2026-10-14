@@ -1215,6 +1215,8 @@ FCortexCommandResult FCortexBPClassDefaultsOps::GetClassDefaults(const TSharedPt
 	bool bPaged = false;
 	TArray<TSharedPtr<FJsonValue>> OmittedEqualProperties;
 	TArray<FCortexSerializationIssue> DeltaIssues;
+	// True while every examined root reached a complete verdict: a differing value, or a proven equality.
+	bool bEchoComplete = true;
 
 	if (Controls.bChangedOnly)
 	{
@@ -1236,18 +1238,44 @@ FCortexCommandResult FCortexBPClassDefaultsOps::GetClassDefaults(const TSharedPt
 				: FCortexSerializer::PropertyToJsonDeep(ValueProperty, ValuePtr, DeltaPolicy, Key);
 			DeltaIssues.Append(Serialized.Issues);
 
-			if (!Serialized.JsonValue.IsValid())
+			// A serialization is authoritative only when it carried no issue and no degraded or partial
+			// state. An absent value from a complete serialization means the root genuinely equals its
+			// baseline; an absent value from an incomplete one (for example a depth-limited struct
+			// comparison) means the comparison could not be completed and must never read as equality.
+			const bool bComplete = Serialized.Issues.Num() == 0 && !Serialized.bPartial;
+			if (bComplete && !Serialized.JsonValue.IsValid())
 			{
 				// An equal-to-baseline value is an explicit omission, never a silently missing field.
 				OmittedEqualProperties.Add(MakeShared<FJsonValueString>(Key));
 				return;
 			}
 
+			// A value is only reported when the serialization actually produced one: a null that came with
+			// an issue or a partial state is a truncation placeholder (depth-limited or unsupported), not
+			// the property's value, so it is never presented as the delta value.
+			const bool bUsableValue = Serialized.JsonValue.IsValid()
+				&& (!Serialized.JsonValue->IsNull() || bComplete);
+
 			// Member expansion is refused together with changed_only, so a delta entry never mixes
-			// effective struct members with a delta value.
+			// effective struct members with a delta value. Values are requested from the entry builder
+			// only when the comparison produced a usable one, so an incomplete comparison cannot smuggle
+			// an effective value in place of the delta value it failed to produce.
 			TSharedPtr<FJsonObject> Entry =
-				BuildDiscoveryPropertyInfo(ValueProperty, ValuePtr, true, /*bIncludeMembers=*/false);
-			Entry->SetField(TEXT("value"), Serialized.JsonValue);
+				BuildDiscoveryPropertyInfo(ValueProperty, ValuePtr, bUsableValue, /*bIncludeMembers=*/false);
+			if (bUsableValue)
+			{
+				Entry->SetField(TEXT("value"), Serialized.JsonValue);
+			}
+			if (!bComplete)
+			{
+				// The entry keeps its own issues and is flagged incomplete, and the echo declares itself
+				// incomplete, so an incomplete comparison is never presented as equality and never claims a
+				// value it could not produce.
+				bEchoComplete = false;
+				Entry->SetBoolField(TEXT("incomplete"), true);
+				Entry->SetArrayField(TEXT("issues"), FCortexSerializer::SerializationIssuesToJson(Serialized.Issues));
+			}
+
 			PropertiesObj->SetObjectField(Key, Entry);
 			++Count;
 		};
@@ -1378,6 +1406,7 @@ FCortexCommandResult FCortexBPClassDefaultsOps::GetClassDefaults(const TSharedPt
 		Data->SetStringField(TEXT("value_mode"), TEXT("inherited_delta"));
 		Data->SetStringField(TEXT("baseline_class"), ParentClassName);
 		Data->SetBoolField(TEXT("effective_values_complete"), false);
+		Data->SetBoolField(TEXT("echo_complete"), bEchoComplete);
 		Data->SetArrayField(TEXT("omitted_equal_properties"), OmittedEqualProperties);
 		if (DeltaIssues.Num() > 0)
 		{

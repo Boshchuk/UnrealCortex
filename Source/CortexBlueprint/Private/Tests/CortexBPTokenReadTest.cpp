@@ -910,6 +910,10 @@ ACortexBPDeltaParentActor::ACortexBPDeltaParentActor()
 	// with an explicit null and still differ from the parent.
 	UObject* const NonNullBaseline = UObject::StaticClass();
 	InheritedObject = NonNullBaseline;
+
+	// A deterministic parent value for the innermost leaf of the depth chain, so the child's override of
+	// that leaf genuinely differs and the delta can only report an incomplete comparison for it.
+	Deep.Next.Next.Next.Next.Next.Next.Next.Next.Next.Leaf = TEXT("parent deep leaf");
 }
 
 namespace
@@ -1161,6 +1165,148 @@ bool FCortexBPTokenReadInheritedDeltaTest::RunTest(const FString&)
 					TokenReadDeltaListsName(*SelectedOmitted, TEXT("InheritedEqual")));
 			}
 		}
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexBPTokenReadIncompleteDeltaTest,
+	"Cortex.Blueprint.TokenRead.Get.DepthLimitedDeltaIsNotEqual",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexBPTokenReadIncompleteDeltaTest::RunTest(const FString&)
+{
+	// Same genuine parent/child generated-class chain, but the only value the child changes is the
+	// innermost leaf of a struct chain that is deeper than the delta comparison depth. Nothing else in
+	// the fixture differs, so the equal roots stay equal and the deep chain is the one comparison that
+	// cannot be completed.
+	FTokenReadScopedFixture ParentFixture;
+	FTokenReadScopedFixture ChildFixture;
+	FCortexBPCommandHandler Handler;
+
+	UBlueprint* ParentBlueprint = ParentFixture.Create(
+		ACortexBPDeltaParentActor::StaticClass(), TokenReadUniquePath(TEXT("DepthParent")));
+	if (!TestNotNull(TEXT("depth delta parent fixture should be created"), ParentBlueprint))
+	{
+		return true;
+	}
+	UClass* ParentGeneratedClass = ParentBlueprint->GeneratedClass;
+	if (!TestNotNull(TEXT("depth delta parent should expose a generated class"), ParentGeneratedClass))
+	{
+		return true;
+	}
+
+	UBlueprint* ChildBlueprint = ChildFixture.Create(
+		ParentGeneratedClass, TokenReadUniquePath(TEXT("DepthChild")));
+	if (!TestNotNull(TEXT("depth delta child fixture should be created"), ChildBlueprint))
+	{
+		return true;
+	}
+	UClass* ChildGeneratedClass = ChildBlueprint->GeneratedClass;
+	if (!TestNotNull(TEXT("depth delta child should expose a generated class"), ChildGeneratedClass))
+	{
+		return true;
+	}
+
+	ACortexBPDeltaParentActor* ParentCDO =
+		Cast<ACortexBPDeltaParentActor>(ParentGeneratedClass->GetDefaultObject());
+	if (!TestNotNull(TEXT("depth delta parent should expose a fixture actor CDO"), ParentCDO))
+	{
+		return true;
+	}
+	ACortexBPDeltaParentActor* ChildCDO =
+		Cast<ACortexBPDeltaParentActor>(ChildGeneratedClass->GetDefaultObject());
+	if (!TestNotNull(TEXT("depth delta child should expose a fixture actor CDO"), ChildCDO))
+	{
+		return true;
+	}
+	TestEqual(TEXT("the parent baseline seeds the deep leaf"),
+		ParentCDO->Deep.Next.Next.Next.Next.Next.Next.Next.Next.Next.Leaf,
+		FString(TEXT("parent deep leaf")));
+
+	// The child overrides only that innermost leaf, nine struct levels below the CDO root property,
+	// through the production setter.
+	TSharedPtr<FJsonObject> OverrideProperties = MakeShared<FJsonObject>();
+	OverrideProperties->SetStringField(
+		TEXT("Deep.Next.Next.Next.Next.Next.Next.Next.Next.Next.Leaf"),
+		TEXT("child deep leaf"));
+	TSharedPtr<FJsonObject> OverrideParams = TokenReadParams(ChildFixture.AssetPath);
+	OverrideParams->SetObjectField(TEXT("properties"), OverrideProperties);
+	OverrideParams->SetBoolField(TEXT("compile"), false);
+	OverrideParams->SetBoolField(TEXT("save"), false);
+	const FCortexCommandResult OverrideResult = Handler.Execute(TEXT("set_class_defaults"), OverrideParams);
+	if (!TestTrue(TEXT("the deep leaf override should apply"), OverrideResult.bSuccess))
+	{
+		return true;
+	}
+	TestEqual(TEXT("the deep leaf override should change the child CDO"),
+		ChildCDO->Deep.Next.Next.Next.Next.Next.Next.Next.Next.Next.Leaf,
+		FString(TEXT("child deep leaf")));
+
+	TSharedPtr<FJsonObject> DeltaParams = TokenReadParams(ChildFixture.AssetPath);
+	DeltaParams->SetBoolField(TEXT("changed_only"), true);
+	DeltaParams->SetBoolField(TEXT("include_values"), true);
+	const FCortexCommandResult Delta = Handler.Execute(TEXT("get_class_defaults"), DeltaParams);
+	if (!TestTrue(TEXT("depth-limited delta read should succeed"), Delta.bSuccess) || !Delta.Data.IsValid())
+	{
+		return true;
+	}
+
+	// The echo declares itself incomplete, because the deep comparison could not be completed.
+	bool bEchoComplete = true;
+	TestTrue(TEXT("the delta echo declares its completeness"),
+		Delta.Data->TryGetBoolField(TEXT("echo_complete"), bEchoComplete));
+	TestFalse(TEXT("a depth-limited comparison makes the echo incomplete"), bEchoComplete);
+
+	const TArray<TSharedPtr<FJsonValue>>* Omitted = nullptr;
+	if (TestTrue(TEXT("the delta lists omitted equal properties"),
+		Delta.Data->TryGetArrayField(TEXT("omitted_equal_properties"), Omitted) && Omitted != nullptr))
+	{
+		// The genuinely different deep chain is never claimed to be equal to its baseline...
+		TestFalse(TEXT("a depth-limited differing root is not an equal omission"),
+			TokenReadDeltaListsName(*Omitted, TEXT("Deep")));
+		// ...while a truly equal inherited root in the same read still is.
+		TestTrue(TEXT("a truly equal inherited root is still an equal omission"),
+			TokenReadDeltaListsName(*Omitted, TEXT("InheritedEqual")));
+	}
+
+	const TSharedPtr<FJsonObject>* Properties = nullptr;
+	if (TestTrue(TEXT("depth-limited delta should expose properties"),
+		Delta.Data->TryGetObjectField(TEXT("properties"), Properties) && Properties != nullptr))
+	{
+		const TSharedPtr<FJsonObject>* DeepEntry = nullptr;
+		if (TestTrue(TEXT("the depth-limited root is reported"),
+			(*Properties)->TryGetObjectField(TEXT("Deep"), DeepEntry) && DeepEntry != nullptr))
+		{
+			TestTrue(TEXT("the incomplete entry declares itself incomplete"),
+				(*DeepEntry)->HasField(TEXT("incomplete")) && (*DeepEntry)->GetBoolField(TEXT("incomplete")));
+			TestFalse(TEXT("an incomplete comparison presents no value"),
+				(*DeepEntry)->HasField(TEXT("value")));
+
+			const TArray<TSharedPtr<FJsonValue>>* EntryIssues = nullptr;
+			if (TestTrue(TEXT("the incomplete entry carries its issues"),
+				(*DeepEntry)->TryGetArrayField(TEXT("issues"), EntryIssues) && EntryIssues != nullptr))
+			{
+				bool bFoundDepthIssue = false;
+				for (const TSharedPtr<FJsonValue>& Issue : *EntryIssues)
+				{
+					if (!Issue.IsValid() || Issue->Type != EJson::Object)
+					{
+						continue;
+					}
+					FString Code;
+					bFoundDepthIssue = bFoundDepthIssue
+						|| (Issue->AsObject()->TryGetStringField(TEXT("code"), Code)
+							&& Code == TEXT("MAX_DEPTH_EXCEEDED"));
+				}
+				TestTrue(TEXT("the incomplete entry reports the canonical depth-limit issue"), bFoundDepthIssue);
+			}
+		}
+
+		// A genuinely equal inherited root is never reported as a value.
+		TestFalse(TEXT("an equal inherited root is not reported as a delta value"),
+			(*Properties)->HasField(TEXT("InheritedEqual")));
 	}
 
 	return true;
