@@ -67,22 +67,7 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::CreateAnimation(
     WBP->Modify();
 
     // Preserve the compiler's empty-map initialization before adding the first tracked identity.
-    if (WBP->WidgetVariableNameToGuidMap.IsEmpty())
-    {
-        WBP->ForEachSourceWidget([WBP](UWidget* Widget)
-        {
-            WBP->WidgetVariableNameToGuidMap.Add(
-                Widget->GetFName(), FGuid::NewDeterministicGuid(Widget->GetPathName()));
-        });
-        for (UWidgetAnimation* Existing : WBP->Animations)
-        {
-            if (Existing)
-            {
-                WBP->WidgetVariableNameToGuidMap.Add(
-                    Existing->GetFName(), FGuid::NewDeterministicGuid(Existing->GetPathName()));
-            }
-        }
-    }
+    CortexUMGUtils::InitializeLegacyIdentityMap(WBP);
 
     UWidgetAnimation* NewAnim = NewObject<UWidgetAnimation>(WBP, RequestedName, RF_Transactional);
     UMovieScene* MovieScene = NewObject<UMovieScene>(NewAnim, RequestedName);

@@ -420,6 +420,44 @@ FString CaptureNativeGraph(UEdGraph* Graph, const TSet<FGuid>* Filter = nullptr)
 }
 
 /**
+ * Ordered identity enumeration of one Blueprint: every graph GUID, every node GUID and class, every
+ * pin's stable `PinId` with its name, direction and default, then every link in the order it appears
+ * in each pin's `LinkedTo`. `CaptureNativeGraph` sorts its records, so it cannot see a reordered link
+ * list; this enumeration is the ordered oracle a recovery rollback is measured against.
+ */
+FString CaptureOrderedEnumeration(UBlueprint* Blueprint)
+{
+	TArray<FString> Enumeration;
+	if (!Blueprint) return FString();
+	TArray<UEdGraph*> Graphs;
+	Blueprint->GetAllGraphs(Graphs);
+	for (UEdGraph* Graph : Graphs)
+	{
+		if (!Graph) continue;
+		Enumeration.Add(TEXT("graph|") + Graph->GraphGuid.ToString());
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (!Node) continue;
+			Enumeration.Add(TEXT("node|") + Node->NodeGuid.ToString() + TEXT("|") + Node->GetClass()->GetName());
+			for (UEdGraphPin* Pin : Node->Pins)
+			{
+				if (!Pin) continue;
+				Enumeration.Add(TEXT("pin|") + Pin->PinId.ToString() + TEXT("|") + Pin->PinName.ToString()
+					+ TEXT("|") + (Pin->Direction == EGPD_Input ? TEXT("in") : TEXT("out"))
+					+ TEXT("|") + Pin->DefaultValue
+					+ TEXT("|") + (Pin->DefaultObject ? Pin->DefaultObject->GetPathName() : FString()));
+				for (UEdGraphPin* Linked : Pin->LinkedTo)
+					Enumeration.Add(Linked && Linked->GetOwningNode()
+						? TEXT("link|") + Linked->GetOwningNode()->NodeGuid.ToString() + TEXT("|")
+							+ Linked->PinId.ToString() + TEXT("|") + Linked->PinName.ToString()
+						: TEXT("link|null"));
+			}
+		}
+	}
+	return FString::Join(Enumeration, TEXT("\n"));
+}
+
+/**
  * Two-stage reviewed retirement request for an arbitrary entry set: preview, echo the published
  * removable set, then approve it. `OutApproved` is the approved set the reviewed preview published.
  */
@@ -6655,34 +6693,11 @@ bool FCortexGraphMigrationRetireClosedOrphanTest::RunTest(const FString& Paramet
 	TestEqual(TEXT("all twelve class-specific proofs published"), JsonStringArray(
 		FCortexGraphMigrationOps::MakeRetirementInventory(Preview.RetirementPlan), TEXT("orphan_component_nodes")).Num(), 12);
 	TestTrue(TEXT("compiled statements and generated function require compilation"), Preview.RetirementPlan->GetBoolField(TEXT("requires_compile")));
-	auto CaptureEnumeration = [&]()
-	{
-		TArray<FString> Enumeration;
-		TArray<UEdGraph*> Graphs;
-		Fixture.Blueprint->GetAllGraphs(Graphs);
-		for (UEdGraph* Graph : Graphs)
-		{
-			if (!Graph) continue;
-			Enumeration.Add(TEXT("graph|") + Graph->GraphGuid.ToString());
-			for (UEdGraphNode* Node : Graph->Nodes)
-			{
-				if (!Node) continue;
-				Enumeration.Add(TEXT("node|") + Node->NodeGuid.ToString() + TEXT("|") + Node->GetClass()->GetName());
-				for (UEdGraphPin* Pin : Node->Pins)
-				{
-					if (!Pin) continue;
-					Enumeration.Add(TEXT("pin|") + Pin->PinId.ToString() + TEXT("|") + Pin->PinName.ToString());
-					for (UEdGraphPin* Linked : Pin->LinkedTo)
-						Enumeration.Add(Linked && Linked->GetOwningNode()
-							? TEXT("link|") + Linked->GetOwningNode()->NodeGuid.ToString() + TEXT("|")
-								+ Linked->PinId.ToString() + TEXT("|") + Linked->PinName.ToString()
-							: TEXT("link|null"));
-				}
-			}
-		}
-		return Enumeration;
-	};
-	const TArray<FString> OriginalEnumeration = CaptureEnumeration();
+	// The ordered oracle the closed ordinary component is rolled back against: it is the same
+	// enumeration every recovery assertion below compares, so pin identity, defaults and the
+	// reciprocal link order are covered by one capture.
+	auto CaptureEnumeration = [&]() { return CaptureOrderedEnumeration(Fixture.Blueprint); };
+	const FString OriginalEnumeration = CaptureEnumeration();
 	Router->NodePosX++;
 	const FString StaleHash = FCortexGraphPatchState::ComputeFingerprint(Fixture.Blueprint)->GetStringField(TEXT("graph_authoring_hash"));
 	const int32 StaleCount = Fixture.Graph->Nodes.Num();
@@ -6713,6 +6728,67 @@ bool FCortexGraphMigrationRetireClosedOrphanTest::RunTest(const FString& Paramet
 	TestTrue(FString::Printf(TEXT("restored component preserves the reviewed apply precondition: %s"),
 		*RecoveryError.ErrorMessage), bRecoveryValid);
 	TestEqual(TEXT("rollback preserves the exact reviewed validation token"), RecoveryPreview.ValidationHash, Preview.ValidationHash);
+
+	// The fault above fires during the apply phase, before the target compile. This one is a retirement
+	// readback seam, and `Execute` only reaches the retirement readback after `CompileTargetBlueprint`
+	// succeeded (`compile=true` here), immediately after the class-specific generated-artefact
+	// comparison this fixture's plan requires (`requires_compile`, asserted above). The injected
+	// failure is therefore a genuine post-target-compile one, and the assertions below prove the
+	// compile/recovery-compile phases really ran rather than inferring them from the wiring.
+	FOperations PostCompileOperations;
+	PostCompileOperations.Begin();
+	FCortexGraphPatchOutcome PostCompileOutcome;
+	Error = FCortexCommandResult();
+	FCortexGraphMigrationOps::SetRetirementReadbackFaultForTesting(TEXT("retire_after_binding"));
+	const bool bPostCompileApplied = FCortexGraphPatchOps::Execute(Fixture.Blueprint, Request, PostCompileOutcome, Error);
+	FCortexGraphMigrationOps::ClearRetirementReadbackFaultForTesting();
+	PostCompileOperations.End();
+	TestFalse(TEXT("the post-target-compile readback fault refuses the closed ordinary component"),
+		bPostCompileApplied);
+	TestEqual(TEXT("the post-target-compile failure is the retirement readback mismatch"),
+		PostCompileOutcome.ReadbackStatus, FString(TEXT("mismatched")));
+	TestEqual(TEXT("the target compile really ran before the injected failure"),
+		PostCompileOutcome.TargetCompileCount, 1);
+	TestEqual(TEXT("the target compile was observed independently of the outcome"),
+		PostCompileOperations.TargetCompiles, 1);
+	TestEqual(TEXT("the target compile completed before the injected failure"),
+		PostCompileOutcome.CompileStatus, FString(TEXT("compiled")));
+	TestEqual(TEXT("the failure was raised after the apply phase, not as an apply-phase refusal"),
+		PostCompileOutcome.ApplyStatus, FString(TEXT("applied")));
+	TestEqual(TEXT("the post-target-compile failure performed the recovery compilation"),
+		PostCompileOutcome.RecoveryCompileCount, 1);
+	TestEqual(TEXT("the recovery compilation was observed independently of the outcome"),
+		PostCompileOperations.RecoveryCompiles, 1);
+	TestEqual(TEXT("the post-target-compile rollback restores the transaction"),
+		PostCompileOutcome.RollbackStatus, FString(TEXT("restored")));
+	TestFalse(TEXT("the restored post-compile asset is not blocked"), PostCompileOutcome.bBlocked);
+	TestEqual(TEXT("post-compile rollback restores the exact ordered node, pin, default and reciprocal link enumeration"),
+		CaptureEnumeration(), OriginalEnumeration);
+	TestEqual(TEXT("post-compile rollback restores the exact native graph snapshot"),
+		CaptureNativeGraph(Fixture.Graph), BeforeRemoval);
+	TestEqual(TEXT("post-compile rollback restores the dirty baseline"), Fixture.Package->IsDirty(), bDirtyBeforeRemoval);
+	TestTrue(TEXT("post-compile rollback preserves the original disk bytes"),
+		SameBytes(DiskBefore, ReadBytes(Fixture.Filename())));
+	for (const FString& GuidText : Approved)
+	{
+		FGuid Guid;
+		FGuid::Parse(GuidText, Guid);
+		TestNotNull(TEXT("post-compile rollback restores every reviewed identity"),
+			FCortexGraphMigrationOps::FindNodeByGuid(Fixture.Blueprint, Guid));
+	}
+	FCortexGraphPreparedPatch PostCompilePreview;
+	FCortexCommandResult PostCompileError;
+	const bool bPostCompileValid = FCortexGraphPatchOps::Preflight(
+		Fixture.Blueprint, Request, PostCompilePreview, PostCompileError);
+	TestTrue(FString::Printf(TEXT("the post-compile rollback preserves the reviewed apply precondition: %s"),
+		*PostCompileError.ErrorMessage), bPostCompileValid);
+	TestEqual(TEXT("the post-compile rollback preserves the exact reviewed validation token"),
+		PostCompilePreview.ValidationHash, Preview.ValidationHash);
+	TestEqual(TEXT("the request still carries the reviewed validation token"),
+		Request->GetStringField(TEXT("expected_validation_hash")), Preview.ValidationHash);
+
+	// The original reviewed token is carried by the unchanged request into the apply below, so a
+	// successful removal here proves the token still authorizes the same intent after the recovery.
 	const bool bApplied = FCortexGraphPatchOps::Execute(Fixture.Blueprint, Request, Outcome, Error);
 	FString ErrorDetails;
 	if (Error.ErrorDetails.IsValid())
@@ -6819,6 +6895,62 @@ bool FCortexGraphMigrationRetireClosedOrphanTest::RunTest(const FString& Paramet
 	TestEqual(TEXT("orphan-only inventory publishes no selected entries"),
 		JsonStringArray(OnlyPreview.RetirementPlan, TEXT("selected_entry_guids")).Num(), 0);
 	TestEqual(TEXT("orphan-only exact approval includes only closed inventory"), OnlyApproved.Num(), 2);
+	// The entryless (omitted `entry_node_guids`) inventory is put through the same post-target-compile
+	// readback failure and recovery the closed component uses, so an inventory with no selected entry
+	// is proven recoverable rather than only admissible.
+	const FString OnlyEnumeration = CaptureOrderedEnumeration(OrphanOnly.Blueprint);
+	const bool bOnlyDirtyBefore = OrphanOnly.Package->IsDirty();
+	FOperations OnlyPostCompileOperations;
+	OnlyPostCompileOperations.Begin();
+	FCortexGraphPatchOutcome OnlyPostCompileOutcome;
+	OnlyError = FCortexCommandResult();
+	FCortexGraphMigrationOps::SetRetirementReadbackFaultForTesting(TEXT("retire_after_removal"));
+	const bool bOnlyPostCompileApplied = FCortexGraphPatchOps::Execute(
+		OrphanOnly.Blueprint, OnlyRequest, OnlyPostCompileOutcome, OnlyError);
+	FCortexGraphMigrationOps::ClearRetirementReadbackFaultForTesting();
+	OnlyPostCompileOperations.End();
+	TestFalse(TEXT("the entryless post-target-compile readback fault refuses the orphan-only removal"),
+		bOnlyPostCompileApplied);
+	TestEqual(TEXT("the entryless post-target-compile failure is the retirement readback mismatch"),
+		OnlyPostCompileOutcome.ReadbackStatus, FString(TEXT("mismatched")));
+	TestEqual(TEXT("the entryless target compile really ran before the injected failure"),
+		OnlyPostCompileOutcome.TargetCompileCount, 1);
+	TestEqual(TEXT("the entryless target compile was observed independently of the outcome"),
+		OnlyPostCompileOperations.TargetCompiles, 1);
+	TestEqual(TEXT("the entryless target compile completed before the injected failure"),
+		OnlyPostCompileOutcome.CompileStatus, FString(TEXT("compiled")));
+	TestEqual(TEXT("the entryless failure was raised after the apply phase"),
+		OnlyPostCompileOutcome.ApplyStatus, FString(TEXT("applied")));
+	TestEqual(TEXT("the entryless post-target-compile failure performed the recovery compilation"),
+		OnlyPostCompileOutcome.RecoveryCompileCount, 1);
+	TestEqual(TEXT("the entryless recovery compilation was observed independently of the outcome"),
+		OnlyPostCompileOperations.RecoveryCompiles, 1);
+	TestEqual(TEXT("the entryless post-target-compile rollback restores the transaction"),
+		OnlyPostCompileOutcome.RollbackStatus, FString(TEXT("restored")));
+	TestFalse(TEXT("the entryless restored post-compile asset is not blocked"), OnlyPostCompileOutcome.bBlocked);
+	TestEqual(TEXT("the entryless post-compile rollback restores the exact ordered node, pin, default and reciprocal link enumeration"),
+		CaptureOrderedEnumeration(OrphanOnly.Blueprint), OnlyEnumeration);
+	TestEqual(TEXT("the entryless post-compile rollback restores every existing node"),
+		CaptureNativeGraph(OrphanOnly.Graph, &ExistingGuids), ExistingBefore);
+	TestEqual(TEXT("the entryless post-compile rollback restores the dirty baseline"),
+		OrphanOnly.Package->IsDirty(), bOnlyDirtyBefore);
+	TestTrue(TEXT("the entryless post-compile rollback preserves the original disk bytes"),
+		SameBytes(OnlyDiskBefore, ReadBytes(OrphanOnly.Filename())));
+	for (const FString& Text : OnlyGuids)
+	{
+		FGuid Guid;
+		FGuid::Parse(Text, Guid);
+		TestNotNull(TEXT("the entryless post-compile rollback restores the reviewed orphan identity"),
+			FCortexGraphMigrationOps::FindNodeByGuid(OrphanOnly.Blueprint, Guid));
+	}
+	FCortexGraphPreparedPatch OnlyPostCompilePreview;
+	FCortexCommandResult OnlyPostCompileError;
+	const bool bOnlyPostCompileValid = FCortexGraphPatchOps::Preflight(
+		OrphanOnly.Blueprint, OnlyRequest, OnlyPostCompilePreview, OnlyPostCompileError);
+	TestTrue(FString::Printf(TEXT("the entryless post-compile rollback preserves the reviewed apply precondition: %s"),
+		*OnlyPostCompileError.ErrorMessage), bOnlyPostCompileValid);
+	TestEqual(TEXT("the entryless post-compile rollback preserves the exact reviewed validation token"),
+		OnlyPostCompilePreview.ValidationHash, OnlyPreview.ValidationHash);
 	FCortexGraphPatchOutcome OnlyOutcome;
 	const bool bOnlyApplied = FCortexGraphPatchOps::Execute(OrphanOnly.Blueprint, OnlyRequest, OnlyOutcome, OnlyError);
 	if (!TestTrue(FString::Printf(TEXT("orphan-only guarded removal applies: %s"), *OnlyError.ErrorMessage), bOnlyApplied))

@@ -4,6 +4,7 @@
 #include "CortexCommandRouter.h"
 #include "CortexPropertyUtils.h"
 #include "WidgetBlueprint.h"
+#include "Animation/WidgetAnimation.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/PanelWidget.h"
 #include "Components/Widget.h"
@@ -98,6 +99,38 @@ namespace CortexUMGUtils
             }
         }
         return Count;
+    }
+
+    /**
+     * Seeds an empty identity map with the native compiler's deterministic identities for every
+     * pre-existing source widget and animation. Assets saved before the map existed start empty, and
+     * the compiler only seeds such a map while it is still empty, so the first mutation has to seed it
+     * before registering anything new. Populated maps are the authority and are never rewritten.
+     */
+    inline void InitializeLegacyIdentityMap(UWidgetBlueprint* WidgetBlueprint)
+    {
+        if (!WidgetBlueprint || !WidgetBlueprint->WidgetVariableNameToGuidMap.IsEmpty())
+        {
+            return;
+        }
+
+        WidgetBlueprint->ForEachSourceWidget([WidgetBlueprint](UWidget* Widget)
+        {
+            if (Widget)
+            {
+                WidgetBlueprint->WidgetVariableNameToGuidMap.Add(
+                    Widget->GetFName(), FGuid::NewDeterministicGuid(Widget->GetPathName()));
+            }
+        });
+
+        for (UWidgetAnimation* Existing : WidgetBlueprint->Animations)
+        {
+            if (Existing)
+            {
+                WidgetBlueprint->WidgetVariableNameToGuidMap.Add(
+                    Existing->GetFName(), FGuid::NewDeterministicGuid(Existing->GetPathName()));
+            }
+        }
     }
 
     inline bool ResolvePropertyPath(UObject* Object, const FString& PropertyPath, FProperty*& OutProperty, void*& OutValuePtr)

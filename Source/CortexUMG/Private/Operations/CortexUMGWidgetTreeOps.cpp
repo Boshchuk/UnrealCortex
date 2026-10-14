@@ -384,6 +384,10 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::AddWidget(const TSharedPtr<FJsonOb
                 CortexErrorCodes::InvalidParent,
                 TEXT("Root widget already exists. Specify parent_name to add as child."));
         }
+        // Journal the tree before changing membership so undo/redo restores the root alongside the
+        // identity map (the engine's own add-widget path journals the tree the same way).
+        WBP->WidgetTree->SetFlags(RF_Transactional);
+        WBP->WidgetTree->Modify();
         WBP->WidgetTree->RootWidget = NewWidget;
         ActualParent = TEXT("");
         SlotIndex = 0;
@@ -406,6 +410,13 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::AddWidget(const TSharedPtr<FJsonOb
                 FString::Printf(TEXT("Parent '%s' is not a panel widget (cannot have children)"), *ParentName));
         }
 
+        // Journal the tree and the parent panel before changing membership so undo/redo restores the
+        // child slot alongside the identity map (the engine's own add-widget path journals both).
+        WBP->WidgetTree->SetFlags(RF_Transactional);
+        WBP->WidgetTree->Modify();
+        ParentPanel->SetFlags(RF_Transactional);
+        ParentPanel->Modify();
+
         int32 RequestedSlot = -1;
         if (Params->TryGetNumberField(TEXT("slot_index"), RequestedSlot))
         {
@@ -426,6 +437,11 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::AddWidget(const TSharedPtr<FJsonOb
         }
         ActualParent = ParentName;
     }
+
+    // The addition is attached and validated, so seed an empty legacy identity map now, just before
+    // registering this widget: the map then holds every source widget and animation, and the new widget
+    // receives the path-derived identity the compiler's own empty-map path would assign it.
+    CortexUMGUtils::InitializeLegacyIdentityMap(WBP);
 
     if (!WBP->WidgetVariableNameToGuidMap.Contains(NewWidget->GetFName()))
     {
