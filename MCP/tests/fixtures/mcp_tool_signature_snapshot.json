@@ -714,6 +714,9 @@
         "severity",
         "since_seconds",
         "since_cursor",
+        "until_cursor",
+        "limit",
+        "count_only",
         "category"
       ]
     },
