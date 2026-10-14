@@ -29,6 +29,8 @@
 #include "Blueprint/WidgetBlueprintGeneratedClass.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/Image.h"
+#include "Components/TextBlock.h"
+#include "Styling/SlateColor.h"
 #include "Animation/WidgetAnimation.h"
 #include "Animation/UMGSequencePlayer.h"
 #include "MovieScene.h"
@@ -233,6 +235,64 @@ namespace
         const TArray<double>& Values, bool bConstant)
     {
         return MakeFloatTrackJson({ MakeFloatSectionJson(StartSeconds, EndSeconds, Frames, Values, bConstant) });
+    }
+
+    /** One color section JSON object from explicit native frames and an explicit completion mode. */
+    TSharedPtr<FJsonObject> MakeColorSectionJson(
+        double StartSeconds, double EndSeconds, const TArray<int32>& Frames,
+        const TArray<FLinearColor>& Values, bool bConstant, const TCHAR* CompletionMode)
+    {
+        TSharedPtr<FJsonObject> Section = MakeShared<FJsonObject>();
+        Section->SetNumberField(TEXT("start_seconds"), StartSeconds);
+        Section->SetNumberField(TEXT("end_seconds"), EndSeconds);
+        Section->SetStringField(TEXT("completion_mode"), CompletionMode);
+        TArray<TSharedPtr<FJsonValue>> Keys;
+        for (int32 Index = 0; Index < Frames.Num(); ++Index)
+        {
+            const FLinearColor Value = Values.IsValidIndex(Index) ? Values[Index] : FLinearColor::Transparent;
+            TSharedPtr<FJsonObject> ColorValue = MakeShared<FJsonObject>();
+            ColorValue->SetNumberField(TEXT("r"), Value.R);
+            ColorValue->SetNumberField(TEXT("g"), Value.G);
+            ColorValue->SetNumberField(TEXT("b"), Value.B);
+            ColorValue->SetNumberField(TEXT("a"), Value.A);
+
+            TSharedPtr<FJsonObject> Key = MakeShared<FJsonObject>();
+            Key->SetNumberField(TEXT("time_seconds"), static_cast<double>(Frames[Index]) / LifecycleTickResolution);
+            Key->SetObjectField(TEXT("value"), ColorValue);
+            Key->SetStringField(TEXT("interpolation"), bConstant ? TEXT("constant") : TEXT("linear"));
+            Keys.Add(MakeShared<FJsonValueObject>(Key));
+        }
+        Section->SetArrayField(TEXT("keys"), Keys);
+        return Section;
+    }
+
+    /** One color track JSON value from pre-built sections. */
+    TSharedPtr<FJsonValue> MakeColorTrackJson(const TArray<TSharedPtr<FJsonObject>>& Sections)
+    {
+        TSharedPtr<FJsonObject> Track = MakeShared<FJsonObject>();
+        Track->SetStringField(TEXT("type"), TEXT("color"));
+        TArray<TSharedPtr<FJsonValue>> SectionValues;
+        for (const TSharedPtr<FJsonObject>& Section : Sections)
+        {
+            SectionValues.Add(MakeShared<FJsonValueObject>(Section));
+        }
+        Track->SetArrayField(TEXT("sections"), SectionValues);
+        return MakeShared<FJsonValueObject>(Track);
+    }
+
+    /** Live TextBlock lookup by Designer name on the instantiated generated widget. */
+    UTextBlock* LiveTextBlock(
+        FAutomationTestBase& Test, UUserWidget* Widget, const TCHAR* Context, const TCHAR* WidgetName)
+    {
+        UTextBlock* Text = Widget ? Cast<UTextBlock>(Widget->GetWidgetFromName(WidgetName)) : nullptr;
+        Test.TestNotNull(*FString::Printf(TEXT("%s: live '%s' TextBlock exists"), Context, WidgetName), Text);
+        return Text;
+    }
+
+    /** True when every component of a live FSlateColor matches the expected linear color. */
+    bool SlateColorMatches(const FSlateColor& Actual, const FLinearColor& Expected, float Tolerance = 1e-5f)
+    {
+        return ColorMatches(Actual.GetSpecifiedColor(), Expected, Tolerance);
     }
 
     /** Builds umg.remove_animation_binding params for one widget binding from a fresh read. */
@@ -1204,6 +1264,260 @@ bool FCortexUMGAnimationAuthoringLifecycleSelectiveClearRemovalTest::RunTest(con
         TestEqual(TEXT("after removal: the unrelated binding still animates"),
             RemainingUnaffected->GetRenderOpacity(), 0.5f);
         StopWidgetAnimation(RemovedWidget, RemovedAnimation);
+    }
+
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+// Slate-color track on a TextBlock: native playback, completion modes, replacement, undo/redo
+// -----------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FCortexUMGAnimationAuthoringLifecycleSlateColorCompletionTest,
+    "Cortex.UMG.AnimationAuthoring.Lifecycle.SlateColorCompletionAndReplacement",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexUMGAnimationAuthoringLifecycleSlateColorCompletionTest::RunTest(const FString& Parameters)
+{
+    FCortexUMGAnimationAuthoringFixture Fixture(*this);
+    UWidgetBlueprint* WBP = Fixture.Blueprint();
+
+    // The FSlateColor authoring kind has no runtime consumer coverage yet. The TextBlock is added
+    // through the public routed command, so the Designer identity map is populated exactly as a
+    // consumer's Designer addition would populate it before the first compile.
+    TSharedPtr<FJsonObject> AddLabelParams = MakeShared<FJsonObject>();
+    AddLabelParams->SetStringField(TEXT("asset_path"), WBP->GetPathName());
+    AddLabelParams->SetStringField(TEXT("widget_class"), TEXT("TextBlock"));
+    AddLabelParams->SetStringField(TEXT("name"), TEXT("Label"));
+    AddLabelParams->SetStringField(TEXT("parent_name"), TEXT("Root"));
+    if (!TestTrue(TEXT("Designer TextBlock added through the public command"),
+            Fixture.ExecuteCommand(TEXT("umg.add_widget"), AddLabelParams).bSuccess))
+    {
+        return false;
+    }
+
+    const FCortexCommandResult Bound = Fixture.Ensure(TEXT("Label"), false);
+    if (!TestTrue(TEXT("ordinary Label binding created"), Bound.bSuccess && Bound.Data.IsValid()))
+    {
+        return false;
+    }
+    const TSharedPtr<FJsonObject> Selector = FCortexUMGAnimationAuthoringFixture::SelectorFrom(Bound);
+    if (!TestTrue(TEXT("applied ensure returns the canonical selector"), Selector.IsValid()))
+    {
+        return false;
+    }
+
+    // RestoreState is the default; it is stated explicitly so the replacement below changes only the
+    // completion mode. Keys sit on the exact observable native frames 0, 1200 and 2399 (the last
+    // valid tick), so every sampled consumer value is exact rather than interpolated.
+    const TArray<int32> ColorFrames = { 0, 1200, LifecycleLastValidFrame };
+    const FLinearColor StartColor(0.25f, 0.5f, 0.75f, 1.0f);
+    const FLinearColor MidColor(0.5f, 0.5f, 0.5f, 1.0f);
+    const FLinearColor FinalColor(0.125f, 0.25f, 0.375f, 1.0f);
+    const TArray<FLinearColor> ColorValues = { StartColor, MidColor, FinalColor };
+
+    const TSharedPtr<FJsonValue> RestoreStateTrack = MakeColorTrackJson({
+        MakeColorSectionJson(0.0, 0.1, ColorFrames, ColorValues, /*bConstant=*/false, TEXT("RestoreState")) });
+    if (!TestTrue(TEXT("Slate-color RestoreState track authored"),
+            Fixture.Set(Selector, TEXT("ColorAndOpacity"), RestoreStateTrack, false).bSuccess))
+    {
+        return false;
+    }
+    // An independent retained track on the same binding: replacement and undo/redo must not touch it.
+    if (!TestTrue(TEXT("independent RenderOpacity track authored"),
+            Fixture.Set(Selector, TEXT("RenderOpacity"),
+                Fixture.JsonValue(CortexUMGAnimationAuthoringTestUtils::FadeFloatTrackJson()), false).bSuccess))
+    {
+        return false;
+    }
+
+    UMovieSceneColorSection* ColorSection = Fixture.ColorSection(TEXT("Label"), TEXT("ColorAndOpacity"));
+    UMovieSceneFloatSection* FloatSection = Fixture.FloatSection(TEXT("Label"), TEXT("RenderOpacity"));
+    if (!TestNotNull(TEXT("authored Slate-color section exists"), ColorSection)
+        || !TestNotNull(TEXT("independent float section exists"), FloatSection))
+    {
+        return false;
+    }
+    TestEqual(TEXT("authored Slate-color section completion mode is RestoreState"),
+        static_cast<int32>(ColorSection->GetCompletionMode()), static_cast<int32>(EMovieSceneCompletionMode::RestoreState));
+    const TArray<FFrameNumber> ColorFramesBefore = CortexUMGAnimationAuthoringTestUtils::ChannelFrames(ColorSection->GetRedChannel());
+    const TArray<float> ColorValuesBefore = CortexUMGAnimationAuthoringTestUtils::ChannelValues(ColorSection->GetRedChannel());
+    const TArray<FFrameNumber> FloatFramesBefore = CortexUMGAnimationAuthoringTestUtils::ChannelFrames(FloatSection->GetChannel());
+    const TArray<float> FloatValuesBefore = CortexUMGAnimationAuthoringTestUtils::ChannelValues(FloatSection->GetChannel());
+
+    // Baseline: the compiled Slate-color track drives the live TextBlock and then restores it.
+    if (!CompileFixture(*this, WBP, TEXT("restore baseline")))
+    {
+        return false;
+    }
+    const FName MovieSceneName = Fixture.Animation()->MovieScene->GetFName();
+    {
+        UUserWidget* Widget = CreateLiveWidget(*this, TEXT("restore baseline"), WBP->GeneratedClass.Get());
+        if (!Widget)
+        {
+            return false;
+        }
+        UWidgetAnimation* LiveAnimation = ResolveLiveAnimation(*this, Widget, MovieSceneName, TEXT("restore baseline"));
+        UTextBlock* LiveLabel = LiveTextBlock(*this, Widget, TEXT("restore baseline"), TEXT("Label"));
+        if (!LiveAnimation || !LiveLabel)
+        {
+            return false;
+        }
+        TestTrue(TEXT("TextBlock starts at its default white color"),
+            SlateColorMatches(LiveLabel->GetColorAndOpacity(), FLinearColor::White));
+        TestEqual(TEXT("TextBlock starts at its default opacity"), LiveLabel->GetRenderOpacity(), 1.0f);
+
+        PlayFromStartTime(Widget, LiveAnimation, 0.0f);
+        TestTrue(TEXT("frame 0: the live Slate color is the authored start color"),
+            SlateColorMatches(LiveLabel->GetColorAndOpacity(), StartColor));
+        TestEqual(TEXT("frame 0: the independent opacity track applied too"), LiveLabel->GetRenderOpacity(), 0.0f);
+
+        TickWidgetAnimation(Widget, 0.05f);
+        TestTrue(TEXT("frame 1200: the live Slate color is the authored midpoint"),
+            SlateColorMatches(LiveLabel->GetColorAndOpacity(), MidColor));
+        TestEqual(TEXT("frame 1200: the independent opacity track evaluates to 0.5"), LiveLabel->GetRenderOpacity(), 0.5f);
+
+        TickWidgetAnimation(Widget, 0.06f);
+        TickWidgetAnimation(Widget, 0.0f);
+        TestFalse(TEXT("the Slate-color animation stops after its range"), Widget->IsAnimationPlaying(LiveAnimation));
+        TestTrue(TEXT("RestoreState completion restores the TextBlock's pre-animation Slate color"),
+            SlateColorMatches(LiveLabel->GetColorAndOpacity(), FLinearColor::White));
+        TestEqual(TEXT("RestoreState completion restores the independent opacity"),
+            LiveLabel->GetRenderOpacity(), 1.0f);
+        StopWidgetAnimation(Widget, LiveAnimation);
+    }
+
+    // Completion-only replacement: identical sections, ranges and keys; only completion_mode changes.
+    const TSharedPtr<FJsonValue> KeepStateTrack = MakeColorTrackJson({
+        MakeColorSectionJson(0.0, 0.1, ColorFrames, ColorValues, /*bConstant=*/false, TEXT("KeepState")) });
+    const FCortexCommandResult Replaced = Fixture.Set(Selector, TEXT("ColorAndOpacity"), KeepStateTrack, false);
+    if (!TestTrue(TEXT("completion-only replacement succeeds"), Replaced.bSuccess && Replaced.Data.IsValid()))
+    {
+        return false;
+    }
+    TestTrue(TEXT("completion-only replacement reports changed"), Replaced.Data->GetBoolField(TEXT("changed")));
+    const TSharedPtr<FJsonObject>* AuthoredTrack = nullptr;
+    if (TestTrue(TEXT("replacement returns the authored_track readback"),
+            Replaced.Data->TryGetObjectField(TEXT("authored_track"), AuthoredTrack)))
+    {
+        const TSharedPtr<FJsonObject> SectionJson =
+            CortexUMGAnimationAuthoringTestUtils::FirstSectionJson(*AuthoredTrack);
+        FString CompletionMode;
+        if (TestTrue(TEXT("replacement authored_track exposes its section"), SectionJson.IsValid())
+            && TestTrue(TEXT("replacement authored_track reports a completion mode"),
+                SectionJson->TryGetStringField(TEXT("completion_mode"), CompletionMode)))
+        {
+            TestEqual(TEXT("replacement readback reports the KeepState completion mode"),
+                CompletionMode, FString(TEXT("KeepState")));
+        }
+    }
+
+    UMovieSceneColorSection* ColorAfterReplace = Fixture.ColorSection(TEXT("Label"), TEXT("ColorAndOpacity"));
+    if (!TestNotNull(TEXT("replaced Slate-color section exists"), ColorAfterReplace))
+    {
+        return false;
+    }
+    TestEqual(TEXT("replaced section completion mode is KeepState"),
+        static_cast<int32>(ColorAfterReplace->GetCompletionMode()), static_cast<int32>(EMovieSceneCompletionMode::KeepState));
+    TestTrue(TEXT("the replacement keeps the exact Slate-color key frames"),
+        CortexUMGAnimationAuthoringTestUtils::ChannelFrames(ColorAfterReplace->GetRedChannel()) == ColorFramesBefore);
+    TestTrue(TEXT("the replacement keeps the exact Slate-color key values"),
+        CortexUMGAnimationAuthoringTestUtils::ChannelValues(ColorAfterReplace->GetRedChannel()) == ColorValuesBefore);
+
+    UMovieSceneFloatSection* FloatAfterReplace = Fixture.FloatSection(TEXT("Label"), TEXT("RenderOpacity"));
+    if (!TestNotNull(TEXT("the independent float track survives the replacement"), FloatAfterReplace))
+    {
+        return false;
+    }
+    TestTrue(TEXT("the independent float track keeps its exact frames through the replacement"),
+        CortexUMGAnimationAuthoringTestUtils::ChannelFrames(FloatAfterReplace->GetChannel()) == FloatFramesBefore);
+    TestTrue(TEXT("the independent float track keeps its exact values through the replacement"),
+        CortexUMGAnimationAuthoringTestUtils::ChannelValues(FloatAfterReplace->GetChannel()) == FloatValuesBefore);
+
+    // Undo restores the previous completion mode and the exact authored keys; the sibling is intact.
+    TestTrue(TEXT("undo of the completion-only replacement succeeds"), GEditor->UndoTransaction());
+    UMovieSceneColorSection* ColorAfterUndo = Fixture.ColorSection(TEXT("Label"), TEXT("ColorAndOpacity"));
+    if (!TestNotNull(TEXT("undo restores the Slate-color track"), ColorAfterUndo))
+    {
+        return false;
+    }
+    TestEqual(TEXT("undo restores the RestoreState completion mode"),
+        static_cast<int32>(ColorAfterUndo->GetCompletionMode()), static_cast<int32>(EMovieSceneCompletionMode::RestoreState));
+    TestTrue(TEXT("undo restores the exact Slate-color key frames"),
+        CortexUMGAnimationAuthoringTestUtils::ChannelFrames(ColorAfterUndo->GetRedChannel()) == ColorFramesBefore);
+    TestTrue(TEXT("undo restores the exact Slate-color key values"),
+        CortexUMGAnimationAuthoringTestUtils::ChannelValues(ColorAfterUndo->GetRedChannel()) == ColorValuesBefore);
+    UMovieSceneFloatSection* FloatAfterUndo = Fixture.FloatSection(TEXT("Label"), TEXT("RenderOpacity"));
+    if (!TestNotNull(TEXT("the independent float track survives undo"), FloatAfterUndo))
+    {
+        return false;
+    }
+    TestTrue(TEXT("the independent float track keeps its exact frames through undo"),
+        CortexUMGAnimationAuthoringTestUtils::ChannelFrames(FloatAfterUndo->GetChannel()) == FloatFramesBefore);
+    TestTrue(TEXT("the independent float track keeps its exact values through undo"),
+        CortexUMGAnimationAuthoringTestUtils::ChannelValues(FloatAfterUndo->GetChannel()) == FloatValuesBefore);
+
+    // Redo re-applies the KeepState replacement without disturbing anything else.
+    TestTrue(TEXT("redo of the completion-only replacement succeeds"), GEditor->RedoTransaction());
+    UMovieSceneColorSection* ColorAfterRedo = Fixture.ColorSection(TEXT("Label"), TEXT("ColorAndOpacity"));
+    if (!TestNotNull(TEXT("redo re-applies the Slate-color track"), ColorAfterRedo))
+    {
+        return false;
+    }
+    TestEqual(TEXT("redo re-applies the KeepState completion mode"),
+        static_cast<int32>(ColorAfterRedo->GetCompletionMode()), static_cast<int32>(EMovieSceneCompletionMode::KeepState));
+    TestTrue(TEXT("redo restores the exact Slate-color key frames"),
+        CortexUMGAnimationAuthoringTestUtils::ChannelFrames(ColorAfterRedo->GetRedChannel()) == ColorFramesBefore);
+    TestTrue(TEXT("redo restores the exact Slate-color key values"),
+        CortexUMGAnimationAuthoringTestUtils::ChannelValues(ColorAfterRedo->GetRedChannel()) == ColorValuesBefore);
+    UMovieSceneFloatSection* FloatAfterRedo = Fixture.FloatSection(TEXT("Label"), TEXT("RenderOpacity"));
+    if (!TestNotNull(TEXT("the independent float track survives undo/redo"), FloatAfterRedo))
+    {
+        return false;
+    }
+    TestTrue(TEXT("the independent float track keeps its exact frames through undo/redo"),
+        CortexUMGAnimationAuthoringTestUtils::ChannelFrames(FloatAfterRedo->GetChannel()) == FloatFramesBefore);
+    TestTrue(TEXT("the independent float track keeps its exact values through undo/redo"),
+        CortexUMGAnimationAuthoringTestUtils::ChannelValues(FloatAfterRedo->GetChannel()) == FloatValuesBefore);
+
+    // Recompiled KeepState track: the live TextBlock retains the final authored Slate color after
+    // completion, while the independent RestoreState opacity track still returns to its baseline.
+    if (!CompileFixture(*this, WBP, TEXT("keep state")))
+    {
+        return false;
+    }
+    {
+        UUserWidget* Widget = CreateLiveWidget(*this, TEXT("keep state"), WBP->GeneratedClass.Get());
+        if (!Widget)
+        {
+            return false;
+        }
+        UWidgetAnimation* LiveAnimation = ResolveLiveAnimation(*this, Widget, MovieSceneName, TEXT("keep state"));
+        UTextBlock* LiveLabel = LiveTextBlock(*this, Widget, TEXT("keep state"), TEXT("Label"));
+        if (!LiveAnimation || !LiveLabel)
+        {
+            return false;
+        }
+        TestTrue(TEXT("keep state: TextBlock starts at its default white color"),
+            SlateColorMatches(LiveLabel->GetColorAndOpacity(), FLinearColor::White));
+
+        PlayFromStartTime(Widget, LiveAnimation, 0.0f);
+        TestTrue(TEXT("keep state frame 0: the authored start color applies"),
+            SlateColorMatches(LiveLabel->GetColorAndOpacity(), StartColor));
+        TickWidgetAnimation(Widget, 0.05f);
+        TestTrue(TEXT("keep state frame 1200: the authored midpoint applies"),
+            SlateColorMatches(LiveLabel->GetColorAndOpacity(), MidColor));
+        TickWidgetAnimation(Widget, 0.06f);
+        TickWidgetAnimation(Widget, 0.0f);
+        TestFalse(TEXT("keep state: the animation stops after its range"), Widget->IsAnimationPlaying(LiveAnimation));
+        TestTrue(TEXT("KeepState completion retains the last authored Slate color on the live widget"),
+            SlateColorMatches(LiveLabel->GetColorAndOpacity(), FinalColor));
+        TestTrue(TEXT("KeepState completion does not restore the pre-animation color"),
+            !SlateColorMatches(LiveLabel->GetColorAndOpacity(), FLinearColor::White));
+        TestEqual(TEXT("the independent RestoreState opacity track still restores"),
+            LiveLabel->GetRenderOpacity(), 1.0f);
+        StopWidgetAnimation(Widget, LiveAnimation);
     }
 
     return true;

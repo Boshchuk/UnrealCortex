@@ -16,6 +16,7 @@
 #include "Misc/FrameTime.h"
 #include "UObject/UnrealType.h"
 #include "Dom/JsonValue.h"
+#include "Styling/SlateColor.h"
 
 namespace
 {
@@ -25,6 +26,19 @@ namespace
     {
         OutError = FCortexCommandRouter::Error(Code, Message);
         return false;
+    }
+
+    const TCHAR* CompletionModeName(EMovieSceneCompletionMode Mode)
+    {
+        switch (Mode)
+        {
+        case EMovieSceneCompletionMode::RestoreState:
+            return TEXT("RestoreState");
+        case EMovieSceneCompletionMode::KeepState:
+            return TEXT("KeepState");
+        default:
+            return TEXT("NonRestoreState");
+        }
     }
 
     bool TryObject(const TSharedPtr<FJsonValue>& Value, TSharedPtr<FJsonObject>& Out)
@@ -409,14 +423,15 @@ namespace CortexUMGAnimationTrackUtils
         }
         if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
         {
-            if (StructProperty->Struct == TBaseStructure<FLinearColor>::Get())
+            if (StructProperty->Struct == TBaseStructure<FLinearColor>::Get()
+                || StructProperty->Struct == FSlateColor::StaticStruct())
             {
                 OutKind = ETrackKind::Color;
                 return true;
             }
         }
         return Fail(OutError, CortexErrorCodes::InvalidPropertyPath,
-            FString::Printf(TEXT("Property is not an ordinary float or linear color: %s"), *PropertyPath));
+            FString::Printf(TEXT("Property is not an ordinary float, linear color or Slate color: %s"), *PropertyPath));
     }
 
     bool ParseTrackSpec(
@@ -474,7 +489,7 @@ namespace CortexUMGAnimationTrackUtils
             {
                 return Fail(OutError, CortexErrorCodes::InvalidField, TEXT("each section must be an object"));
             }
-            if (!HasOnlyFields(SectionObj, { TEXT("start_seconds"), TEXT("end_seconds"), TEXT("keys") }))
+            if (!HasOnlyFields(SectionObj, { TEXT("start_seconds"), TEXT("end_seconds"), TEXT("keys"), TEXT("completion_mode") }))
             {
                 return Fail(OutError, CortexErrorCodes::InvalidField, TEXT("section contains unknown fields"));
             }
@@ -489,6 +504,23 @@ namespace CortexUMGAnimationTrackUtils
             }
 
             FSectionSpec Section;
+            if (SectionObj->HasField(TEXT("completion_mode")))
+            {
+                FString Mode;
+                if (!RequireString(SectionObj, TEXT("completion_mode"), Mode))
+                {
+                    return Fail(OutError, CortexErrorCodes::InvalidField, TEXT("section.completion_mode must be a string"));
+                }
+                if (Mode == TEXT("KeepState"))
+                {
+                    Section.CompletionMode = EMovieSceneCompletionMode::KeepState;
+                }
+                else if (Mode != TEXT("RestoreState"))
+                {
+                    return Fail(OutError, CortexErrorCodes::InvalidPropertyValue,
+                        TEXT("section.completion_mode must be 'RestoreState' or 'KeepState'"));
+                }
+            }
             if (!QuantizeSeconds(StartSeconds, TickResolution, Section.Start, TEXT("section.start_seconds"), OutError))
             {
                 return false;
@@ -593,7 +625,7 @@ namespace CortexUMGAnimationTrackUtils
             SectionJson->SetNumberField(TEXT("post_roll_frames"), 0);
             SectionJson->SetNumberField(TEXT("overlap_priority"), 0);
             SectionJson->SetStringField(TEXT("blend_type"), TEXT("Absolute"));
-            SectionJson->SetStringField(TEXT("completion_mode"), TEXT("RestoreState"));
+            SectionJson->SetStringField(TEXT("completion_mode"), CompletionModeName(Section.CompletionMode));
 
             TArray<TSharedPtr<FJsonValue>> ChannelsOut;
             auto BuildChannel = [&](const TCHAR* ChannelName, const TFunctionRef<float(const FKeySpec&)>& ValueOf)
@@ -703,7 +735,7 @@ namespace CortexUMGAnimationTrackUtils
             Section->SetPostRollFrames(0);
             Section->SetOverlapPriority(0);
             Section->SetBlendType(EMovieSceneBlendType::Absolute);
-            Section->SetCompletionMode(EMovieSceneCompletionMode::RestoreState);
+            Section->SetCompletionMode(SectionSpec.CompletionMode);
             Section->Easing.AutoEaseInDuration = 0;
             Section->Easing.AutoEaseOutDuration = 0;
             Section->Easing.bManualEaseIn = false;
@@ -864,7 +896,8 @@ namespace CortexUMGAnimationTrackUtils
                 OutReason = TEXT("non-canonical section blend type");
                 return false;
             }
-            if (Section->GetCompletionMode() != EMovieSceneCompletionMode::RestoreState)
+            if (Section->GetCompletionMode() != EMovieSceneCompletionMode::RestoreState
+                && Section->GetCompletionMode() != EMovieSceneCompletionMode::KeepState)
             {
                 OutReason = TEXT("non-canonical section completion mode");
                 return false;
@@ -991,7 +1024,8 @@ namespace CortexUMGAnimationTrackUtils
             const TRange<FFrameNumber> Range = Section->GetRange();
             if (!Range.GetLowerBound().IsInclusive() || !Range.GetUpperBound().IsExclusive()
                 || Range.GetLowerBoundValue() != SectionSpec.Start
-                || Range.GetUpperBoundValue() != SectionSpec.End)
+                || Range.GetUpperBoundValue() != SectionSpec.End
+                || Section->GetCompletionMode() != SectionSpec.CompletionMode)
             {
                 return false;
             }
@@ -1147,9 +1181,7 @@ namespace CortexUMGAnimationTrackUtils
             SectionJson->SetStringField(TEXT("blend_type"),
                 Section->GetBlendType().IsValid() && Section->GetBlendType().BlendType == EMovieSceneBlendType::Absolute
                     ? TEXT("Absolute") : TEXT("NonAbsolute"));
-            SectionJson->SetStringField(TEXT("completion_mode"),
-                Section->GetCompletionMode() == EMovieSceneCompletionMode::RestoreState
-                    ? TEXT("RestoreState") : TEXT("NonRestoreState"));
+            SectionJson->SetStringField(TEXT("completion_mode"), CompletionModeName(Section->GetCompletionMode()));
 
             TArray<TSharedPtr<FJsonValue>> ChannelsOut;
             auto DescribeChannel = [&](const TCHAR* ChannelName, const FMovieSceneFloatChannel& Channel)

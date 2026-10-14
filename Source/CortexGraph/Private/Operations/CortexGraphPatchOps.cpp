@@ -2494,6 +2494,14 @@ struct FGraphPatchJournal
 	};
 	TArray<FNodePinSnapshot> NodePins;
 
+	struct FRemovalLinkOrder
+	{
+		FPinLinkTarget Pin;
+		TArray<FPinLinkTarget> LinkedTo;
+	};
+	/** Fan-out/fan-in order before any retirement mutation, including retained neighboring pins. */
+	TArray<FRemovalLinkOrder> RemovalLinkOrders;
+
 	/**
 	 * One terminator node the migration detached from its graph. The node object stays alive here so
 	 * its identity (GUID and object name) survives, and the pin snapshot carries the state that the
@@ -2503,6 +2511,8 @@ struct FGraphPatchJournal
 	{
 		FGuid NodeGuid;
 		FGuid GraphGuid;
+		/** Index immediately before removal; reverse replay restores exact graph enumeration order. */
+		int32 NodeIndex = INDEX_NONE;
 		int32 NodePosX = 0;
 		int32 NodePosY = 0;
 		FString NodeComment;
@@ -2627,6 +2637,58 @@ void JournalNodePins(UEdGraphNode* Node, FGraphPatchJournal& Journal)
 	Journal.NodePins.Add(MakeNodePinSnapshot(Node));
 }
 
+void JournalRemovalLinkOrders(UEdGraphNode* Node, FGraphPatchJournal& Journal)
+{
+	if (!Node) return;
+	auto Capture = [&Journal](UEdGraphPin* Pin)
+	{
+		if (!Pin || Pin->LinkedTo.Num() < 2 || !Pin->GetOwningNode()) return;
+		const FGuid Guid = Pin->GetOwningNode()->NodeGuid;
+		if (Journal.RemovalLinkOrders.ContainsByPredicate(
+			[&](const FGraphPatchJournal::FRemovalLinkOrder& Entry)
+			{
+				return Entry.Pin.NodeGuid == Guid && Entry.Pin.PinName == Pin->PinName
+					&& Entry.Pin.Direction == Pin->Direction;
+			})) return;
+		FGraphPatchJournal::FRemovalLinkOrder Entry;
+		Entry.Pin = {Guid, Pin->PinName, Pin->Direction};
+		Entry.LinkedTo.Reserve(Pin->LinkedTo.Num());
+		for (UEdGraphPin* Linked : Pin->LinkedTo)
+			if (Linked && Linked->GetOwningNode())
+				Entry.LinkedTo.Add({Linked->GetOwningNode()->NodeGuid, Linked->PinName, Linked->Direction});
+		Journal.RemovalLinkOrders.Add(MoveTemp(Entry));
+	};
+	for (UEdGraphPin* Pin : Node->Pins)
+	{
+		Capture(Pin);
+		if (Pin)
+			for (UEdGraphPin* Linked : Pin->LinkedTo) Capture(Linked);
+	}
+}
+
+bool RestoreRemovalLinkOrders(UBlueprint* Blueprint, const FGraphPatchJournal& Journal)
+{
+	for (const FGraphPatchJournal::FRemovalLinkOrder& Entry : Journal.RemovalLinkOrders)
+	{
+		UEdGraphNode* Node = FCortexGraphMigrationOps::FindNodeByGuid(Blueprint, Entry.Pin.NodeGuid);
+		UEdGraphPin* Pin = Node ? Node->FindPin(Entry.Pin.PinName, Entry.Pin.Direction) : nullptr;
+		if (!Pin || Pin->LinkedTo.Num() != Entry.LinkedTo.Num()) return false;
+		TArray<UEdGraphPin*> Ordered;
+		Ordered.Reserve(Entry.LinkedTo.Num());
+		for (const FGraphPatchJournal::FPinLinkTarget& Link : Entry.LinkedTo)
+		{
+			UEdGraphNode* Other = FCortexGraphMigrationOps::FindNodeByGuid(Blueprint, Link.NodeGuid);
+			UEdGraphPin* Linked = Other ? Other->FindPin(Link.PinName, Link.Direction) : nullptr;
+			// Reorder only a completely restored reciprocal set; never manufacture or hide a link.
+			if (!Linked || !Pin->LinkedTo.Contains(Linked) || !Linked->LinkedTo.Contains(Pin)
+				|| Ordered.Contains(Linked)) return false;
+			Ordered.Add(Linked);
+		}
+		Pin->LinkedTo = MoveTemp(Ordered);
+	}
+	return true;
+}
+
 /**
  * Journals the complete pre-removal identity of a node the migration detaches. The object itself is
  * kept alive by the journal, so recovery re-registers the same node and its identity (including the
@@ -2642,6 +2704,7 @@ void JournalNodeRemoved(UEdGraphNode* Node, FGraphPatchJournal& Journal)
 	FGraphPatchJournal::FRemovedNodeEntry Entry;
 	Entry.NodeGuid = Node->NodeGuid;
 	Entry.GraphGuid = Node->GetGraph() ? Node->GetGraph()->GraphGuid : FGuid();
+	Entry.NodeIndex = Node->GetGraph() ? Node->GetGraph()->Nodes.IndexOfByKey(Node) : INDEX_NONE;
 	Entry.NodePosX = Node->NodePosX;
 	Entry.NodePosY = Node->NodePosY;
 	Entry.NodeComment = Node->NodeComment;
@@ -2726,8 +2789,13 @@ bool RestoreRemovedNodes(UBlueprint* Blueprint, const FGraphPatchJournal& Journa
 		if (!Node)
 		{
 			if (!IsValid(Entry.Node)) return false;
+			if (Entry.NodeIndex < 0 || Entry.NodeIndex > Graph->Nodes.Num()) return false;
 			Node = Entry.Node;
 			Graph->AddNode(Node, false, false);
+			// Append alone changes scan work and invalidates an otherwise restored reviewed intent.
+			// Removal entries replay in reverse, so each immediate pre-removal index is valid again.
+			Graph->Nodes.RemoveAt(Graph->Nodes.Num() - 1);
+			Graph->Nodes.Insert(Node, Entry.NodeIndex);
 		}
 		Node->Modify();
 		Node->NodeGuid = Entry.NodeGuid;
@@ -3226,6 +3294,7 @@ bool RestoreJournal(UBlueprint* Blueprint, FGraphPatchJournal& Journal)
 	// preserved downstream pins are free again and the journaled links can be re-created exactly.
 	if (!RestoreRemovedNodes(Blueprint, Journal)) return false;
 	if (!RestoreRemovedMember(Blueprint, Journal)) return false;
+	if (!RestoreRemovalLinkOrders(Blueprint, Journal)) return false;
 
 	for (int32 Index = Journal.AddedGraphs.Num() - 1; Index >= 0; --Index)
 	{
@@ -4645,6 +4714,7 @@ bool ApplyPrepared(
 					*GuidText));
 			}
 			Journal.CapturePreRemovalState(ApprovedNode);
+			JournalRemovalLinkOrders(ApprovedNode, Journal);
 		}
 
 		for (int32 Index = 0; Index < RetirePlan.ApprovedGuids.Num(); ++Index)
