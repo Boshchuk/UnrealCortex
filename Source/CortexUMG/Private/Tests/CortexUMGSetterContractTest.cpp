@@ -320,16 +320,21 @@ bool FCortexUMGSetterContractTest::RunTest(const FString& Parameters)
         Params->SetStringField(TEXT("horizontal"), TEXT(""));
         Params->SetStringField(TEXT("vertical"), TEXT("Bottom"));
 
+        const TOptional<EHorizontalAlignment> HorizontalBefore = ReadSlotAlignment(ColumnLabel);
+        const TOptional<EVerticalAlignment> VerticalBefore = ReadSlotVerticalAlignment(ColumnLabel);
+
         const FCortexCommandResult Result = Router.Execute(TEXT("umg.set_alignment"), Params);
         TestFalse(TEXT("supplied empty alignment token must be refused"), Result.bSuccess);
         TestEqual(TEXT("empty alignment token should be INVALID_PROPERTY_VALUE"),
             Result.ErrorCode, CortexErrorCodes::InvalidPropertyValue);
         const TOptional<EHorizontalAlignment> HorizontalAfter = ReadSlotAlignment(ColumnLabel);
-        TestTrue(TEXT("refused empty token must not change horizontal alignment"),
-            HorizontalAfter.IsSet() && HorizontalAfter.GetValue() == EHorizontalAlignment::HAlign_Center);
         const TOptional<EVerticalAlignment> VerticalAfter = ReadSlotVerticalAlignment(ColumnLabel);
-        TestTrue(TEXT("refused empty token must not apply the other axis"),
-            !VerticalAfter.IsSet() || VerticalAfter.GetValue() != EVerticalAlignment::VAlign_Bottom);
+        TestTrue(TEXT("refused empty token must leave horizontal alignment unchanged"),
+            HorizontalAfter.IsSet() == HorizontalBefore.IsSet()
+            && (!HorizontalAfter.IsSet() || HorizontalAfter.GetValue() == HorizontalBefore.GetValue()));
+        TestTrue(TEXT("refused empty token must leave vertical alignment unchanged"),
+            VerticalAfter.IsSet() == VerticalBefore.IsSet()
+            && (!VerticalAfter.IsSet() || VerticalAfter.GetValue() == VerticalBefore.GetValue()));
     }
 
     // ---------------------------------------------------------------- set_size

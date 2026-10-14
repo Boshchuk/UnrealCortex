@@ -69,6 +69,50 @@ One existing assertion was removed rather than re-pinned:
 `graph.get_subgraph`, which pinned the strip mechanism. That command declares no `limit` and no
 handler reads one, so forwarding it changes no behaviour.
 
+## Re-review round (second review, at head `6d6446c4`)
+
+The re-review supported B2, B3 and N1, and reported one new blocking finding plus three non-blocking
+ones. All four were verified against the source before any change.
+
+### P2 (blocking) — the native-page registry entry for `umg.list_animation_bindings` was unreachable
+
+The UMG animation-binding branch returns through `format_response()` *before* the native-owner branch,
+so the summary read never reached `format_native_page`, and an oversized page was generically shortened
+— reproduced here against the actual module, whose own log recorded
+`Truncated bindings response for umg_cmd: 200 -> 84 items`.
+
+Fix: that branch routes a summary read through `format_native_page` (complete-or-refuse) while
+preserving the dedicated detailed-read envelope for `include_track_content=true`, and refuses a
+`cursor` for the read as the other native owners do. The previous test asserted only parameter
+forwarding, which already worked through the earlier branch, so it could not have caught this: the
+regression test now asserts the **response form** of an oversized native summary page through the
+public router, with a second test guarding that the detailed envelope is unchanged.
+
+### P3a — strict-setter pagination error codes (decision: documented, not changed)
+
+An out-of-range `limit` (or a malformed `cursor`) on a strict UMG setter is still refused by the Python
+layer with `INVALID_LIMIT`/`INVALID_CURSOR` rather than the native `INVALID_FIELD`. The call is refused
+with an actionable message either way, and gating the Python check on page owners would drop the 1–200
+cap for every native-owned read, so the behaviour is kept and the distinction is documented in the
+toolkit's passthrough contract.
+
+### P3b — the N1 unchanged-state assertion compared against a constant (fixed)
+
+It checked `vertical != Bottom`; it now captures both axes before the refused call and compares them
+after, so any unintended write fails it rather than one specific value.
+
+### P3c — toolkit accuracy (fixed)
+
+`mcp-tool-reference.md` claimed every router docstring carries parameter signatures (they are
+names-only since the token-efficiency work), and showed `query_class_hierarchy(class_name=…)` for a
+parameter named `root`. Both corrected.
+
+Verified after these changes: Unreal build exit 0; `Cortex.UMG.SetterContract+` 1/1; Python non-e2e
+**1105 passed** (1103 + the two new response-form tests); toolkit guards (skill taxonomy, codex,
+opencode) and the typed-blueprint guidance unit tests pass. The P2 regression test was watched failing
+first, with the module logging `Truncated bindings response for umg_cmd: 200 -> 84 items` on the
+unfixed path.
+
 ## Remaining risk
 
 - `MCP/src/tools/data/data_assets.py` still constructs `class_filter`. It is not registered by the

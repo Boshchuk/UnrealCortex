@@ -184,6 +184,66 @@ class TestNativeOwnership:
         forwarded = connection.send_command.call_args.args[1]
         assert forwarded["limit"] == 5
 
+    def test_umg_animation_bindings_summary_read_is_complete_or_refuse(self):
+        """An oversized native summary page must refuse explicitly — never be shortened here.
+
+        The C++ handler computes next_offset/is_complete for the whole page, so a Python-shortened
+        page would carry a continuation that does not describe the rows actually returned.
+        """
+        bindings = [
+            {"widget_name": f"W_{i}", "property_path": "ColorAndOpacity", "blob": "x" * 400}
+            for i in range(200)
+        ]
+        data = {
+            "asset_path": "/Game/WBP_Test",
+            "bindings": bindings,
+            "summary_counts": {"umg_binding_count": 200, "movie_scene_binding_count": 0, "track_count": 0},
+            "pagination": {"total": 200, "offset": 0, "limit": 200, "returned": 200, "next_offset": None, "is_complete": True},
+        }
+        router, _ = _router("umg", data)
+
+        payload = json.loads(
+            router("list_animation_bindings", {"asset_path": "/Game/WBP_Test", "limit": 200})
+        )
+
+        assert payload["_error"] == "RESPONSE_TOO_LARGE"
+        assert payload["_native_page_omitted"] is True
+        assert payload["reader_complete"] is False
+        assert "_truncated" not in payload
+        assert "bindings" not in payload
+        assert len(compact_json(payload)) <= MAX_RESPONSE_CHARS
+
+    def test_umg_animation_bindings_detail_read_keeps_the_detailed_envelope(self):
+        """The dedicated detailed-read handling must survive the summary-path change."""
+        bindings = [
+            {
+                "widget_name": f"W_{i}",
+                "property_path": "ColorAndOpacity",
+                "tracks": [{"keys": [{"time": 0.0, "value": "x" * 400}]}],
+            }
+            for i in range(200)
+        ]
+        data = {
+            "asset_path": "/Game/WBP_Test",
+            "animation_name": "FadeIn",
+            "fingerprint": {"domain_signature": {"scope": "umg.property_binding"}},
+            "summary_counts": {"umg_binding_count": 200, "movie_scene_binding_count": 3, "track_count": 5},
+            "bindings": bindings,
+        }
+        router, _ = _router("umg", data)
+
+        payload = json.loads(
+            router(
+                "list_animation_bindings",
+                {"asset_path": "/Game/WBP_Test", "include_track_content": True},
+            )
+        )
+
+        assert payload["_error"] == "RESPONSE_TOO_LARGE"
+        assert payload["reader_complete"] is False
+        assert "summary_counts" in payload
+        assert "_native_page_omitted" not in payload
+
     def test_native_error_keeps_qualified_command_and_no_python_pagination(self):
         connection = MagicMock()
         connection.send_command.side_effect = UECommandError(

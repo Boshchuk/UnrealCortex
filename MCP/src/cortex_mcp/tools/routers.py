@@ -471,22 +471,30 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
                             "_error": "INVALID_FIELD",
                             "_message": "Pagination parameters (limit, cursor, offset) are not supported on remove_animation_binding.",
                         })
-                elif (
-                    "include_track_content" in route_params
-                    and not isinstance(route_params["include_track_content"], bool)
-                ):
-                    return json.dumps({
-                        "_error": "INVALID_FIELD",
-                        "_message": "include_track_content must be boolean.",
-                    })
+                    detail = False
+                else:
+                    if (
+                        "include_track_content" in route_params
+                        and not isinstance(route_params["include_track_content"], bool)
+                    ):
+                        return json.dumps({
+                            "_error": "INVALID_FIELD",
+                            "_message": "include_track_content must be boolean.",
+                        })
+                    detail = route_params.get("include_track_content") is True
+                    if route_params.get("cursor") is not None:
+                        return _invalid_cursor(
+                            f"cursor is unsupported for native-owned {qualified}; "
+                            "pass native limit/offset instead."
+                        )
                 response = connection.send_command(qualified, route_params)
                 failure = _native_failure_payload(response)
                 if failure is not None:
                     return format_response(failure, "ue_command_error", command=command)
-                detail = (
-                    command == "list_animation_bindings"
-                    and route_params.get("include_track_content") is True
-                )
+                if command == "list_animation_bindings" and not detail:
+                    # A summary read is a native-owned page: its continuation was computed for the
+                    # whole page, so it is complete-or-refuse rather than shortened here.
+                    return format_native_page(response.get("data", {}), qualified, route_params)
                 return format_response(
                     response.get("data", {}),
                     f"{domain}_cmd",
