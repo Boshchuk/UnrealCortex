@@ -634,16 +634,15 @@ bool FCortexListDataAssetsClassFilterRemovedTest::RunTest(const FString& Paramet
 
 	FCortexCommandRouter Router = CreateListDataRouter();
 
-	// The obsolete class_filter selector must no longer filter list_data_assets.
+	// The obsolete class_filter selector is refused rather than silently degrading to an
+	// unfiltered result set that looks successful.
 	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 	Params->SetStringField(TEXT("class_filter"), TEXT("NonExistentClass_CortexTest"));
 	Params->SetStringField(TEXT("path_filter"), Fixture.Folder);
 	const FCortexCommandResult Result = Router.Execute(TEXT("data.list_data_assets"), Params);
-	TestTrue(TEXT("list_data_assets succeeds"), Result.bSuccess);
-	TestEqual(TEXT("obsolete class_filter no longer filters"),
-		static_cast<int32>(GetListDataFieldNumber(Result, TEXT("count"))), 2);
-	TestTrue(TEXT("obsolete class_filter does not resolve a class"),
-		GetListDataFieldString(Result, TEXT("resolved_class")).IsEmpty());
+	TestFalse(TEXT("obsolete class_filter is refused"), Result.bSuccess);
+	TestEqual(TEXT("obsolete class_filter refuses with INVALID_FIELD"),
+		Result.ErrorCode, CortexErrorCodes::InvalidField);
 
 	ADD_LATENT_AUTOMATION_COMMAND(FCortexListFixtureRetireCommand(FixtureOwner));
 	return true;
