@@ -5,6 +5,7 @@ import logging
 import os
 import re
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -17,6 +18,7 @@ from cortex_mcp.capabilities import (
     minimal_router_docstrings,
 )
 from cortex_mcp._fallback_generated import FALLBACK_COMMANDS as _FALLBACK_STRUCTURED
+from cortex_mcp.tools.routers import make_router
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -722,6 +724,68 @@ def test_cached_router_descriptions_drop_parameter_signatures():
         if command["name"] == "save_asset"
     )
     assert core_save_asset["params"], "signature metadata must not be stripped from the cache"
+
+
+# --- agent-facing capability inventory (names-only projection) ---
+
+
+def _capability_document() -> dict:
+    """Fixture-derived capability document that fits the MCP response budget.
+
+    The complete live document (~118k compact characters) exceeds MAX_RESPONSE_CHARS, so the
+    facade regressions use the fixture's real records for two domains: that exercises the names
+    projection and the full inventory instead of the size refusal.
+    """
+    full = json.loads((FIXTURES_DIR / "capabilities_cache_full.json").read_text(encoding="utf-8"))
+    return {
+        "plugin_version": full["plugin_version"],
+        "domains": {name: full["domains"][name] for name in ("core", "data")},
+    }
+
+
+def test_core_names_view_never_truncates_the_saved_capabilities_cache(tmp_path, monkeypatch):
+    """core_cmd(get_capabilities) detail=names is a response projection only.
+
+    UEConnection's handshake and the Saved cache keep the complete signature inventory, so the
+    projected read cannot leave the process without the full capability data.
+    """
+    capabilities = _capability_document()
+    cache_dir = tmp_path / "Saved" / "Cortex"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "capabilities-cache.json").write_text(json.dumps(capabilities), encoding="utf-8")
+
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": capabilities}
+    connection.send_command_cached.return_value = {"success": True, "data": capabilities}
+    router = make_router("core", connection, "core docs")
+
+    monkeypatch.setenv("CORTEX_PROJECT_DIR", str(tmp_path))
+
+    names_view = json.loads(router("get_capabilities", {"detail": "names"}))
+    assert names_view.get("_error") is None, names_view
+    assert sorted(names_view["domains"]) == sorted(capabilities["domains"])
+    assert all(
+        "params" not in command
+        for domain in names_view["domains"].values()
+        for command in domain["commands"]
+    )
+
+    # The projected read is never written back: the Saved cache stays complete.
+    cached = load_capabilities_cache()
+    assert cached == capabilities
+    cached_save_asset = next(
+        command
+        for command in cached["domains"]["core"]["commands"]
+        if command["name"] == "save_asset"
+    )
+    assert cached_save_asset["params"], "the Saved cache keeps the full signature inventory"
+
+    full_view = json.loads(router("get_capabilities", {"detail": "full"}))
+    assert full_view.get("_error") is None, full_view
+    core_commands = {
+        command["name"]: command for command in full_view["domains"]["core"]["commands"]
+    }
+    assert core_commands["save_asset"]["params"], "detail=full must keep the signature inventory"
 
 
 # --- startup toolset presets (design §2.2) ---

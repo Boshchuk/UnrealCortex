@@ -240,7 +240,9 @@ TArray<FCortexCommandInfo> FCortexDataCommandHandler::GetSupportedCommands() con
             .Optional(TEXT("string_table_path"), TEXT("string"), TEXT("StringTable path/id filter for string_table_refs mode"))
             .Optional(TEXT("key_pattern"), TEXT("string"), TEXT("Wildcard StringTable key filter for string_table_refs mode"))
             .Optional(TEXT("keys"), TEXT("array"), TEXT("Exact StringTable keys for string_table_refs mode")),
-        FCortexCommandInfo{ TEXT("get_data_catalog"), TEXT("Discovery catalog of all data") },
+        FCortexCommandInfo{ TEXT("get_data_catalog"), TEXT("Discovery catalog of all data; build only the selected sections and opt into the full asset path inventory") }
+            .Optional(TEXT("sections"), TEXT("array"), TEXT("Catalog sections to build: datatables, gameplay_tags, data_assets, string_tables, curve_tables. Omitted or empty builds every section; unknown names are refused."))
+            .Optional(TEXT("include_asset_paths"), TEXT("boolean"), TEXT("Include the full per-class asset path inventory (default: false; use list_data_assets for one class)")),
         FCortexCommandInfo{ TEXT("resolve_tags"), TEXT("Look up rows by GameplayTag") }
             .Required(TEXT("table_path"), TEXT("string"), TEXT("Target DataTable asset path"))
             .Required(TEXT("tag_field"), TEXT("string"), TEXT("Field containing GameplayTags"))

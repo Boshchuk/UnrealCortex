@@ -384,6 +384,8 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
                         qualified_command="get_data_catalog",
                         request_params=route_params,
                     )
+                if command == "get_capabilities":
+                    return _get_capabilities(connection, route_params)
                 if command == "batch_query":
                     import json as _json
                     commands = route_params.get("commands")
@@ -605,6 +607,83 @@ def _qualify_command(domain: str, command: str) -> str:
     if domain == "core" and command in {"get_status", "get_capabilities"}:
         return command
     return f"{domain}.{command}"
+
+
+_CAPABILITIES_DETAIL_VALUES = ("names", "full")
+
+
+def _project_capability_names(document: dict) -> dict:
+    """Names-only projection of an authoritative capabilities document.
+
+    Domains, command names and every non-signature field are preserved; only the per-command
+    ``params`` signature inventory is dropped. A NEW document is built, so the authoritative
+    response — and the Saved cache it was read from — is never mutated in place.
+    """
+    if not isinstance(document, dict):
+        return document
+
+    domains = document.get("domains")
+    if not isinstance(domains, dict):
+        return document
+
+    projected_domains: dict[str, Any] = {}
+    for domain, body in domains.items():
+        if not isinstance(body, dict) or not isinstance(body.get("commands"), list):
+            projected_domains[domain] = body
+            continue
+        projected_body = {k: v for k, v in body.items() if k != "commands"}
+        projected_body["commands"] = [
+            {k: v for k, v in command.items() if k != "params"}
+            if isinstance(command, dict)
+            else command
+            for command in body["commands"]
+        ]
+        projected_domains[domain] = projected_body
+
+    projected = {k: v for k, v in document.items() if k != "domains"}
+    projected["domains"] = projected_domains
+    return projected
+
+
+def _get_capabilities(connection, params: dict) -> str:
+    """Agent-facing capability inventory: ``detail=names`` (default) or ``detail=full``.
+
+    ``detail`` is Python-owned presentation only. It is validated and removed before the native
+    call, and the native ``get_capabilities`` command never receives it. The projection runs after
+    the authoritative response arrives, so a projected view is never written back to the Saved
+    capabilities cache and a following ``detail=full`` read still carries the signatures.
+    """
+    detail = params.get("detail", "names")
+    if detail not in _CAPABILITIES_DETAIL_VALUES:
+        return json.dumps({
+            "_error": "INVALID_FIELD",
+            "_message": "detail must be 'names' (default) or 'full'.",
+        })
+
+    native_params = {k: v for k, v in params.items() if k != "detail"}
+    response = connection.send_command_cached(
+        "get_capabilities",
+        native_params,
+        ttl=_CACHED_READ_TTL,
+    )
+    failure = _native_failure_payload(response)
+    if failure is not None:
+        return format_response(failure, "ue_command_error", command="get_capabilities")
+
+    data = response.get("data", {})
+    if detail == "full":
+        return format_response(
+            data,
+            "get_capabilities",
+            qualified_command="get_capabilities",
+            request_params=native_params,
+        )
+    return format_response(
+        _project_capability_names(data),
+        "get_capabilities",
+        qualified_command="get_capabilities",
+        request_params=native_params,
+    )
 
 
 def _switch_editor(connection, params: dict) -> str:
