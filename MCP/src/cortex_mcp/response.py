@@ -153,6 +153,10 @@ _RESERVED_REFUSAL_KEYS = frozenset({
 # Native diagnostics that accompany an incomplete read (partial/issues/warnings). They are context,
 # not the value payload: carried when they fit, and reported by count plus an explicit omission when
 # they cannot, so a refusal never silently loses why a read was incomplete.
+# Continuation fields that advertise rows the caller has not received. A refusal carries no rows, so
+# republishing one would let a client advance on it and skip the rejected page entirely.
+_ADVANCING_CONTINUATION_KEYS = ("next_offset", "next_cursor")
+
 _DIAGNOSTIC_ARRAY_KEYS = ("issues", "warnings", "diagnostics")
 
 
@@ -260,7 +264,11 @@ def format_native_page(data: dict, qualified_command: str, params: dict) -> str:
             "shortens a native page because the continuation was computed for the full page."
         ),
     }
-    return _bounded_refusal(payload, _selector_context(data, params))
+    context = _selector_context(data, params)
+    # The refusal returns no rows, so it must not advertise progress through the rows it omitted.
+    for key in _ADVANCING_CONTINUATION_KEYS:
+        context.pop(key, None)
+    return _bounded_refusal(payload, context)
 
 
 def _bounded_detail_oversize(data: dict) -> str:

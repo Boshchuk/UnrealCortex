@@ -61,6 +61,9 @@ NATIVE_LIMIT_COMMANDS = frozenset({
     ("editor", "get_recent_logs"),
     ("anim", "list_assets"),
     ("gen", "list_jobs"),
+    # umg.list_animation_bindings declares limit/offset, validates them in C++ and emits its own
+    # next_offset/is_complete continuation, so it owns its page like the other native readers.
+    ("umg", "list_animation_bindings"),
 })
 
 # Cache-owned unbounded reads: qualified read command -> the owner's primary array. Only simple
@@ -527,8 +530,9 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
                     return error
                 if qualified in CACHED_PAGE_ARRAYS:
                     return _handle_limit_request(qualified, route_params, limit, connection)
-                # This read does not advertise limit: never guess an array, keep the read complete.
-                route_params = {k: v for k, v in route_params.items() if k != "limit"}
+                # Not a Python page owner: keep the parameter. Dropping it here would silently
+                # discard what the caller sent and hide an undeclared `limit` from the native
+                # declared-contract validator that exists to refuse it.
 
             # No pagination — normal dispatch
             if (domain, command) in _CACHED_READ_COMMANDS:

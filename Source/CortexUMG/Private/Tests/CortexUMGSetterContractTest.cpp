@@ -90,6 +90,20 @@ bool FCortexUMGSetterContractTest::RunTest(const FString& Parameters)
         return *Prop->ContainerPtrToValuePtr<EHorizontalAlignment>(Target->Slot);
     };
 
+    auto ReadSlotVerticalAlignment = [](UWidget* Target) -> TOptional<EVerticalAlignment>
+    {
+        if (Target == nullptr || Target->Slot == nullptr)
+        {
+            return {};
+        }
+        FProperty* Prop = Target->Slot->GetClass()->FindPropertyByName(TEXT("VerticalAlignment"));
+        if (Prop == nullptr)
+        {
+            return {};
+        }
+        return *Prop->ContainerPtrToValuePtr<EVerticalAlignment>(Target->Slot);
+    };
+
     // ---------------------------------------------------------------- set_padding
     {
         TSharedPtr<FJsonObject> Padding = MakeShared<FJsonObject>();
@@ -296,6 +310,26 @@ bool FCortexUMGSetterContractTest::RunTest(const FString& Parameters)
         const TOptional<EHorizontalAlignment> AfterRefusal = ReadSlotAlignment(ColumnLabel);
         TestTrue(TEXT("refused alignment token must not change the slot"),
             AfterRefusal.IsSet() && AfterRefusal.GetValue() == EHorizontalAlignment::HAlign_Center);
+    }
+    {
+        // An explicitly supplied empty token is not a valid alignment. Ignoring it while applying the
+        // other axis would silently discard what the caller asked for.
+        TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+        Params->SetStringField(TEXT("asset_path"), AssetPath);
+        Params->SetStringField(TEXT("widget_name"), TEXT("ColumnLabel"));
+        Params->SetStringField(TEXT("horizontal"), TEXT(""));
+        Params->SetStringField(TEXT("vertical"), TEXT("Bottom"));
+
+        const FCortexCommandResult Result = Router.Execute(TEXT("umg.set_alignment"), Params);
+        TestFalse(TEXT("supplied empty alignment token must be refused"), Result.bSuccess);
+        TestEqual(TEXT("empty alignment token should be INVALID_PROPERTY_VALUE"),
+            Result.ErrorCode, CortexErrorCodes::InvalidPropertyValue);
+        const TOptional<EHorizontalAlignment> HorizontalAfter = ReadSlotAlignment(ColumnLabel);
+        TestTrue(TEXT("refused empty token must not change horizontal alignment"),
+            HorizontalAfter.IsSet() && HorizontalAfter.GetValue() == EHorizontalAlignment::HAlign_Center);
+        const TOptional<EVerticalAlignment> VerticalAfter = ReadSlotVerticalAlignment(ColumnLabel);
+        TestTrue(TEXT("refused empty token must not apply the other axis"),
+            !VerticalAfter.IsSet() || VerticalAfter.GetValue() != EVerticalAlignment::VAlign_Bottom);
     }
 
     // ---------------------------------------------------------------- set_size

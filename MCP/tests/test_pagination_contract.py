@@ -114,7 +114,16 @@ class TestNativeOwnership:
 
     def test_oversize_native_page_refuses_without_advancing_continuation(self):
         rows = [{"name": f"Row_{i}", "payload": "x" * 400} for i in range(200)]
-        data = {"rows": rows, "total_count": 500, "offset": 0, "limit": 200}
+        # A real native page advertises its own continuation; the refusal must not republish it.
+        data = {
+            "rows": rows,
+            "total_count": 500,
+            "offset": 0,
+            "limit": 200,
+            "next_offset": 200,
+            "next_cursor": "opaque-native-continuation",
+            "is_complete": False,
+        }
         router, _ = _router("data", data)
 
         payload = json.loads(router("query_datatable", {"table_path": "/Game/DT_Test", "limit": 200}))
@@ -133,6 +142,47 @@ class TestNativeOwnership:
         assert payload["_suggestion"]
         assert "smaller limit" in payload["_suggestion"].lower()
         assert len(compact_json(payload)) <= MAX_RESPONSE_CHARS
+
+    @pytest.mark.parametrize(
+        "command,params",
+        [
+            ("set_text", {"asset_path": "/Game/WBP_Test", "widget_name": "Target", "text": "new text"}),
+            ("set_font", {"asset_path": "/Game/WBP_Test", "widget_name": "Target", "size": 12}),
+            (
+                "set_padding",
+                {
+                    "asset_path": "/Game/WBP_Test",
+                    "widget_name": "Target",
+                    "padding": {"left": 0, "top": 1, "right": 0, "bottom": 0},
+                },
+            ),
+            ("set_anchor", {"asset_path": "/Game/WBP_Test", "widget_name": "Target", "preset": "Center"}),
+            ("set_alignment", {"asset_path": "/Game/WBP_Test", "widget_name": "Target", "horizontal": "Center"}),
+            ("set_size", {"asset_path": "/Game/WBP_Test", "widget_name": "Target", "width": 10}),
+        ],
+    )
+    def test_strict_setter_keeps_an_undeclared_limit_for_the_native_validator(self, command, params):
+        """Python pagination keys are consumed only by page owners; every other command keeps its
+        parameters verbatim, so the native declared-contract validator can refuse them."""
+        router, connection = _router("umg", {})
+
+        router(command, {**params, "limit": 1})
+
+        forwarded = connection.send_command.call_args.args[1]
+        assert forwarded == {**params, "limit": 1}
+
+    def test_umg_native_page_owner_forwards_its_own_declared_limit(self):
+        """umg.list_animation_bindings owns its page in C++; the Python layer must not eat its limit."""
+        data = {
+            "bindings": [],
+            "pagination": {"total": 0, "offset": 0, "limit": 5, "returned": 0, "next_offset": None, "is_complete": True},
+        }
+        router, connection = _router("umg", data)
+
+        router("list_animation_bindings", {"asset_path": "/Game/WBP_Test", "limit": 5})
+
+        forwarded = connection.send_command.call_args.args[1]
+        assert forwarded["limit"] == 5
 
     def test_native_error_keeps_qualified_command_and_no_python_pagination(self):
         connection = MagicMock()
@@ -276,9 +326,8 @@ class TestCachedPages:
         assert "_pagination" not in payload
         assert payload["nodes"] == data["nodes"]
         assert payload["edges"] == data["edges"]
-        command, params = connection.send_command.call_args[0]
+        command, _params = connection.send_command.call_args[0]
         assert command == "graph.get_subgraph"
-        assert "limit" not in params
 
 
 def _huge_fields(prefix: str, count: int = 200, size: int = 400) -> dict:

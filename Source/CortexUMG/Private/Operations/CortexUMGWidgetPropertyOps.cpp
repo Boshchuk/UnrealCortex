@@ -858,10 +858,10 @@ FCortexCommandResult FCortexUMGWidgetPropertyOps::SetAlignment(const TSharedPtr<
 
     FString Horizontal;
     FString Vertical;
-    Params->TryGetStringField(TEXT("horizontal"), Horizontal);
-    Params->TryGetStringField(TEXT("vertical"), Vertical);
+    const bool bHasHorizontal = Params->TryGetStringField(TEXT("horizontal"), Horizontal);
+    const bool bHasVertical = Params->TryGetStringField(TEXT("vertical"), Vertical);
 
-    if (Horizontal.IsEmpty() && Vertical.IsEmpty())
+    if (!bHasHorizontal && !bHasVertical)
     {
         return FCortexCommandRouter::Error(
             CortexErrorCodes::InvalidField,
@@ -886,14 +886,16 @@ FCortexCommandResult FCortexUMGWidgetPropertyOps::SetAlignment(const TSharedPtr<
         return {};
     };
 
-    // Reject an unusable token before the slot is touched.
-    if (!Horizontal.IsEmpty() && !ParseHAlign(Horizontal).IsSet())
+    // Reject an unusable token before the slot is touched. A supplied token is judged on what was
+    // sent, not on its emptiness: treating an explicit empty string as an omission would apply the
+    // other axis while silently discarding what the caller asked for.
+    if (bHasHorizontal && !ParseHAlign(Horizontal).IsSet())
     {
         return FCortexCommandRouter::Error(
             CortexErrorCodes::InvalidPropertyValue,
             FString::Printf(TEXT("Unknown horizontal alignment '%s'. Valid values: Left, Center, Right, Fill"), *Horizontal));
     }
-    if (!Vertical.IsEmpty() && !ParseVAlign(Vertical).IsSet())
+    if (bHasVertical && !ParseVAlign(Vertical).IsSet())
     {
         return FCortexCommandRouter::Error(
             CortexErrorCodes::InvalidPropertyValue,
