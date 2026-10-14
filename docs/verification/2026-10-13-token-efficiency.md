@@ -138,6 +138,13 @@ The follow-up migration is therefore source-verified per entry instead:
 
 ## Post-acceptance: propagation and live MCP benchmark (2026-10-14)
 
+> **Resolved (2026-10-14).** The five findings recorded in this section were re-verified and
+> dispositioned: `umg.set_padding`, `umg.set_anchor` and `data.list_data_assets` were real and now
+> refuse the undeclared parameter explicitly; the `core.get_capabilities` finding was an artifact of a
+> **stale MCP server process** (it predated the `detail=names` facade), not a code defect; and the
+> `material.create_material` finding did not reproduce and was withdrawn. See
+> `2026-10-14-mcp-benchmark-remediation.md`.
+
 **Toolkit propagation.** `cortex-toolkit` branch `feat/issue-180-contract-sync` off `fb5f959`, 9
 documentation-only commits (tip `fda9c4750321f717d0d49b55c1b1845f41533258`), not pushed. It updates
 resource/agent guidance for the changed contracts and corrects one contract-matrix claim from source: the

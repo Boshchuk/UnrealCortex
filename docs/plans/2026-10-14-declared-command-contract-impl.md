@@ -48,6 +48,16 @@ only the enforcement was missing. The Python padding test failed with `KeyError:
 | Python `-m "not e2e and not scenario and not stress"` | 1093 passed (baseline 1087 + 6 new) |
 | Live MCP probes | see `docs/verification/2026-10-14-mcp-benchmark-remediation.md` |
 
+**Run identity and retained evidence** (CortexSandbox project-repo paths; commit `ec163181`): candidate
+build `Saved/Logs/ubt_green3.txt` (exit 0; the only warnings are the pre-existing `C4996`
+`GetObjectsWithPackage` deprecations in CortexData tests). Native runs
+`Saved/TestLogs/AutomationTest_2026-10-14_090406.log` (`Cortex.UMG.SetterContract+`),
+`…_090317.log` (`Cortex.Data+`), `…_090439.log` (`Cortex.Core+`, "205 tests performed"),
+`…_090553.log` (the isolated rename test) and `…_090940.log` (full `Cortex+`, "1877 tests performed").
+The declaration totals (497 required / 526 optional) are a source count over
+`Source/**/*CommandHandler.cpp`; the Python capability fixture is a partial mirror of the same commit
+and is not the source of those totals.
+
 Two independent read-only reviews covered the native contract/declarations and the Python/docs changes;
 both returned no production defect. Their two actionable findings were applied: the stale
 `main_menu_batch_request.json` padding shape and three documentation claims that overstated what the

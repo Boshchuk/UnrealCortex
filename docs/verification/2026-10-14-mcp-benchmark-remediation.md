@@ -1,7 +1,7 @@
 # MCP benchmark remediation — verification
 
 **Date:** 2026-10-14
-**Source:** `Saved/mcp_benchmark_issues_20261014_075611.md` (5 findings)
+**Source:** `CortexSandbox/Saved/mcp_benchmark_issues_20261014_075611.md` (CortexSandbox project-repo path; 5 findings)
 **Design/impl:** `docs/plans/2026-10-14-declared-command-contract-design.md`, `-impl.md`
 
 ## Outcome per finding

@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-14
 **Status:** Implemented
-**Context:** MCP benchmark remediation (`Saved/mcp_benchmark_issues_20261014_075611.md`)
+**Context:** MCP benchmark remediation (`CortexSandbox/Saved/mcp_benchmark_issues_20261014_075611.md`, a CortexSandbox project-repo path)
 
 ## Problem
 
@@ -48,6 +48,9 @@ The published declaration becomes the single source of truth.
   clear state (e.g. `umg.set_property_binding`), so `HasField` is the presence test.
 - **Router-owned keys are exempt.** Parameters injected by the MCP layer carry a leading underscore
   (e.g. `_telemetry_parallel`) and are always accepted.
+- **Only the command's own top-level names are checked.** The validator does not recurse into nested
+  objects or arrays, and it does not verify that an underscore-prefixed key actually came from the
+  router — a caller could supply one and have it ignored.
 - **Semantic constraints stay in handlers.** A schema cannot express "this value must be a known preset
   token" or "name at least one settable field", so those checks live in the handler — still before the
   transaction and any mutation, and they no longer report `set: true` for a request they ignored.
@@ -59,8 +62,9 @@ The published declaration becomes the single source of truth.
 
 Enforcing the declared contract centrally for every routed command is the same one-line opt-in in
 `FCortexCommandRouter::Execute`, but it changes acceptance for ~200 commands, including downstream
-automation outside this repository. It is recorded as `TD-MCP-005` in
-`docs/tech-debt/cortex-mcp-tech-debt.md` with the audit and replay evidence it requires first; the
+automation outside this repository. It is recorded as `TD-MCP-005` in the CortexSandbox project repo
+(`CortexSandbox/docs/tech-debt/cortex-mcp-tech-debt.md` — project-side debt lives there, not in this
+plugin repo) with the audit and replay evidence it requires first; the
 `set_anchor`/`set_font` mismatches are the proof that the published metadata is not yet trustworthy in
 general.
 
