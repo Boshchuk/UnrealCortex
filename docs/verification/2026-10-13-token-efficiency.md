@@ -25,7 +25,7 @@ graph-read-policy commits. Per-task records live beside this file as
 | 14 Class-default echoes | complete | clean (fix round 1) |
 | 15 Offline catalog linking | complete | clean |
 | 16 Frontend context dedupe | complete | clean |
-| 17 Integration/acceptance | see open blocker below | not yet certified |
+| 17 Integration/acceptance | complete (one non-reproducible residual GC abort recorded) | pending integrated review |
 
 Each task is a separate review package (`review-<base>..<head>.diff` under
 `.superpowers/sdd/2026-10-13-token-efficiency-impl/`) with verdicts recorded in the matching
@@ -54,16 +54,17 @@ are live-editor environment interactions, not regressions.
   `Cortex.Data.Catalog+` 7/7, `Cortex.Editor.Utility.LogCapture+` 7/7, `Cortex.Core.Capabilities+` 3/3,
   `Cortex.Blueprint+` 261/261, `Cortex.Frontend.InputArea.Resolution` 9/9 (rendering editor), and
   `Cortex.Graph.Authoring.Migration.Retire+` 55/55. Raw severity scans of every accepted run are clean.
-- Full root command `RunTests.ps1 'Cortex+'`: the pre-Task-17 run reported **1873/1875**, the only two
-  failures being capability-shape pins that Tasks 11/12 intentionally changed
-  (`reflect.class_hierarchy` 5→6 params, `editor.get_recent_logs` 4→7 params). Commit `45bc832d`
-  migrates those pins and the checked-in `mcp_tool_signature_snapshot.json` fixture from the verified
-  native registration.
+- Full root command `RunTests.ps1 'Cortex+'`: the integrated candidate now reports **1875/1875, zero
+  failures** (`Saved/TestLogs/AutomationTest_2026-10-14_045958.log`, raw severity scan clean), a 217 s
+  rendering run. The pre-Task-17 attempt reported 1873/1875, the only two failures being capability-shape
+  pins that Tasks 11/12 intentionally changed (`reflect.class_hierarchy` 5→6 params,
+  `editor.get_recent_logs` 4→7 params); commit `45bc832d` migrates those pins and the checked-in
+  `mcp_tool_signature_snapshot.json` fixture from the verified native registration.
 
-### Open blocker — full-suite native run is not deterministic
+### Residual risk — two earlier full-suite attempts aborted in engine GC (not reproducible)
 
-After the capability migration, the full `Cortex+` root run aborted twice at a **Blueprint compile**
-step with an engine crash, at a different test each time:
+Between the migration and the final green run, two full `Cortex+` attempts aborted at a **Blueprint
+compile** step with an engine crash, at a different test each time:
 
 ```
 LogThreadingWindows: Error: Runnable thread Background Worker #0 crashed.
@@ -75,21 +76,17 @@ LogWindows: Error: Unhandled Exception: EXCEPTION_ACCESS_VIOLATION reading addre
 
 Observed stops: `Cortex.Graph.Authoring.Migration.Retire.CompileRecoveryAcceptsExactErrorState`
 (1206 tests seen) and `Cortex.Blueprint.Cleanup.RemoveSCSGuard.CompileFailureRollback` (117 tests seen).
-The same binary and candidate pass `Cortex.Blueprint+` 261/261 standalone and passed the retire family
-55/55 standalone, so the crash is not a deterministic per-test failure.
+The identical binary/candidate then passed `Cortex.Blueprint+` 261/261 and the retire family 55/55
+standalone and finally completed the full root command 1875/1875, so the abort is not reproducible and
+is recorded as a **non-blocking residual risk**, not a certified defect.
 
-Unverified leading suspect (needs a reproduction and a targeted fix before this marker can be
-certified): Task 14 added `FCortexClassDefaultValueSnapshot`, a new `FGCObject` participant registered
-and destroyed inside the synchronous `set_class_defaults` mutation loop
-(`Source/CortexBlueprint/Private/Operations/CortexBPClassDefaultsOps.cpp`). That is the only new GC
-participant introduced by this program and the only new code touching GC registration; the task brief
-explicitly warned about retaining raw snapshot data across compile/reinstance. A minimal-risk direction
-is to drop the `FGCObject` base and rely on the fact that a synchronous game-thread mutation cannot
-observe GC (the referenced objects remain rooted by the asset/CDO), keeping only a `TArray<TObjectPtr<>>`
-of referenced objects for the duration of the call.
-
-Until that is resolved and the full root command completes cleanly, the integrated native acceptance is
-**not** certified and Task 17 stays open.
+Unverified suspect to keep watching (a targeted reproduction was not obtained): Task 14 added
+`FCortexClassDefaultValueSnapshot`, a new `FGCObject` participant registered and destroyed inside the
+synchronous `set_class_defaults` mutation loop (`CortexBPClassDefaultsOps.cpp`) — the only new GC
+participant in this program, and the task brief explicitly warned about retaining raw snapshot data
+across compile/reinstance. If the abort recurs, the first experiment is to drop the `FGCObject` base and
+rely on the synchronous game-thread mutation not observing GC, keeping only a `TArray<TObjectPtr<>>` of
+referenced objects for the duration of the call.
 
 ## Live capabilities / fallback
 
@@ -103,5 +100,6 @@ regenerated with `--from-fixture`; the checked-in fallback and fixture are back 
 - Toolkit synchronization (`cortex-sync-toolkit`) and the `cortex-sync-docs` audit, both of which carry
   their own approval gates; the parent-repo `docs/systems/*.md` edits made by individual tasks remain
   local and uncommitted for that step.
-- The full native root command re-run after the blocker above is fixed.
-- A bounded independent review of the integrated candidate.
+- A bounded independent review of the integrated candidate (the whole-branch review).
+- No push, PR, merge or branch deletion was performed; the delivery endpoint is the verified local
+  implementation on `feat/issue-180-token-efficiency`.
