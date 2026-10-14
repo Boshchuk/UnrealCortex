@@ -352,6 +352,48 @@ class TestCompleteOrRefuseReadPolicies:
         assert "limit" not in suggestion
         assert len(compact_json(payload)) <= MAX_RESPONSE_CHARS
 
+    def test_graph_subgraph_explicit_node_read_is_never_silently_truncated(self):
+        # graph.get_subgraph selects explicit node_ids and reads a mixed node+edge topology. An
+        # oversized read must refuse naming that selector, and a fitting read must return every
+        # requested node — either way the node array is never silently shortened, and the generic
+        # largest-array truncator (which would emit `_truncated`) must never own this read.
+        node_ids = [f"n{i}" for i in range(30)]
+        request = {"asset_path": "/Game/BP_Test", "graph_name": "EventGraph", "node_ids": node_ids}
+
+        oversized = {
+            "nodes": [{"node_id": nid, "title": "N" * 2000} for nid in node_ids],
+            "node_count": 30,
+            "edges": [{"from": "n0", "to": "n1"}],
+        }
+        router, _ = _router("graph", oversized)
+
+        payload = json.loads(router("get_subgraph", request))
+
+        assert payload["_error"] == "RESPONSE_TOO_LARGE"
+        assert payload["reader_complete"] is False
+        assert "nodes" not in payload
+        assert "_truncated" not in payload
+        assert payload["asset_path"] == "/Game/BP_Test"
+        assert payload["graph_name"] == "EventGraph"
+        suggestion = payload["_suggestion"]
+        assert "node_ids" in suggestion or "include_edges" in suggestion
+        assert len(compact_json(payload)) <= MAX_RESPONSE_CHARS
+
+        fitting = {
+            "nodes": [{"node_id": nid, "title": f"Node {nid}"} for nid in node_ids],
+            "node_count": 30,
+            "edges": [{"from": "n0", "to": "n1"}],
+        }
+        router, _ = _router("graph", fitting)
+
+        payload = json.loads(router("get_subgraph", request))
+
+        assert "_error" not in payload
+        assert payload["nodes"] == fitting["nodes"]
+        assert set(node_ids) <= {node["node_id"] for node in payload["nodes"]}
+        assert "_truncated" not in payload
+        assert payload.get("reader_complete") is not False
+
     def test_blueprint_defaults_oversize_refuses_naming_discovery_selectors(self):
         data = {
             "asset_path": "/Game/BP_Test",

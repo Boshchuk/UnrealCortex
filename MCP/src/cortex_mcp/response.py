@@ -59,6 +59,10 @@ _COMPLETE_OR_REFUSE_POLICIES: dict[str, str] = {
         "Bound the traversal with 'depth' or 'max_nodes', use names_only=true for a lean "
         "hierarchy, or inspect one widget with umg.get_widget."
     ),
+    "graph.get_subgraph": (
+        "Select fewer 'node_ids' (a smaller subgraph never pages the whole edge topology), or "
+        "pass include_edges=false to read the node identities alone."
+    ),
     "blueprint.get_class_defaults": _PROPERTIES_DISCOVERY_SELECTOR,
     "blueprint.list_settable_defaults": _PROPERTIES_DISCOVERY_SELECTOR,
     "blueprint.list_inherited_properties": _PROPERTIES_DISCOVERY_SELECTOR,
