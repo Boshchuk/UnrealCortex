@@ -1,4 +1,5 @@
 #include "Misc/AutomationTest.h"
+#include "CortexEngineCompat.h"
 
 #include "CortexBPTestLiftActor.h"
 #include "Operations/CortexBPClassDefaultsOps.h"
@@ -364,7 +365,7 @@ bool FCortexBPDiscoveryMetadataOnlyTest::RunTest(const FString& Parameters)
 		int32 ValueFields = 0;
 		int32 MemberFields = 0;
 		int32 MissingFormats = 0;
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*Properties)->Values)
+		for (const auto& Pair : (*Properties)->Values)
 		{
 			const TSharedPtr<FJsonObject> Entry = Pair.Value.IsValid() ? Pair.Value->AsObject() : nullptr;
 			if (!Entry.IsValid())
