@@ -170,7 +170,7 @@ void CortexUMGAddWidgetLegacyIdentityAssertHierarchyCoverage(
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexUMGAddWidgetLegacyIdentityTest,
-	"Cortex.UMG.AddWidget.LegacyIdentity.EmptyMap",
+	"Cortex.UMG.AddWidgetLegacyIdentity.EmptyMap",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FCortexUMGAddWidgetLegacyIdentityTest::RunTest(const FString& Parameters)
@@ -356,7 +356,7 @@ bool FCortexUMGAddWidgetLegacyIdentityTest::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexUMGAddWidgetRejectedParentKeepsEmptyMapTest,
-	"Cortex.UMG.AddWidget.LegacyIdentity.RejectedParentKeepsEmptyMap",
+	"Cortex.UMG.AddWidgetLegacyIdentity.RejectedParentKeepsEmptyMap",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FCortexUMGAddWidgetRejectedParentKeepsEmptyMapTest::RunTest(const FString& Parameters)
@@ -398,7 +398,7 @@ bool FCortexUMGAddWidgetRejectedParentKeepsEmptyMapTest::RunTest(const FString& 
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexUMGAddWidgetPopulatedIdentityRetentionTest,
-	"Cortex.UMG.AddWidget.LegacyIdentity.PopulatedRetention",
+	"Cortex.UMG.AddWidgetLegacyIdentity.PopulatedRetention",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FCortexUMGAddWidgetPopulatedIdentityRetentionTest::RunTest(const FString& Parameters)
@@ -459,7 +459,7 @@ bool FCortexUMGAddWidgetPopulatedIdentityRetentionTest::RunTest(const FString& P
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexUMGAddWidgetPopulatedUndoRedoTest,
-	"Cortex.UMG.AddWidget.LegacyIdentity.PopulatedUndoRedo",
+	"Cortex.UMG.AddWidgetLegacyIdentity.PopulatedUndoRedo",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FCortexUMGAddWidgetPopulatedUndoRedoTest::RunTest(const FString& Parameters)
