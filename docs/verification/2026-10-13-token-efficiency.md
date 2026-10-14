@@ -83,13 +83,25 @@ The identical binary/candidate then passed `Cortex.Blueprint+` 261/261 and the r
 standalone and finally completed the full root command 1875/1875, so the abort is not reproducible and
 is recorded as a **non-blocking residual risk**, not a certified defect.
 
-Unverified suspect to keep watching (a targeted reproduction was not obtained): Task 14 added
-`FCortexClassDefaultValueSnapshot`, a new `FGCObject` participant registered and destroyed inside the
-synchronous `set_class_defaults` mutation loop (`CortexBPClassDefaultsOps.cpp`) — the only new GC
-participant in this program, and the task brief explicitly warned about retaining raw snapshot data
-across compile/reinstance. If the abort recurs, the first experiment is to drop the `FGCObject` base and
-rely on the synchronous game-thread mutation not observing GC, keeping only a `TArray<TObjectPtr<>>` of
-referenced objects for the duration of the call.
+Unverified suspect — now triaged and discounted: Task 14 added `FCortexClassDefaultValueSnapshot`, the
+only new `FGCObject` participant in this program (`CortexBPClassDefaultsOps.cpp:1201`, with
+`AddReferencedObjects` at `:1256`). Source inspection shows no plausible causal link: the snapshot's
+lifetime (constructed `:2428`, released with the journal at `:2533`) ends **before** the explicit
+`FKismetEditorUtilities::CompileBlueprint` at `:2540` whose synchronous `CollectGarbage` is what walks the
+crashing collector, and it is built only for wide-integer roots.
+
+The evidence instead points to a pre-existing, environment-level intermittent engine GC crash reachable
+from `CompileBlueprint` → `CollectGarbage`: 37 crash contexts with this exact signature (`0x…0c` at
+`GarbageCollection.cpp:3286`) appear in this project's logs from 2026-02-12 through 2026-10-14 across UE
+5.6.1 / 5.8.2 / 5.8.3, including a 2026-10-03 instance whose stack runs `SetReplicationSettings` →
+`CompileBlueprint` → `CollectGarbage` with no Task 14 code anywhere in the path. Both 2026-10-14 aborts
+stopped in tests that never construct a snapshot, and the snapshot-path tests passed inside both aborted
+runs.
+
+Conclusion: **non-blocking residual risk, not a defect of this program**; no code change is warranted on
+the available evidence. One secondary latent item stays on watch and is recorded with its reproduction
+recipe in `docs/tech-debt/cortex-blueprint-tech-debt.md`: `CollectObjectReferences` models every
+`FObjectPropertyBase` uniformly and has no weak/lazy/interface/delegate branch.
 
 ## Live capabilities / fallback
 
