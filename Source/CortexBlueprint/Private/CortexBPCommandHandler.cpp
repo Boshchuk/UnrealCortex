@@ -300,6 +300,7 @@ TArray<FCortexCommandInfo> FCortexBPCommandHandler::GetSupportedCommands() const
 		.Optional(TEXT("properties"), TEXT("array"), TEXT("Specific property paths to read; nonempty defaults to effective values"))
 		.Optional(TEXT("include_values"), TEXT("boolean"), TEXT("Include effective values; default true for a selected read, false for discovery"))
 		.Optional(TEXT("include_members"), TEXT("boolean"), TEXT("Expand one level of struct member metadata (values only with include_values)"))
+		.Optional(TEXT("changed_only"), TEXT("boolean"), TEXT("Return only defaults differing from the parent class baseline (inherited delta); requires include_values and excludes include_members"))
 		.Optional(TEXT("discovery_offset"), TEXT("number"), TEXT("Metadata discovery page offset; default 0"))
 		.Optional(TEXT("discovery_limit"), TEXT("number"), TEXT("Metadata discovery page size; default 100, max 200"))
 		.Optional(TEXT("blueprint_path"), TEXT("string"), TEXT("Optional alternate Blueprint path")));

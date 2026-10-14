@@ -536,6 +536,8 @@ All 14 modules declare `"Type": "Editor"` in `UnrealCortex.uplugin`. Because `Ty
 
 `FCortexSerializer` uses Unreal's property system (`FProperty*`, `UStruct*`) to convert any UStruct to JSON. Domain modules focus on logic, not formatting — they never write JSON manually.
 
+`FCortexSerializer::PropertyDifferenceToJson` serializes the recursive difference between a value and an inherited baseline. Identical values produce no value at all, structs of the same type are compared member by member so equal members are omitted, and arrays, sets, maps, object identities and scalars are compared whole and serialized atomically. A comparison that exhausts its depth budget reports a structured issue and a partial result instead of a sentinel value. The caller owns the baseline's identity, so a caller never reads one instance's fields through another instance's layout. Blueprint's `get_class_defaults` uses it for `changed_only=true` (which requires `include_values=true` and refuses `include_members`, because that describes effective members rather than deltas): the response declares `value_mode=inherited_delta` and `baseline_class`, sets `effective_values_complete=false`, lists equal-to-baseline roots under `omitted_equal_properties`, and reports subclass-owned roots (which have no inherited baseline) as their own effective values.
+
 ### Hot Reload
 
 After a Live Coding recompile, the TCP server restarts automatically with the new module. If reconnection fails, restarting the editor restores the connection.

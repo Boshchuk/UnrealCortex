@@ -397,6 +397,7 @@ namespace
 		bool bIncludeValues = false;
 		bool bIncludeValuesSupplied = false;
 		bool bIncludeMembers = false;
+		bool bChangedOnly = false;
 		int32 Offset = 0;
 		int32 Limit = DiscoveryDefaultLimit;
 	};
@@ -468,8 +469,8 @@ namespace
 		return true;
 	}
 
-	// Parses the shared include_values/include_members/discovery_offset/discovery_limit controls
-	// before any property is admitted. Malformed flags and out-of-range limits refuse.
+	// Parses the shared include_values/include_members/changed_only/discovery_offset/discovery_limit
+	// controls before any property is admitted. Malformed flags and out-of-range limits refuse.
 	static bool ParseDiscoveryReadControls(
 		const TSharedPtr<FJsonObject>& Params,
 		FDiscoveryReadControls& OutControls,
@@ -484,6 +485,10 @@ namespace
 		}
 		OutControls.bIncludeValuesSupplied = bSupplied;
 		if (!ReadOptionalBoolControl(Params, TEXT("include_members"), OutControls.bIncludeMembers, bSupplied, OutError))
+		{
+			return false;
+		}
+		if (!ReadOptionalBoolControl(Params, TEXT("changed_only"), OutControls.bChangedOnly, bSupplied, OutError))
 		{
 			return false;
 		}
@@ -566,6 +571,67 @@ namespace
 		const int32 Dot = Selector.Find(TEXT("."), ESearchCase::CaseSensitive);
 		const FString RootName = Dot == INDEX_NONE ? Selector : Selector.Left(Dot);
 		return FindFProperty<FProperty>(GeneratedClass, FName(*RootName));
+	}
+
+	// Resolves the parent-layout field of an admitted root. An inherited baseline only exists when the
+	// parent class owns the very same field instance (inherited, never a same-named subclass field)
+	// with a compatible type at the identical offset of the parent instance layout, so a subclass field
+	// is never read through parent memory. Anything else is a subclass-owned root with no baseline.
+	static FProperty* ResolveParentBaselineProperty(const FProperty* RootProperty, UClass* ParentClass)
+	{
+		if (!RootProperty || !ParentClass)
+		{
+			return nullptr;
+		}
+
+		FProperty* ParentProperty = ParentClass->FindPropertyByName(RootProperty->GetFName());
+		if (!ParentProperty
+			|| ParentProperty != RootProperty
+			|| !ParentProperty->SameType(RootProperty)
+			|| ParentProperty->GetOwnerStruct() != RootProperty->GetOwnerStruct()
+			|| ParentProperty->GetOffset_ForInternal() != RootProperty->GetOffset_ForInternal()
+			|| !ParentClass->IsChildOf(RootProperty->GetOwnerStruct()))
+		{
+			return nullptr;
+		}
+
+		return ParentProperty;
+	}
+
+	// Resolves the parent value an admitted root (or a selected leaf path) is compared against. The
+	// baseline is only used when the parent layout owns the same field instance at the same offset, so
+	// an absent baseline means the root is subclass-owned and must be reported as an effective value.
+	static void* ResolveClassDefaultsBaselineValue(
+		UObject* BaselineCDO,
+		const FString& Selector,
+		const FProperty* ValueProperty,
+		const FProperty* RootProperty)
+	{
+		if (!BaselineCDO || !ValueProperty || !RootProperty)
+		{
+			return nullptr;
+		}
+
+		if (!ResolveParentBaselineProperty(RootProperty, BaselineCDO->GetClass()))
+		{
+			return nullptr;
+		}
+
+		FProperty* BaselineProperty = nullptr;
+		void* BaselineValuePtr = nullptr;
+		if (!FCortexPropertyUtils::ResolvePropertyPath(BaselineCDO, Selector, BaselineProperty, BaselineValuePtr))
+		{
+			return nullptr;
+		}
+
+		if (BaselineProperty != ValueProperty
+			|| !BaselineProperty->SameType(ValueProperty)
+			|| BaselineProperty->GetOffset_ForInternal() != ValueProperty->GetOffset_ForInternal())
+		{
+			return nullptr;
+		}
+
+		return BaselineValuePtr;
 	}
 
 	// Emits the discovery envelope for a metadata page: the honest admitted population size plus the
@@ -922,6 +988,15 @@ FCortexCommandResult FCortexBPClassDefaultsOps::ListDefaults(const TSharedPtr<FJ
 		return ControlError;
 	}
 
+	// The inherited-delta view belongs to get_class_defaults; a list read refuses the flag instead of
+	// accepting it and silently returning a metadata page.
+	if (Controls.bChangedOnly)
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidField,
+			TEXT("'changed_only' is only supported by get_class_defaults"));
+	}
+
 	FString LoadError;
 	UBlueprint* Blueprint = FCortexBPAssetOps::LoadBlueprint(BlueprintPath, LoadError);
 	if (!Blueprint)
@@ -1084,6 +1159,24 @@ FCortexCommandResult FCortexBPClassDefaultsOps::GetClassDefaults(const TSharedPt
 		return ControlError;
 	}
 
+	// A delta read must carry values; an explicit opt-out refuses before any asset load, compile or
+	// lookup instead of returning a delta that declares no values at all.
+	if (Controls.bChangedOnly && Controls.bIncludeValuesSupplied && !Controls.bIncludeValues)
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidField,
+			TEXT("'changed_only' requires 'include_values' to be true"));
+	}
+
+	// Member expansion reports the effective struct members, which would contradict the delta view that
+	// reports only the members that differ; the combination refuses instead of mixing both meanings.
+	if (Controls.bChangedOnly && Controls.bIncludeMembers)
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidField,
+			TEXT("'include_members' is not supported with 'changed_only'"));
+	}
+
 	FString LoadError;
 	UBlueprint* Blueprint = FCortexBPAssetOps::LoadBlueprint(BlueprintPath, LoadError);
 	if (!Blueprint)
@@ -1108,15 +1201,97 @@ FCortexCommandResult FCortexBPClassDefaultsOps::GetClassDefaults(const TSharedPt
 
 	const bool bDiscoveryMode = Selectors.Num() == 0;
 	// A nonempty selector is an effective-value read unless the caller opted out explicitly; an
-	// unfiltered read defaults to metadata discovery.
-	const bool bIncludeValues = Controls.bIncludeValuesSupplied ? Controls.bIncludeValues : !bDiscoveryMode;
+	// unfiltered read defaults to metadata discovery. A delta read always carries values: an explicit
+	// opt-out was refused above, and an unstated include_values cannot turn a delta into metadata.
+	bool bIncludeValues = Controls.bIncludeValuesSupplied ? Controls.bIncludeValues : !bDiscoveryMode;
+	if (Controls.bChangedOnly)
+	{
+		bIncludeValues = true;
+	}
 
 	TSharedPtr<FJsonObject> PropertiesObj = MakeShared<FJsonObject>();
 	int32 Count = 0;
 	int32 TotalProperties = 0;
 	bool bPaged = false;
+	TArray<TSharedPtr<FJsonValue>> OmittedEqualProperties;
+	TArray<FCortexSerializationIssue> DeltaIssues;
 
-	if (bDiscoveryMode)
+	if (Controls.bChangedOnly)
+	{
+		// A delta is a view over the admitted population: every admitted root is either reported with the
+		// value that differs from its inherited baseline, or listed as an explicit equal omission. A root
+		// the parent class does not own compatibly has no baseline, so it is reported as its own effective
+		// value: a subclass default is never compared against, or read through, parent memory.
+		FCortexSerializationPolicy DeltaPolicy;
+		DeltaPolicy.Label = ECortexSerializationPolicyLabel::ReflectedRead;
+
+		UObject* BaselineCDO = Blueprint->ParentClass ? Blueprint->ParentClass->GetDefaultObject() : nullptr;
+
+		const auto AddDeltaEntry = [&](const FString& Key, FProperty* ValueProperty, void* ValuePtr, FProperty* RootProperty)
+		{
+			void* BaselineValuePtr = ResolveClassDefaultsBaselineValue(BaselineCDO, Key, ValueProperty, RootProperty);
+
+			const FCortexPropertySerializationResult Serialized = BaselineValuePtr
+				? FCortexSerializer::PropertyDifferenceToJson(ValueProperty, ValuePtr, BaselineValuePtr, DeltaPolicy, Key)
+				: FCortexSerializer::PropertyToJsonDeep(ValueProperty, ValuePtr, DeltaPolicy, Key);
+			DeltaIssues.Append(Serialized.Issues);
+
+			if (!Serialized.JsonValue.IsValid())
+			{
+				// An equal-to-baseline value is an explicit omission, never a silently missing field.
+				OmittedEqualProperties.Add(MakeShared<FJsonValueString>(Key));
+				return;
+			}
+
+			// Member expansion is refused together with changed_only, so a delta entry never mixes
+			// effective struct members with a delta value.
+			TSharedPtr<FJsonObject> Entry =
+				BuildDiscoveryPropertyInfo(ValueProperty, ValuePtr, true, /*bIncludeMembers=*/false);
+			Entry->SetField(TEXT("value"), Serialized.JsonValue);
+			PropertiesObj->SetObjectField(Key, Entry);
+			++Count;
+		};
+
+		if (bDiscoveryMode)
+		{
+			for (TFieldIterator<FProperty> It(GeneratedClass); It; ++It)
+			{
+				FProperty* Property = *It;
+				if (!ShouldExposePropertyForDiscovery(Property))
+				{
+					continue;
+				}
+
+				AddDeltaEntry(Property->GetName(), Property, Property->ContainerPtrToValuePtr<void>(CDO), Property);
+			}
+		}
+		else
+		{
+			for (const FString& PropertyName : Selectors)
+			{
+				FProperty* Property = nullptr;
+				void* ValuePtr = nullptr;
+				if (!FCortexPropertyUtils::ResolvePropertyPath(CDO, PropertyName, Property, ValuePtr))
+				{
+					return MakePropertyNotFoundError(
+						GeneratedClass,
+						PropertyName,
+						GeneratedClass->GetName(),
+						[](UStruct* Struct, const FString& Name, int32 MaxSuggestions)
+						{
+							return FCortexBPClassDefaultsOps::FindSimilarPropertyNames(Struct, Name, MaxSuggestions);
+						});
+				}
+
+				AddDeltaEntry(PropertyName, Property, ValuePtr,
+					ResolveDiscoveryRootProperty(GeneratedClass, PropertyName));
+			}
+		}
+
+		// Every examined root is either reported or explicitly omitted, so the population stays honest.
+		TotalProperties = Count + OmittedEqualProperties.Num();
+	}
+	else if (bDiscoveryMode)
 	{
 		TArray<TPair<FProperty*, void*>> Admitted;
 		for (TFieldIterator<FProperty> It(GeneratedClass); It; ++It)
@@ -1193,9 +1368,22 @@ FCortexCommandResult FCortexBPClassDefaultsOps::GetClassDefaults(const TSharedPt
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetStringField(TEXT("blueprint_path"), BlueprintPath);
 	Data->SetStringField(TEXT("class"), GeneratedClass->GetName());
-	Data->SetStringField(TEXT("parent_class"),
-		Blueprint->ParentClass ? Blueprint->ParentClass->GetName() : TEXT(""));
+	const FString ParentClassName = Blueprint->ParentClass ? Blueprint->ParentClass->GetName() : FString();
+	Data->SetStringField(TEXT("parent_class"), ParentClassName);
 	Data->SetBoolField(TEXT("values_included"), bIncludeValues);
+	if (Controls.bChangedOnly)
+	{
+		// The delta view declares its semantics: values are inherited deltas, never a complete effective
+		// read, and every equal-to-baseline root is listed as an explicit omission.
+		Data->SetStringField(TEXT("value_mode"), TEXT("inherited_delta"));
+		Data->SetStringField(TEXT("baseline_class"), ParentClassName);
+		Data->SetBoolField(TEXT("effective_values_complete"), false);
+		Data->SetArrayField(TEXT("omitted_equal_properties"), OmittedEqualProperties);
+		if (DeltaIssues.Num() > 0)
+		{
+			Data->SetArrayField(TEXT("issues"), FCortexSerializer::SerializationIssuesToJson(DeltaIssues));
+		}
+	}
 	Data->SetObjectField(TEXT("properties"), PropertiesObj);
 	Data->SetNumberField(TEXT("count"), Count);
 	if (bPaged)

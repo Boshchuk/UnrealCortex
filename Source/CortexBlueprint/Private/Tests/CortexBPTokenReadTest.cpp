@@ -1,13 +1,16 @@
 #include "Misc/AutomationTest.h"
 
 #include "CortexBPCommandHandler.h"
+#include "CortexBPTokenReadDeltaFixture.h"
 #include "CortexBPTestLiftActor.h"
 #include "CortexTypes.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "EdGraphSchema_K2.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "GameFramework/Actor.h"
+#include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
@@ -891,6 +894,274 @@ bool FCortexBPTokenReadDiscoveryPagingTest::RunTest(const FString&)
 		GetCoarse.OrderedNames.Num(), GetCoarse.UniqueNames.Num());
 	TestEqual(TEXT("get_class_defaults paged names should cover every admitted property"),
 		GetCoarse.UniqueNames.Num(), GetCoarse.TotalProperties);
+
+	return true;
+}
+
+// Dedicated native parent fixture for the inherited-delta regression. The parent CDO owns
+// bReplicates=true plus deterministic value fields, so the child Blueprint delta can be compared
+// against a real parent baseline instead of a fabricated struct buffer.
+ACortexBPDeltaParentActor::ACortexBPDeltaParentActor()
+{
+	bReplicates = true;
+	InheritedText = FText::FromString(TEXT("parent text"));
+
+	// A non-null object baseline (a class object is a valid UObject*) so the child can override it
+	// with an explicit null and still differ from the parent.
+	UObject* const NonNullBaseline = UObject::StaticClass();
+	InheritedObject = NonNullBaseline;
+}
+
+namespace
+{
+	// The omitted_equal_properties entry shape pinned by the delta contract is the property name.
+	bool TokenReadDeltaListsName(const TArray<TSharedPtr<FJsonValue>>& Entries, const TCHAR* Name)
+	{
+		for (const TSharedPtr<FJsonValue>& Entry : Entries)
+		{
+			if (Entry.IsValid() && Entry->Type == EJson::String && Entry->AsString() == Name)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexBPTokenReadInheritedDeltaTest,
+	"Cortex.Blueprint.TokenRead.Get.OwnedInheritedDelta",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexBPTokenReadInheritedDeltaTest::RunTest(const FString&)
+{
+	// A genuine two-level generated-class chain: the parent Blueprint owns the inherited baseline
+	// (from the native fixture actor constructor); the child Blueprint adds its own declared
+	// property and overrides a subset of the inherited values. Only these dedicated packages are
+	// retired afterwards.
+	FTokenReadScopedFixture ParentFixture;
+	FTokenReadScopedFixture ChildFixture;
+	FCortexBPCommandHandler Handler;
+
+	UBlueprint* ParentBlueprint = ParentFixture.Create(
+		ACortexBPDeltaParentActor::StaticClass(), TokenReadUniquePath(TEXT("DeltaParent")));
+	if (!TestNotNull(TEXT("delta parent fixture should be created"), ParentBlueprint))
+	{
+		return true;
+	}
+	UClass* ParentGeneratedClass = ParentBlueprint->GeneratedClass;
+	if (!TestNotNull(TEXT("delta parent should expose a generated class"), ParentGeneratedClass))
+	{
+		return true;
+	}
+
+	UBlueprint* ChildBlueprint = ChildFixture.Create(
+		ParentGeneratedClass, TokenReadUniquePath(TEXT("DeltaChild")));
+	if (!TestNotNull(TEXT("delta child fixture should be created"), ChildBlueprint))
+	{
+		return true;
+	}
+	if (!TestNotNull(TEXT("delta child should expose a generated class"), static_cast<UClass*>(ChildBlueprint->GeneratedClass)))
+	{
+		return true;
+	}
+
+	AActor* ParentCDO = Cast<AActor>(ParentGeneratedClass->GetDefaultObject());
+	TestNotNull(TEXT("delta parent should expose an actor CDO"), ParentCDO);
+
+	// The child declares its own boolean default (no inherited baseline) and compiles. The CDO is
+	// re-resolved after this compile because compiling regenerates it.
+	FEdGraphPinType BoolType;
+	BoolType.PinCategory = UEdGraphSchema_K2::PC_Boolean;
+	TestTrue(TEXT("the child should declare its own boolean default"),
+		FBlueprintEditorUtils::AddMemberVariable(ChildBlueprint, TEXT("OwnOnly"), BoolType));
+	FKismetEditorUtilities::CompileBlueprint(ChildBlueprint);
+
+	UClass* ChildGeneratedClass = ChildBlueprint->GeneratedClass;
+	AActor* ChildCDO = ChildGeneratedClass ? Cast<AActor>(ChildGeneratedClass->GetDefaultObject()) : nullptr;
+	if (!TestNotNull(TEXT("delta child should expose an actor CDO"), ChildCDO))
+	{
+		return true;
+	}
+
+	// Fixture sanity: the parent baseline is genuinely replicated, and the child inherits it before
+	// any override. This is the state the delta must compare against.
+	if (ParentCDO)
+	{
+		TestTrue(TEXT("delta parent baseline should replicate"), ParentCDO->GetIsReplicated());
+	}
+	TestTrue(TEXT("delta child should inherit the replicated parent baseline"), ChildCDO->GetIsReplicated());
+
+	// Override a subset of inherited values on the child CDO through the production setter: a false
+	// bool, a zero, an FText and a null object. InheritedEqual is deliberately untouched so it stays
+	// equal to the parent baseline.
+	TSharedPtr<FJsonObject> OverrideProperties = MakeShared<FJsonObject>();
+	OverrideProperties->SetBoolField(TEXT("bReplicates"), false);
+	OverrideProperties->SetNumberField(TEXT("InheritedZero"), 0);
+	OverrideProperties->SetStringField(TEXT("InheritedText"), TEXT("child text"));
+	OverrideProperties->SetField(TEXT("InheritedObject"), MakeShared<FJsonValueNull>());
+	TSharedPtr<FJsonObject> OverrideParams = TokenReadParams(ChildFixture.AssetPath);
+	OverrideParams->SetObjectField(TEXT("properties"), OverrideProperties);
+	OverrideParams->SetBoolField(TEXT("compile"), false);
+	OverrideParams->SetBoolField(TEXT("save"), false);
+	const FCortexCommandResult OverrideResult = Handler.Execute(TEXT("set_class_defaults"), OverrideParams);
+	TestTrue(TEXT("the child default overrides should apply"), OverrideResult.bSuccess);
+	TestFalse(TEXT("the child override should be replicated=false"), ChildCDO->GetIsReplicated());
+
+	// The delta read: changed_only + include_values returns only inherited/subclass values that
+	// differ from the parent baseline, with explicit semantics.
+	TSharedPtr<FJsonObject> DeltaParams = TokenReadParams(ChildFixture.AssetPath);
+	DeltaParams->SetBoolField(TEXT("changed_only"), true);
+	DeltaParams->SetBoolField(TEXT("include_values"), true);
+	const FCortexCommandResult Delta = Handler.Execute(TEXT("get_class_defaults"), DeltaParams);
+	if (!TestTrue(TEXT("delta read should succeed"), Delta.bSuccess) || !Delta.Data.IsValid())
+	{
+		return true;
+	}
+
+	FString ValueMode;
+	TestTrue(TEXT("delta declares its semantics"), Delta.Data->TryGetStringField(TEXT("value_mode"), ValueMode));
+	TestEqual(TEXT("delta label"), ValueMode, FString(TEXT("inherited_delta")));
+
+	FString BaselineClass;
+	TestTrue(TEXT("delta declares its baseline class"),
+		Delta.Data->TryGetStringField(TEXT("baseline_class"), BaselineClass));
+	TestEqual(TEXT("delta baseline names the parent class"),
+		BaselineClass, ChildBlueprint->ParentClass->GetName());
+
+	bool bEffectiveValuesComplete = true;
+	TestTrue(TEXT("delta declares effective completeness"),
+		Delta.Data->TryGetBoolField(TEXT("effective_values_complete"), bEffectiveValuesComplete));
+	TestFalse(TEXT("a delta is never a complete effective-value read"), bEffectiveValuesComplete);
+
+	bool bValuesIncluded = false;
+	TestTrue(TEXT("delta declares value inclusion"),
+		Delta.Data->TryGetBoolField(TEXT("values_included"), bValuesIncluded));
+	TestTrue(TEXT("delta includes values"), bValuesIncluded);
+
+	const TSharedPtr<FJsonObject>* Properties = nullptr;
+	if (!TestTrue(TEXT("delta should expose a properties object"),
+		Delta.Data->TryGetObjectField(TEXT("properties"), Properties) && Properties != nullptr))
+	{
+		return true;
+	}
+
+	// Subclass-owned false is retained as a value...
+	const TSharedPtr<FJsonObject>* OwnOnlyEntry = nullptr;
+	if (TestTrue(TEXT("subclass-owned false is retained"),
+		(*Properties)->TryGetObjectField(TEXT("OwnOnly"), OwnOnlyEntry) && OwnOnlyEntry != nullptr))
+	{
+		TestTrue(TEXT("OwnOnly carries a value field"), (*OwnOnlyEntry)->HasField(TEXT("value")));
+		TestFalse(TEXT("OwnOnly false is a value, not an omission"), (*OwnOnlyEntry)->GetBoolField(TEXT("value")));
+	}
+
+	// ...and so is the inherited false override against a true baseline.
+	const TSharedPtr<FJsonObject>* ReplicatesEntry = nullptr;
+	if (TestTrue(TEXT("the inherited false override is retained"),
+		(*Properties)->TryGetObjectField(TEXT("bReplicates"), ReplicatesEntry) && ReplicatesEntry != nullptr))
+	{
+		TestTrue(TEXT("bReplicates carries a value field"), (*ReplicatesEntry)->HasField(TEXT("value")));
+		TestFalse(TEXT("bReplicates false differs from the true baseline and is retained"),
+			(*ReplicatesEntry)->GetBoolField(TEXT("value")));
+	}
+
+	// Zero, FText and null-payload overrides are all retained as values.
+	const TSharedPtr<FJsonObject>* ZeroEntry = nullptr;
+	if (TestTrue(TEXT("the zero override is retained"),
+		(*Properties)->TryGetObjectField(TEXT("InheritedZero"), ZeroEntry) && ZeroEntry != nullptr))
+	{
+		double ZeroValue = -1.0;
+		TestTrue(TEXT("the zero override carries a value field"),
+			(*ZeroEntry)->TryGetNumberField(TEXT("value"), ZeroValue));
+		TestEqual(TEXT("the zero override retains 0"), static_cast<int32>(ZeroValue), 0);
+	}
+
+	const TSharedPtr<FJsonObject>* TextEntry = nullptr;
+	if (TestTrue(TEXT("the FText override is retained"),
+		(*Properties)->TryGetObjectField(TEXT("InheritedText"), TextEntry) && TextEntry != nullptr))
+	{
+		const TSharedPtr<FJsonObject>* TextValue = nullptr;
+		if (TestTrue(TEXT("the FText override carries the FText descriptor"),
+			(*TextEntry)->TryGetObjectField(TEXT("value"), TextValue) && TextValue != nullptr))
+		{
+			TestEqual(TEXT("the FText override retains its display text"),
+				(*TextValue)->GetStringField(TEXT("value")), FString(TEXT("child text")));
+		}
+	}
+
+	const TSharedPtr<FJsonObject>* ObjectEntry = nullptr;
+	if (TestTrue(TEXT("the null object override is retained"),
+		(*Properties)->TryGetObjectField(TEXT("InheritedObject"), ObjectEntry) && ObjectEntry != nullptr))
+	{
+		TestTrue(TEXT("the null object override carries a value field"), (*ObjectEntry)->HasField(TEXT("value")));
+		const TSharedPtr<FJsonValue> ObjectValue = (*ObjectEntry)->TryGetField(TEXT("value"));
+		TestTrue(TEXT("the null object override is an explicit null, not an omission"),
+			ObjectValue.IsValid() && ObjectValue->IsNull());
+	}
+
+	// The equal inherited field is omitted with explicit omission metadata, never reported as a
+	// missing field.
+	TestFalse(TEXT("the equal inherited field is not a delta value"), (*Properties)->HasField(TEXT("InheritedEqual")));
+	const TArray<TSharedPtr<FJsonValue>>* Omitted = nullptr;
+	if (TestTrue(TEXT("delta lists omitted equal properties"),
+		Delta.Data->TryGetArrayField(TEXT("omitted_equal_properties"), Omitted) && Omitted != nullptr))
+	{
+		TestTrue(TEXT("the equal inherited field is explicitly listed as omitted"),
+			TokenReadDeltaListsName(*Omitted, TEXT("InheritedEqual")));
+	}
+
+	// A plain effective read is not a delta and still exposes the equal inherited field.
+	const FCortexCommandResult Plain =
+		Handler.Execute(TEXT("get_class_defaults"), TokenReadParams(ChildFixture.AssetPath));
+	if (TestTrue(TEXT("plain effective read should succeed"), Plain.bSuccess) && Plain.Data.IsValid())
+	{
+		const TSharedPtr<FJsonObject>* PlainProperties = nullptr;
+		if (TestTrue(TEXT("plain effective read should expose properties"),
+			Plain.Data->TryGetObjectField(TEXT("properties"), PlainProperties) && PlainProperties != nullptr))
+		{
+			TestTrue(TEXT("a plain effective read still exposes the equal inherited field"),
+				(*PlainProperties)->HasField(TEXT("InheritedEqual")));
+		}
+	}
+
+	// A delta must carry values: explicit include_values=false with changed_only refuses.
+	{
+		TSharedPtr<FJsonObject> RefusalParams = TokenReadParams(ChildFixture.AssetPath);
+		RefusalParams->SetBoolField(TEXT("changed_only"), true);
+		RefusalParams->SetBoolField(TEXT("include_values"), false);
+		const FCortexCommandResult Refusal = Handler.Execute(TEXT("get_class_defaults"), RefusalParams);
+		TestFalse(TEXT("changed_only with include_values=false should refuse"), Refusal.bSuccess);
+		TestEqual(TEXT("changed_only with include_values=false should refuse with INVALID_FIELD"),
+			Refusal.ErrorCode, CortexErrorCodes::InvalidField);
+	}
+
+	// A same-value selected property is reported as explicitly omitted, not silently missing.
+	{
+		TSharedPtr<FJsonObject> SelectedParams = TokenReadParams(ChildFixture.AssetPath);
+		SelectedParams->SetArrayField(TEXT("properties"), {
+			MakeShared<FJsonValueString>(TEXT("InheritedEqual"))});
+		SelectedParams->SetBoolField(TEXT("changed_only"), true);
+		SelectedParams->SetBoolField(TEXT("include_values"), true);
+		const FCortexCommandResult Selected = Handler.Execute(TEXT("get_class_defaults"), SelectedParams);
+		if (TestTrue(TEXT("selected equal delta read should succeed"), Selected.bSuccess) && Selected.Data.IsValid())
+		{
+			const TSharedPtr<FJsonObject>* SelectedProperties = nullptr;
+			if (TestTrue(TEXT("selected delta read should expose properties"),
+				Selected.Data->TryGetObjectField(TEXT("properties"), SelectedProperties) && SelectedProperties != nullptr))
+			{
+				TestFalse(TEXT("a same-value selected property is omitted from delta values"),
+					(*SelectedProperties)->HasField(TEXT("InheritedEqual")));
+			}
+			const TArray<TSharedPtr<FJsonValue>>* SelectedOmitted = nullptr;
+			if (TestTrue(TEXT("selected delta read lists omitted equal properties"),
+				Selected.Data->TryGetArrayField(TEXT("omitted_equal_properties"), SelectedOmitted)
+					&& SelectedOmitted != nullptr))
+			{
+				TestTrue(TEXT("the same-value selected property is explicitly listed as omitted"),
+					TokenReadDeltaListsName(*SelectedOmitted, TEXT("InheritedEqual")));
+			}
+		}
+	}
 
 	return true;
 }
