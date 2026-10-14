@@ -64,7 +64,8 @@
         "remove_variables",
         "remove_functions",
         "migrated_overrides",
-        "compile"
+        "compile",
+        "save"
       ]
     },
     "compare_blueprints": {
@@ -163,7 +164,11 @@
       "params": [
         "asset_path",
         "properties",
-        "blueprint_path"
+        "blueprint_path",
+        "include_values",
+        "include_members",
+        "discovery_offset",
+        "discovery_limit"
       ]
     },
     "get_level_blueprint": {

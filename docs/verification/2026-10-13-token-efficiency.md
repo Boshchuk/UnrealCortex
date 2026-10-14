@@ -58,8 +58,11 @@ are live-editor environment interactions, not regressions.
   failures** (`Saved/TestLogs/AutomationTest_2026-10-14_045958.log`, raw severity scan clean), a 217 s
   rendering run. The pre-Task-17 attempt reported 1873/1875, the only two failures being capability-shape
   pins that Tasks 11/12 intentionally changed (`reflect.class_hierarchy` 5→6 params,
-  `editor.get_recent_logs` 4→7 params); commit `45bc832d` migrates those pins and the checked-in
-  `mcp_tool_signature_snapshot.json` fixture from the verified native registration.
+  `editor.get_recent_logs` 4→7 params); commit `45bc832d` migrates the two C++ pins and only the
+  `editor.get_recent_logs` entry of the checked-in `mcp_tool_signature_snapshot.json` fixture. The rest of
+  that fixture (for example the Python `get_class_defaults` signature) and the checked-in
+  `capabilities_cache_full.json` were still stale at that commit; the follow-up fixture migration recorded
+  below corrects them.
 
 ### Residual risk — two earlier full-suite attempts aborted in engine GC (not reproducible)
 
@@ -91,9 +94,35 @@ referenced objects for the duration of the call.
 ## Live capabilities / fallback
 
 On owned editor PID 46772 `scripts/sync_fallback.py` regenerated `_fallback_generated.py` from the live
-cache, proving the committed fallback was stale relative to the live registration. `TestFallbackDrift`
-declares the fixture the authority and the fixture intentionally omits `anim`, so the fallback was
-regenerated with `--from-fixture`; the checked-in fallback and fixture are back in agreement.
+cache and the output changed; that shows only that the committed fallback differed from that live cache, not
+that the committed fixtures or fallback matched the verified registrations. `TestFallbackDrift` declares
+`capabilities_cache_full.json` the fixture of record and that fixture intentionally omits `anim`, so the
+fallback was regenerated with `--from-fixture`. That restored fixture↔fallback agreement, but agreement
+between the two generated artifacts is not evidence that either reflects the registrations this program
+changed — both fixtures were still stale for those commands.
+
+The follow-up migration is therefore source-verified per entry instead:
+
+- `mcp_tool_signature_snapshot.json` (the public Python tool signatures): the two entries whose registered
+  Python function signature actually changed were re-derived from the function source:
+  `blueprint.get_class_defaults` (`tools/blueprint/class_defaults.py`) gains `include_values`,
+  `include_members`, `discovery_offset` and `discovery_limit` after the restored positional
+  `blueprint_path`;
+  `blueprint.cleanup_blueprint_migration` (`tools/blueprint/analysis.py`) gains `save`. Every other entry is
+  byte-identical. `editor.get_recent_logs` deliberately keeps the seven-parameter native shape, because
+  `Cortex.Core.Capabilities.Snapshot` pins that fixture entry to the native `editor.get_recent_logs`
+  capability; the legacy Python wrapper (`tools/editor/utilities.py`) still takes only four arguments.
+- `capabilities_cache_full.json` (a mirror of the native `GetSupportedCommands` payload): the entries whose
+  native command metadata this program changed were updated from the owning `GetSupportedCommands`
+  registration and cross-checked against the live `Saved/Cortex/capabilities-cache.json` —
+  `data.search_assets`, `data.get_data_asset`, `data.get_data_catalog`, `blueprint.get_class_defaults`,
+  `blueprint.list_inherited_properties`, `blueprint.list_settable_defaults`, `blueprint.set_class_defaults`
+  (adds `echo`), `material.get_node`, `level.list_components`, `reflect.class_hierarchy`,
+  `reflect.class_detail`, `editor.get_recent_logs` and `umg.get_tree`. `data.list_data_assets` was already
+  current, `reflect.search` needed no change (Task 12 changed response metadata, not its parameters), and
+  `gen.list_jobs` `include_prompt` is out of coverage because the fixture intentionally has no `gen` domain.
+- `_fallback_generated.py` was then regenerated from the corrected fixture (`scripts/sync_fallback.py
+  --from-fixture`), so the offline fallback publishes the same migrated signatures as the fixture.
 
 ## Deferred to the remaining Task 17 tail
 
