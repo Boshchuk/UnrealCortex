@@ -155,9 +155,10 @@ TArray<FCortexCommandInfo> FCortexMaterialCommandHandler::GetSupportedCommands()
 			.Required(TEXT("parameter_name"), TEXT("string"), TEXT("Parameter name")),
 		FCortexCommandInfo{ TEXT("list_nodes"), TEXT("List material expression nodes") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path")),
-		FCortexCommandInfo{ TEXT("get_node"), TEXT("Get node details by ID") }
+		FCortexCommandInfo{ TEXT("get_node"), TEXT("Get node details by ID; optional properties selects editable node property names") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
-			.Required(TEXT("node_id"), TEXT("string"), TEXT("Node identifier")),
+			.Required(TEXT("node_id"), TEXT("string"), TEXT("Node identifier"))
+			.Optional(TEXT("properties"), TEXT("array"), TEXT("Editable node property names to select (dotted struct paths allowed). Omitted or empty reads every editable property; unknown or non-editable names are refused.")),
 		FCortexCommandInfo{ TEXT("add_node"), TEXT("Add expression node to material graph") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
 			.Required(TEXT("expression_class"), TEXT("string"), TEXT("Expression class name (short names like VectorParameter accepted)"))
