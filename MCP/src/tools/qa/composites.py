@@ -4,6 +4,101 @@ from cortex_mcp.qa import detect_structural_issues, write_report_bundle
 from cortex_mcp.response import format_response
 from cortex_mcp.tcp_client import UEConnection
 
+# One page of the finite editor log window; the native read caps a page at 200 retained rows, so a
+# page never has to be shortened after the fact.
+LOG_WINDOW_PAGE_LIMIT = 200
+# Runaway guard for a non-advancing window; this is a bound, never a retry or poll loop.
+LOG_WINDOW_MAX_PAGES = 50
+
+
+def _log_window_baseline(connection) -> int:
+    """Pre-action watermark: the newest retained cursor before this step's action runs.
+
+    A count-only read returns window metadata without entry rows, so the watermark costs no response
+    budget. It is best-effort: a refusal or a connection failure leaves the baseline at -1 so the
+    step still reports its own outcome rather than being overwritten by a log-read failure.
+    """
+    try:
+        response = connection.send_command(
+            "editor.get_recent_logs", {"count_only": True, "since_seconds": -1}
+        )
+    except (ConnectionError, RuntimeError, OSError):
+        return -1
+    data = response.get("data", {}) if isinstance(response, dict) else {}
+    latest = data.get("latest_cursor")
+    return int(latest) if isinstance(latest, (int, float)) else -1
+
+
+def _read_log_window(connection, start_cursor):
+    """Collect the finite editor log window that starts after ``start_cursor`` for one action.
+
+    Returns ``(entries, coverage)``. The first page fixes the end-of-step watermark, so every later
+    page is pinned with ``until_cursor``; a record added after the action still belongs to the next
+    action's window and is never attributed late. Coverage is complete only when the whole fixed
+    window was read: front eviction, a native/MCP size refusal, a connection failure or
+    non-advancing pagination leaves ``complete=False`` with the entries read so far and an explicit
+    cause. Never retries, never polls beyond the fixed window, and never overwrites an applied
+    action's success.
+    """
+    entries: list[dict] = []
+    coverage: dict = {
+        "complete": True,
+        "lost_before_cursor": False,
+        "window_end_cursor": None,
+        "count": 0,
+        "cause": None,
+    }
+
+    cursor = int(start_cursor)
+    window_end = None
+
+    for _ in range(LOG_WINDOW_MAX_PAGES):
+        params = {"since_cursor": cursor, "since_seconds": -1, "limit": LOG_WINDOW_PAGE_LIMIT}
+        if window_end is not None:
+            params["until_cursor"] = window_end
+
+        try:
+            response = connection.send_command("editor.get_recent_logs", params)
+        except (ConnectionError, RuntimeError, OSError) as error:
+            coverage["complete"] = False
+            coverage["cause"] = f"log window read failed: {error}"
+            break
+
+        page = response.get("data", {}) if isinstance(response, dict) else {}
+        if "_error" in page:
+            coverage["complete"] = False
+            coverage["cause"] = page.get("_message") or page.get("_error")
+            break
+
+        entries.extend(entry for entry in page.get("entries", []) if isinstance(entry, dict))
+        coverage["count"] = len(entries)
+
+        if window_end is None:
+            window_end = page.get("window_end_cursor")
+            coverage["window_end_cursor"] = window_end
+
+        if page.get("lost_before_cursor"):
+            coverage["lost_before_cursor"] = True
+            coverage["complete"] = False
+            coverage["cause"] = "front log records were evicted before the window start"
+            break
+
+        if not page.get("has_more"):
+            break
+
+        next_cursor = page.get("next_cursor")
+        if not isinstance(next_cursor, (int, float)) or int(next_cursor) <= cursor:
+            coverage["complete"] = False
+            coverage["cause"] = "log window pagination did not advance"
+            break
+
+        cursor = int(next_cursor)
+    else:
+        coverage["complete"] = False
+        coverage["cause"] = "log window page cap reached"
+
+    return entries, coverage
+
 
 def register_qa_composite_tools(mcp, connection: UEConnection):
     """Register QA composite tools."""
@@ -16,6 +111,8 @@ def register_qa_composite_tools(mcp, connection: UEConnection):
         screenshot_name: str = "qa_step.png",
     ) -> str:
         try:
+            baseline = _log_window_baseline(connection)
+
             action_params = action.get("params", {})
             action_duration = float(action_params.get("duration", 0))
             action_timeout = float(action_params.get("timeout", 5.0))
@@ -33,7 +130,7 @@ def register_qa_composite_tools(mcp, connection: UEConnection):
                 )
 
             observed = connection.send_command("qa.observe_state", {})
-            logs = connection.send_command("editor.get_recent_logs", {"max_lines": 100})
+            log_entries, log_coverage = _read_log_window(connection, baseline)
 
             assert_response = None
             if assertion is not None:
@@ -48,7 +145,7 @@ def register_qa_composite_tools(mcp, connection: UEConnection):
             findings = detect_structural_issues(
                 observed.get("data", {}),
                 wait_response.get("data", {}) if wait_response else None,
-                logs.get("data", {}),
+                {"entries": log_entries},
             )
 
             summary = {
@@ -56,6 +153,7 @@ def register_qa_composite_tools(mcp, connection: UEConnection):
                 "wait_success": wait_response.get("success", True) if wait_response else True,
                 "assert_success": assert_response.get("success", True) if assert_response else True,
                 "finding_count": len(findings),
+                "log_coverage": log_coverage,
                 "screenshot": screenshot.get("data", {}),
             }
             return format_response(summary, "test_step")
@@ -71,7 +169,6 @@ def register_qa_composite_tools(mcp, connection: UEConnection):
         try:
             results: list[dict] = []
             findings: list[dict] = []
-            log_cursor = 0
 
             for index, step in enumerate(steps):
                 command = step.get("command", "")
@@ -80,19 +177,15 @@ def register_qa_composite_tools(mcp, connection: UEConnection):
                 base_timeout = float(params.get("timeout", 5.0))
                 timeout = max(duration, base_timeout) + 5.0
 
+                baseline = _log_window_baseline(connection)
                 response = connection.send_command(command, params, timeout=timeout)
                 observed = connection.send_command("qa.observe_state", {})
-                logs = connection.send_command(
-                    "editor.get_recent_logs",
-                    {"cursor": log_cursor, "max_lines": 200},
-                )
-                log_data = logs.get("data", {})
-                log_cursor = int(log_data.get("next_cursor", log_cursor))
+                log_entries, log_coverage = _read_log_window(connection, baseline)
 
                 step_findings = detect_structural_issues(
                     observed.get("data", {}),
                     response.get("data", {}),
-                    log_data,
+                    {"entries": log_entries},
                 )
                 findings.extend(step_findings)
 
@@ -100,6 +193,7 @@ def register_qa_composite_tools(mcp, connection: UEConnection):
                     "index": index,
                     "command": command,
                     "success": response.get("success", False),
+                    "log_coverage": log_coverage,
                     "findings": step_findings,
                 }
                 if verbose:

@@ -58,6 +58,7 @@ NATIVE_LIMIT_COMMANDS = frozenset({
     ("reflect", "search"),
     ("statetree", "list_assets"),
     ("editor", "list_cvars"),
+    ("editor", "get_recent_logs"),
     ("anim", "list_assets"),
     ("gen", "list_jobs"),
 })
