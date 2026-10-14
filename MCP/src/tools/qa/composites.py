@@ -11,34 +11,38 @@ LOG_WINDOW_PAGE_LIMIT = 200
 LOG_WINDOW_MAX_PAGES = 50
 
 
-def _log_window_baseline(connection) -> int:
-    """Pre-action watermark: the newest retained cursor before this step's action runs.
+def _log_window_baseline(connection):
+    """Pre-action watermark: the newest retained cursor before the first step's action runs.
 
-    A count-only read returns window metadata without entry rows, so the watermark costs no response
-    budget. It is best-effort: a refusal or a connection failure leaves the baseline at -1 so the
-    step still reports its own outcome rather than being overwritten by a log-read failure.
+    Returns ``(start_cursor, failure)``. ``failure`` is a non-None string only when the watermark
+    could not be read, so a failed count-only read is never mistaken for a genuinely empty pre-action
+    buffer (which would silently attribute every retained record to the current action). The
+    watermark uses the one-shot transport: it is never retried or polled.
     """
     try:
-        response = connection.send_command(
+        response = connection.send_command_once(
             "editor.get_recent_logs", {"count_only": True, "since_seconds": -1}
         )
-    except (ConnectionError, RuntimeError, OSError):
-        return -1
+    except (ConnectionError, RuntimeError, OSError) as error:
+        return None, f"log window baseline failed: {error}"
+
     data = response.get("data", {}) if isinstance(response, dict) else {}
     latest = data.get("latest_cursor")
-    return int(latest) if isinstance(latest, (int, float)) else -1
+    if not isinstance(latest, (int, float)):
+        return None, "log window baseline returned no latest_cursor"
+    return int(latest), None
 
 
-def _read_log_window(connection, start_cursor):
+def _read_log_window(connection, start_cursor, baseline_failure=None):
     """Collect the finite editor log window that starts after ``start_cursor`` for one action.
 
     Returns ``(entries, coverage)``. The first page fixes the end-of-step watermark, so every later
-    page is pinned with ``until_cursor``; a record added after the action still belongs to the next
-    action's window and is never attributed late. Coverage is complete only when the whole fixed
-    window was read: front eviction, a native/MCP size refusal, a connection failure or
-    non-advancing pagination leaves ``complete=False`` with the entries read so far and an explicit
-    cause. Never retries, never polls beyond the fixed window, and never overwrites an applied
-    action's success.
+    page is pinned with ``until_cursor``; a record added after the window end still belongs to the
+    next action's window and is never attributed late. Coverage is complete only when the whole fixed
+    window was read: front eviction, a native/MCP size refusal, a connection failure, non-advancing
+    pagination, a failed or unavailable watermark, or the page-cap guard leaves ``complete=False``
+    with the entries read so far and an explicit cause. Every read uses the one-shot transport (no
+    retry, no poll), and an applied action's success is never overwritten.
     """
     entries: list[dict] = []
     coverage: dict = {
@@ -49,6 +53,18 @@ def _read_log_window(connection, start_cursor):
         "cause": None,
     }
 
+    # Without a watermark the window is unbounded; reading from the beginning would misattribute
+    # retained records to the current action, so no read is attempted.
+    if baseline_failure is not None:
+        coverage["complete"] = False
+        coverage["cause"] = baseline_failure
+        return entries, coverage
+
+    if start_cursor is None:
+        coverage["complete"] = False
+        coverage["cause"] = "log window start cursor is unavailable"
+        return entries, coverage
+
     cursor = int(start_cursor)
     window_end = None
 
@@ -58,7 +74,7 @@ def _read_log_window(connection, start_cursor):
             params["until_cursor"] = window_end
 
         try:
-            response = connection.send_command("editor.get_recent_logs", params)
+            response = connection.send_command_once("editor.get_recent_logs", params)
         except (ConnectionError, RuntimeError, OSError) as error:
             coverage["complete"] = False
             coverage["cause"] = f"log window read failed: {error}"
@@ -111,7 +127,7 @@ def register_qa_composite_tools(mcp, connection: UEConnection):
         screenshot_name: str = "qa_step.png",
     ) -> str:
         try:
-            baseline = _log_window_baseline(connection)
+            start_cursor, baseline_failure = _log_window_baseline(connection)
 
             action_params = action.get("params", {})
             action_duration = float(action_params.get("duration", 0))
@@ -130,7 +146,7 @@ def register_qa_composite_tools(mcp, connection: UEConnection):
                 )
 
             observed = connection.send_command("qa.observe_state", {})
-            log_entries, log_coverage = _read_log_window(connection, baseline)
+            log_entries, log_coverage = _read_log_window(connection, start_cursor, baseline_failure)
 
             assert_response = None
             if assertion is not None:
@@ -170,6 +186,11 @@ def register_qa_composite_tools(mcp, connection: UEConnection):
             results: list[dict] = []
             findings: list[dict] = []
 
+            # One pre-action watermark bounds the first step's window; every later step continues
+            # from the previous window's fixed end, so a record that arrives between windows is
+            # attributed to exactly the next action instead of falling between two baselines.
+            start_cursor, baseline_failure = _log_window_baseline(connection)
+
             for index, step in enumerate(steps):
                 command = step.get("command", "")
                 params = step.get("params", {})
@@ -177,10 +198,15 @@ def register_qa_composite_tools(mcp, connection: UEConnection):
                 base_timeout = float(params.get("timeout", 5.0))
                 timeout = max(duration, base_timeout) + 5.0
 
-                baseline = _log_window_baseline(connection)
                 response = connection.send_command(command, params, timeout=timeout)
                 observed = connection.send_command("qa.observe_state", {})
-                log_entries, log_coverage = _read_log_window(connection, baseline)
+                log_entries, log_coverage = _read_log_window(
+                    connection,
+                    start_cursor,
+                    baseline_failure if index == 0 else None,
+                )
+                if log_coverage["window_end_cursor"] is not None:
+                    start_cursor = log_coverage["window_end_cursor"]
 
                 step_findings = detect_structural_issues(
                     observed.get("data", {}),

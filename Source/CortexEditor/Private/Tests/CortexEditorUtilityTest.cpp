@@ -1033,3 +1033,49 @@ bool FCortexEditorLogCaptureEmptyContinuationTest::RunTest(const FString& Parame
 
 	return true;
 }
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexEditorLogCaptureNegativeDurationTest,
+	"Cortex.Editor.Utility.LogCapture.NearNegativeOneSinceSecondsRefuses",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexEditorLogCaptureNegativeDurationTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FCortexEditorLogCapture Capture(8);
+	Capture.AddEntry(ELogVerbosity::Log, TEXT("CortexTokenTest"), TEXT("only"), 10.0);
+
+	// Values inside the float tolerance of -1 must not be accepted as "disable the time filter".
+	for (double NearNegativeOne : { -0.999999999, -1.000000001 })
+	{
+		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetNumberField(TEXT("since_seconds"), NearNegativeOne);
+		const auto Result = FCortexEditorUtilityOps::GetRecentLogs(Capture, Params);
+		TestFalse(TEXT("near-minus-one duration must refuse"), Result.bSuccess);
+		TestEqual(TEXT("near-minus-one refusal uses INVALID_FIELD"), Result.ErrorCode, CortexErrorCodes::InvalidField);
+	}
+
+	// Exactly -1 is the only accepted negative and disables the time filter.
+	TSharedPtr<FJsonObject> DisableParams = MakeShared<FJsonObject>();
+	DisableParams->SetNumberField(TEXT("since_seconds"), -1.0);
+	const auto Disabled = FCortexEditorUtilityOps::GetRecentLogs(Capture, DisableParams);
+	TestTrue(TEXT("exactly minus one disables time filtering"), Disabled.bSuccess);
+	TestTrue(TEXT("disabled response is valid"), Disabled.Data.IsValid());
+	if (Disabled.Data.IsValid())
+	{
+		double Count = -1;
+		TestTrue(TEXT("disabled count exists"), CortexEditorLogCaptureWindowTest::TryReadNumber(Disabled.Data, TEXT("count"), Count));
+		TestEqual(TEXT("the sole retained record is returned"), Count, 1.0);
+	}
+
+	// Any other negative is refused too.
+	TSharedPtr<FJsonObject> OtherNegative = MakeShared<FJsonObject>();
+	OtherNegative->SetNumberField(TEXT("since_seconds"), -2.0);
+	const auto Refused = FCortexEditorUtilityOps::GetRecentLogs(Capture, OtherNegative);
+	TestFalse(TEXT("minus two refuses"), Refused.bSuccess);
+	TestEqual(TEXT("minus two refusal uses INVALID_FIELD"), Refused.ErrorCode, CortexErrorCodes::InvalidField);
+
+	return true;
+}

@@ -203,7 +203,7 @@ TArray<FCortexCommandInfo> FCortexEditorCommandHandler::GetSupportedCommands() c
 			.Optional(TEXT("limit"), TEXT("number"), TEXT("Maximum results, clamped to 1..500")),
 		FCortexCommandInfo{ TEXT("get_recent_logs"), TEXT("Get recent log entries") }
 			.Optional(TEXT("severity"), TEXT("string"), TEXT("Minimum severity filter"))
-			.Optional(TEXT("since_seconds"), TEXT("number"), TEXT("Only include entries newer than this many seconds; -1 disables time filtering"))
+			.Optional(TEXT("since_seconds"), TEXT("number"), TEXT("Only include entries newer than this many seconds; exactly -1 disables time filtering"))
 			.Optional(TEXT("since_cursor"), TEXT("number"), TEXT("Resume from a previous cursor"))
 			.Optional(TEXT("until_cursor"), TEXT("number"), TEXT("Inclusive end-of-window cursor pinning the window"))
 			.Optional(TEXT("limit"), TEXT("number"), TEXT("Maximum retained entries, 1..2000; omitted uses 200"))

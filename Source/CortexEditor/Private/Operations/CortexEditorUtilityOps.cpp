@@ -659,12 +659,13 @@ FCortexCommandResult FCortexEditorUtilityOps::GetRecentLogs(
 		}
 	}
 
-	// -1 disables time filtering; any other negative duration is malformed.
-	if (SinceSeconds < 0.0 && !FMath::IsNearlyEqual(SinceSeconds, -1.0))
+	// -1 is the only accepted negative duration and disables time filtering; every other negative
+	// (including values inside the float tolerance of -1) is malformed.
+	if (SinceSeconds < 0.0 && SinceSeconds != -1.0)
 	{
 		return FCortexCommandRouter::Error(
 			CortexErrorCodes::InvalidField,
-			TEXT("since_seconds must be nonnegative, or -1 to disable time filtering."));
+			TEXT("since_seconds must be nonnegative, or exactly -1 to disable time filtering."));
 	}
 
 	if (Limit < 1 || Limit > 2000)

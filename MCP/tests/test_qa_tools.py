@@ -35,28 +35,47 @@ class MockMCP:
 
 
 class FakeLogWindowConnection:
-    """Finite editor log-window double.
+    """Finite editor log-window double for the QA composites.
 
     Models the native ``editor.get_recent_logs`` contract instead of echoing a stale field shape:
     a finite retained window addressed by cursors, count-only watermarks, ``since_cursor`` /
     ``until_cursor`` pagination with a ``limit`` cap, ``since_seconds`` time selection (native
-    default 30s, ``-1`` disables, any other negative refuses), and front-eviction loss. Records
-    beyond the fixed window end are never returned. The stale ``max_lines`` / Python ``cursor``
-    consumer forms are rejected so an unmigrated caller fails loudly.
+    default 30s, ``-1`` disables, any other negative refuses), front-eviction loss, and records that
+    arrive after a fixed window end. It also answers the minimal non-log commands a QA step issues
+    (``qa.observe_state``, the step action, the screenshot). The stale ``max_lines`` / Python
+    ``cursor`` consumer forms are rejected, and the one-shot transport (``send_command_once``) is
+    recorded separately from the retrying ``send_command``.
     """
 
     NATIVE_DEFAULT_SINCE_SECONDS = 30.0
 
-    def __init__(self, records, *, window_end=None, evicted_before=0, watermark=None):
+    def __init__(
+        self,
+        records,
+        *,
+        window_end=None,
+        evicted_before=0,
+        watermark=None,
+        pending_after_first_window=None,
+        count_only_error=None,
+    ):
         self.records = sorted(records, key=lambda record: record["cursor"])
         # window_end fixes the end-of-window cursor; None tracks the newest retained record.
         self.window_end = window_end
         # evicted_before is the highest cursor dropped from the front of the ring buffer.
         self.evicted_before = evicted_before
         # watermark is the pre-action latest cursor reported by a count-only read; it is the
-        # baseline the step window starts from, so records added by the action are paged back.
+        # baseline the first step's window starts from, so records added by the action are paged back.
         self.watermark = self.latest_cursor if watermark is None else watermark
+        # pending_after_first_window models a record that arrives once the previous action's window
+        # has been fixed: it must be attributed to the next window, never dropped between baselines.
+        self.pending_after_first_window = list(pending_after_first_window or [])
+        # count_only_error makes the count-only watermark fail, like a dropped connection.
+        self.count_only_error = count_only_error
+        self._windows_read = 0
         self.calls = []
+        self.once_calls = []
+        self.retrying_calls = []
 
     @property
     def latest_cursor(self):
@@ -70,17 +89,33 @@ class FakeLogWindowConnection:
     def resolved_window_end(self):
         return self.window_end if self.window_end is not None else self.latest_cursor
 
+    # -- transport --
+
     def send_command(self, command, params=None, timeout=None):
+        """The retrying transport; a QA log read must never use it."""
+        return self._handle(command, params, once=False)
+
+    def send_command_once(self, command, params=None, timeout=None):
+        """The one-shot transport the QA log window collector must use."""
+        return self._handle(command, params, once=True)
+
+    def _handle(self, command, params=None, once=False):
         if command == "qa.observe_state":
             return {
                 "success": True,
                 "data": {"player": {"location": [0.0, 0.0, 0.0]}, "nearby_actors": []},
+            }
+        if command == "editor.capture_screenshot":
+            return {
+                "success": True,
+                "data": {"path": "Saved/Screenshots/qa_step.png"},
             }
         if command != "editor.get_recent_logs":
             return {"success": True, "data": {"success": True}}
 
         params = dict(params or {})
         self.calls.append(params)
+        (self.once_calls if once else self.retrying_calls).append(params)
         assert "max_lines" not in params, f"stale max_lines log read: {params}"
         assert "cursor" not in params, f"python cursor is unsupported for native log windows: {params}"
         assert params.get("count_only") or "since_cursor" in params, (
@@ -88,6 +123,8 @@ class FakeLogWindowConnection:
         )
 
         if params.get("count_only"):
+            if self.count_only_error is not None:
+                raise ConnectionError(self.count_only_error)
             return {
                 "success": True,
                 "data": {
@@ -124,8 +161,10 @@ class FakeLogWindowConnection:
         page = selectable[:limit]
         next_cursor = page[-1]["cursor"] if page else since_cursor
         requested_start = since_cursor + 1 if since_cursor >= 0 else 1
+        latest_before = self.latest_cursor
+        oldest_before = self.oldest_available_cursor
 
-        return {
+        response = {
             "success": True,
             "data": {
                 "entries": [
@@ -141,21 +180,29 @@ class FakeLogWindowConnection:
                 "matched_count": len(selectable),
                 "has_more": len(selectable) > len(page),
                 "next_cursor": next_cursor,
-                "latest_cursor": self.latest_cursor,
+                "latest_cursor": latest_before,
                 "window_end_cursor": window_end,
-                "oldest_available_cursor": self.oldest_available_cursor,
+                "oldest_available_cursor": oldest_before,
                 "lost_before_cursor": requested_start <= self.evicted_before,
             },
         }
 
+        # A pending record becomes retained once this window has been fixed, exactly like a row that
+        # arrives after the previous action's window end; a later count-only read sees it too.
+        if self._windows_read == 0 and self.pending_after_first_window:
+            self.records.extend(self.pending_after_first_window)
+            self.records.sort(key=lambda record: record["cursor"])
+            self.watermark = max(self.watermark, self.latest_cursor)
+            self.pending_after_first_window = []
+        self._windows_read += 1
+
+        return response
+
 
 def _log_window_helper():
-    """Return the finite log-window collector, failing clearly until Task 11 provides it."""
+    """Return the finite log-window collector the QA composites expose."""
     helper = getattr(qa_composites, "_read_log_window", None)
-    assert callable(helper), (
-        "qa.composites._read_log_window(connection, start_cursor) is not implemented; "
-        "Task 11 must add the finite log-window collector returning (entries, coverage)."
-    )
+    assert callable(helper), "qa.composites._read_log_window is missing"
     return helper
 
 
@@ -315,27 +362,8 @@ def test_assertion_tool_captures_screenshot_on_failure():
 
 
 def test_composite_test_step_aggregates_summary():
-    mcp = MockMCP()
-    connection = MagicMock()
-    logs_connection = FakeLogWindowConnection([])
-
-    def send_command(command, params=None, timeout=None):
-        if command == "qa.interact":
-            return {"success": True, "data": {"success": True}}
-        if command == "qa.wait_for":
-            return {"success": True, "data": {"timed_out": False}}
-        if command == "qa.observe_state":
-            return {"success": True, "data": {"nearby_actors": [], "player": {"location": [0, 0, 0]}}}
-        if command == "editor.get_recent_logs":
-            return logs_connection.send_command(command, params)
-        if command == "qa.assert_state":
-            return {"success": True, "data": {"passed": True}}
-        if command == "editor.capture_screenshot":
-            return {"success": True, "data": {"path": "Saved/Screenshots/qa_step.png"}}
-        raise AssertionError(f"Unexpected command: {command}")
-
-    connection.send_command.side_effect = send_command
-    register_qa_composite_tools(mcp, connection)
+    connection = FakeLogWindowConnection([])
+    mcp = _register_composites(connection)
 
     result = mcp.tools["test_step"](
         action={"command": "qa.interact", "params": {"key": "E"}},
@@ -346,11 +374,12 @@ def test_composite_test_step_aggregates_summary():
     assert parsed["action_success"] is True
     assert parsed["assert_success"] is True
     assert parsed["finding_count"] == 0
+    assert parsed["log_coverage"]["complete"] is True
     assert parsed["screenshot"]["path"] == "Saved/Screenshots/qa_step.png"
 
 
 def test_run_scenario_inline_uses_finite_log_window():
-    """run_scenario_inline collects a finite cursor-only window per step and writes the report."""
+    """run_scenario_inline collects finite cursor-only windows that continue across steps."""
     connection = FakeLogWindowConnection(
         [
             {"cursor": 1, "timestamp": 101.0, "severity": "log", "message": "step one"},
@@ -382,14 +411,20 @@ def test_run_scenario_inline_uses_finite_log_window():
     assert parsed["scenario"] == "qa-inline"
     assert len(parsed["steps"]) == 2
     assert parsed["report"]["finding_count"] == 0
-    assert any(call.get("count_only") for call in connection.calls), (
-        "a pre-action count-only watermark is required before the step window"
+
+    assert sum(1 for call in connection.calls if call.get("count_only")) == 1, (
+        "one pre-action watermark bounds the first step's window"
     )
-    assert all(
-        "since_seconds" in call and call["since_seconds"] == -1
-        for call in connection.calls
-        if not call.get("count_only")
-    ), "cursor-only windows must disable the 30s time default"
+    window_calls = [call for call in connection.calls if not call.get("count_only")]
+    assert all(call["since_seconds"] == -1 for call in window_calls), (
+        "cursor-only windows must disable the 30s time default"
+    )
+    starts = [int(call["since_cursor"]) for call in window_calls]
+    assert starts == sorted(starts), "each step continues from the previous window end"
+    assert starts[1] == parsed["steps"][0]["log_coverage"]["window_end_cursor"], (
+        "the second step starts exactly at the first step's fixed window end"
+    )
+    assert connection.retrying_calls == []
 
 
 def test_run_scenario_inline_interact_duration_timeout():
@@ -532,6 +567,96 @@ def test_run_scenario_inline_cursor_only_detects_error_beyond_time_default():
     assert len(log_findings) == 1, (
         "the retained early error must be detected despite a duration beyond the 30s default"
     )
+
+
+def test_run_scenario_inline_attributes_late_record_to_next_step():
+    """A record arriving after a fixed window end is attributed to the next step exactly once."""
+    pre_existing = [
+        {"cursor": index, "timestamp": 100.0, "severity": "log", "message": f"record {index}"}
+        for index in range(1, 201)
+    ]
+    late_error = {
+        "cursor": 201,
+        "timestamp": 101.0,
+        "severity": "error",
+        "message": "late failure without prefix",
+    }
+    connection = FakeLogWindowConnection(
+        pre_existing,
+        watermark=200,
+        pending_after_first_window=[late_error],
+    )
+    mcp = _register_composites(connection)
+
+    with patch("qa.composites.write_report_bundle", return_value={"finding_count": 0}):
+        result = mcp.tools["run_scenario_inline"](
+            scenario_name="carry-forward",
+            steps=[
+                {"command": "qa.look_at", "params": {}},
+                {"command": "qa.wait_for", "params": {"type": "delay", "timeout": 1.0}},
+            ],
+            verbose=False,
+        )
+    parsed = json.loads(result)
+
+    first_log_findings = [f for f in parsed["steps"][0]["findings"] if f["category"] == "logs"]
+    second_log_findings = [f for f in parsed["steps"][1]["findings"] if f["category"] == "logs"]
+    assert first_log_findings == []
+    assert len(second_log_findings) == 1, (
+        "a record beyond the first step's fixed end belongs to the next step's window"
+    )
+    assert second_log_findings[0]["details"]["entry"]["cursor"] == 201
+    assert second_log_findings[0]["details"]["entry"]["message"] == "late failure without prefix"
+    assert parsed["steps"][0]["log_coverage"]["window_end_cursor"] == 200
+    assert parsed["steps"][1]["log_coverage"]["complete"] is True
+
+
+def test_test_step_baseline_failure_reports_incomplete_coverage_keeping_action_success():
+    """A failed count-only watermark must not be mistaken for an empty pre-action buffer."""
+    connection = FakeLogWindowConnection([], count_only_error="baseline unavailable")
+    mcp = _register_composites(connection)
+
+    result = mcp.tools["test_step"](
+        action={"command": "qa.interact", "params": {"key": "E"}},
+        assertion={"command": "qa.assert_state", "params": {}},
+    )
+    parsed = json.loads(result)
+
+    assert parsed["action_success"] is True
+    assert parsed["assert_success"] is True
+    coverage = parsed["log_coverage"]
+    assert coverage["complete"] is False
+    assert coverage["cause"] == "log window baseline failed: baseline unavailable"
+    assert parsed["finding_count"] == 0
+    # Without a watermark no window read is attempted, so nothing is misattributed.
+    assert connection.calls == [{"count_only": True, "since_seconds": -1}]
+
+
+def test_log_reads_use_the_one_shot_transport():
+    """Baseline and page log reads use the one-shot transport, never the retrying one."""
+    helper_connection = FakeLogWindowConnection(
+        [{"cursor": 1, "timestamp": 10.0, "severity": "log", "message": "m1"}],
+        watermark=0,
+    )
+    entries, coverage = _log_window_helper()(helper_connection, 0)
+    assert [entry["cursor"] for entry in entries] == [1]
+    assert coverage["complete"] is True
+    assert helper_connection.retrying_calls == []
+    assert len(helper_connection.once_calls) == 1, "one page is read exactly once"
+
+    connection = FakeLogWindowConnection(
+        [{"cursor": 1, "timestamp": 10.0, "severity": "log", "message": "m1"}],
+        watermark=0,
+    )
+    mcp = _register_composites(connection)
+    parsed = json.loads(
+        mcp.tools["test_step"](action={"command": "qa.interact", "params": {}})
+    )
+    assert parsed["log_coverage"]["complete"] is True
+    assert connection.retrying_calls == []
+    assert len(connection.once_calls) == 2, "one watermark plus one page, no retry"
+    assert connection.once_calls[0].get("count_only") is True
+    assert "since_cursor" in connection.once_calls[1]
 
 
 def test_read_log_window_collects_every_match_once_across_pages():
