@@ -136,11 +136,61 @@ The follow-up migration is therefore source-verified per entry instead:
 - `_fallback_generated.py` was then regenerated from the corrected fixture (`scripts/sync_fallback.py
   --from-fixture`), so the offline fallback publishes the same migrated signatures as the fixture.
 
+## Post-acceptance: propagation and live MCP benchmark (2026-10-14)
+
+**Toolkit propagation.** `cortex-toolkit` branch `feat/issue-180-contract-sync` off `fb5f959`, 9
+documentation-only commits (tip `fda9c4750321f717d0d49b55c1b1845f41533258`), not pushed. It updates
+resource/agent guidance for the changed contracts and corrects one contract-matrix claim from source: the
+component `creation_method` enum has five values (`Native`, `SimpleConstructionScript`,
+`UserConstructionScript`, `Instance`, `Unknown`), not three
+(`Source/CortexLevel/Private/Operations/CortexLevelComponentOps.cpp:169-184`). Its report flags, without
+fixing, the compatibility gaps it found: the standalone `get_recent_logs` tool cannot pin a window;
+`query_class_hierarchy` drops native `truncated`; `changed_only`/`echo` are router-only; and
+`list_data_assets` silently ignores the retired `class_filter` (confirmed live — see below).
+
+**Documentation sync.** Parent-repo commit `abd4851`: `docs/systems/{INDEX,cortex-blueprint,cortex-data,
+cortex-editor,cortex-gen,cortex-level,cortex-material,cortex-qa,cortex-reflect,cortex-umg,python-mcp}.md`,
+`docs/requests/{INDEX.md,core/2026-04-07-large-response-handling.md}` (status: implemented and verified
+locally, unpublished) and `docs/tech-debt/{cortex-blueprint,cortex-mcp}-tech-debt.md` (`TD-BP-GC-001` for
+the residual GC risk above, `TD-MCP-004` for the fixture divergence). The coverage gaps the contract matrix
+identified — blueprint class-defaults, editor log windows, level component properties, material node
+properties, UMG tree bounds and QA `log_coverage` — now have homes in their owning system docs.
+
+**Live MCP benchmark.** Executed against plugin 0.3.7 / engine 5.8.3 (project `CortexSandbox`), 17 of 18
+checklist groups run end-to-end through the running editor, plus targeted probes of every contract this
+program changed. Verified live and correct: complete-or-refuse refusals with explicit envelopes; paging
+metadata (`data.search_assets` `next_offset`/`is_complete`; `editor.get_recent_logs` cursor family with
+`lost_before_cursor`; `umg.get_tree` `total_widgets`/`returned_widgets`/`tree_complete`/`reasons`);
+`level.list_components` property inventory (`returned_property_count` 20 of `total_property_count` 85,
+`properties_complete: false`); `reflect.class_hierarchy` flat `classes` + `truncated`; `reflect.class_detail`
+`summary` omitting properties/functions; blueprint class-defaults discovery/delta/echo surfaces; the
+migration V2 schema; string-table dry-run and `string_table_refs` scan at `limit: 25` without router-side
+truncation; and `generate_project_schema` (`errors: []`, 2.39 s). Not executed: the PIE lifecycle checks
+(`TestMap` configures no game mode) and the human visual-confirmation step.
+
+Five issues were logged, none of them a regression in a contract this program declares. One sits on the
+program's changed path and is worth fixing before publication: **`core.get_capabilities` is unreadable
+through the MCP surface** — every variant (default, `detail: "names"`, `detail: "full"`, and even an
+*invalid* `detail`, which must return `INVALID_FIELD`) returns the generic 40 KB refusal
+`{"_error": "RESPONSE_TOO_LARGE", "_size": 157795, "_suggestion": "Pass 'limit' parameter…"}`, and
+`limit` is not a parameter of that command. Because the invalid-`detail` case never reaches the handler,
+the Python `detail=names` projection (`MCP/src/cortex_mcp/tools/routers.py:_get_capabilities`) is being
+bypassed by the size guard that `MCP/src/cortex_mcp/response.py` applies first — both halves of that
+interaction are this program's work, and neither the native nor the Python suite drives
+`core_cmd(get_capabilities)` end to end, which is why the suites stayed green. The other four are outside
+the changed contracts: `umg.set_padding` and `umg.set_anchor` report `set: true` while ignoring the
+requested value (Medium), `data.list_data_assets` silently ignores the retired `class_filter` and returns
+unfiltered results (Medium), and `material.create_material` returns an `asset_path` its sibling commands
+reject (Low). Full evidence and fix hints: `Saved/mcp_benchmark_issues_20261014_075611.md`.
+
 ## Deferred to the remaining Task 17 tail
 
-- Toolkit synchronization (`cortex-sync-toolkit`) and the `cortex-sync-docs` audit, both of which carry
-  their own approval gates; the parent-repo `docs/systems/*.md` edits made by individual tasks remain
-  local and uncommitted for that step.
-- A bounded independent review of the integrated candidate (the whole-branch review).
-- No push, PR, merge or branch deletion was performed; the delivery endpoint is the verified local
-  implementation on `feat/issue-180-token-efficiency`.
+- Triage of the five benchmark issues above — in particular the `core.get_capabilities` guard-ordering
+  defect, which should be fixed before any publication. This is new, unfixed work; the program's
+  acceptance does not depend on it.
+- Publication: no push, pull request, merge or branch deletion was performed for any of the three
+  repositories. The endpoints are the local branch `feat/issue-180-token-efficiency` (plugin, tip
+  `795ababf`), the local branch `feat/issue-180-contract-sync` (toolkit, tip `fda9c47`) and the parent-repo
+  commit `abd4851`; the parent-repo submodule pointers remain uncommitted, as do the pre-existing
+  unrelated modifications to `.agents/skills/handling-github-issues/*`, `.omp/config.yml` and
+  `.cortex/schema/*`.
