@@ -234,7 +234,8 @@ TArray<FCortexCommandInfo> FCortexLevelCommandHandler::GetSupportedCommands() co
             .Required(TEXT("actor"), TEXT("string"), TEXT("Actor identifier"))
             .Required(TEXT("property"), TEXT("string"), TEXT("Property path")),
         FCortexCommandInfo{ TEXT("list_components"), TEXT("List actor components") }
-            .Required(TEXT("actor"), TEXT("string"), TEXT("Actor identifier")),
+            .Required(TEXT("actor"), TEXT("string"), TEXT("Actor identifier"))
+            .Optional(TEXT("include_properties"), TEXT("boolean"), TEXT("Include editor-visible component property values (first 20 with total/returned counts and a completeness flag; default false)")),
         FCortexCommandInfo{ TEXT("add_component"), TEXT("Add component instance to actor") }
             .Required(TEXT("actor"), TEXT("string"), TEXT("Actor identifier"))
             .Required(TEXT("class"), TEXT("string"), TEXT("Component class name"))

@@ -11,21 +11,43 @@ from collections import OrderedDict
 logger = logging.getLogger(__name__)
 
 
-def encode_cursor(key: str, offset: int, limit: int) -> str:
-    """Encode pagination state as an opaque base64 cursor token."""
-    payload = json.dumps({"key": key, "offset": offset, "limit": limit})
-    return base64.b64encode(payload.encode()).decode()
+def encode_cursor(
+    key: str,
+    offset: int,
+    limit: int,
+    *,
+    command: str | None = None,
+    array: str | None = None,
+) -> str:
+    """Encode pagination state as an opaque base64 cursor token.
+
+    ``command``/``array`` record the owning read's provenance so a cursor cannot be replayed
+    against an unrelated read; callers that still build a bare cursor keep working.
+    """
+    payload: dict = {"key": key, "offset": offset, "limit": limit}
+    if command is not None:
+        payload["command"] = command
+    if array is not None:
+        payload["array"] = array
+    return base64.b64encode(json.dumps(payload).encode()).decode()
 
 
 def decode_cursor(cursor: str) -> dict:
-    """Decode a cursor token. Raises ValueError with INVALID_CURSOR on failure."""
+    """Decode a cursor token. Raises ValueError with INVALID_CURSOR on failure.
+
+    A cursor must carry a string key and integer offsets, so a forged token refuses here instead
+    of failing later while slicing the cached list.
+    """
     try:
         raw = base64.b64decode(cursor)
         data = json.loads(raw)
     except (ValueError, binascii.Error):
         raise ValueError("INVALID_CURSOR")
 
-    if not all(k in data for k in ("key", "offset", "limit")):
+    if not isinstance(data, dict) or not all(k in data for k in ("key", "offset", "limit")):
+        raise ValueError("INVALID_CURSOR")
+
+    if not isinstance(data["key"], str) or not isinstance(data["offset"], int) or not isinstance(data["limit"], int):
         raise ValueError("INVALID_CURSOR")
 
     return data
@@ -44,7 +66,8 @@ class PaginationCache:
     def __init__(self, max_entries: int = 5, ttl_seconds: float = 60.0):
         self._max_entries = max_entries
         self._ttl_seconds = ttl_seconds
-        self._entries: OrderedDict[str, tuple[float, str, list, dict]] = OrderedDict()
+        # (stored_at, qualified_command, array_key, full_list, response_template)
+        self._entries: OrderedDict[str, tuple[float, str, str, list, dict]] = OrderedDict()
 
     def store(
         self,
@@ -65,7 +88,13 @@ class PaginationCache:
             evicted_key, _ = self._entries.popitem(last=False)
             logger.debug("Evicted cache entry %s", evicted_key)
 
-        self._entries[key] = (time.monotonic(), array_key, list(full_list), dict(response_template))
+        self._entries[key] = (
+            time.monotonic(),
+            qualified_command,
+            array_key,
+            list(full_list),
+            dict(response_template),
+        )
         return key
 
     def get_page(self, key: str, offset: int, limit: int) -> tuple[list, dict]:
@@ -77,7 +106,7 @@ class PaginationCache:
         if entry is None:
             raise KeyError("CURSOR_EXPIRED")
 
-        timestamp, array_key, full_list, template = entry
+        timestamp, _qualified_command, array_key, full_list, _template = entry
         if time.monotonic() - timestamp > self._ttl_seconds:
             del self._entries[key]
             raise KeyError("CURSOR_EXPIRED")
@@ -99,6 +128,21 @@ class PaginationCache:
 
         return page, meta
 
+    def entry_provenance(self, key: str) -> tuple[str, str] | None:
+        """Owner command and primary array of a live entry, or None when missing/expired.
+
+        Used to validate a cursor's self-declared provenance against the snapshot it addresses
+        before any value is sliced or rebuilt.
+        """
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        timestamp, qualified_command, array_key, _full_list, _template = entry
+        if time.monotonic() - timestamp > self._ttl_seconds:
+            del self._entries[key]
+            return None
+        return qualified_command, array_key
+
     def clear(self) -> None:
         """Clear all cache entries. Intended for testing."""
         self._entries.clear()
@@ -109,7 +153,7 @@ class PaginationCache:
         if entry is None:
             raise KeyError("CURSOR_EXPIRED")
 
-        _, array_key, _, template = entry
+        _, _qualified_command, array_key, _, template = entry
         response = dict(template)
         response[array_key] = page
         response["_pagination"] = meta
