@@ -18,18 +18,26 @@
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "GameFramework/Actor.h"
+#include "GameplayTagContainer.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Misc/EngineVersionComparison.h"
 #include "Misc/PackageName.h"
 #include "Policies/CondensedJsonPrintPolicy.h"
 #include "ScopedTransaction.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "UObject/GCObject.h"
+#include "UObject/SoftObjectPath.h"
 #include "UObject/TextProperty.h"
 #include "UObject/UnrealType.h"
 #include "UObject/UObjectGlobals.h"
 #include "UObject/SavePackage.h"
+#if UE_VERSION_OLDER_THAN(5, 5, 0)
+#include "InstancedStruct.h"
+#else
+#include "StructUtils/InstancedStruct.h"
+#endif
 
 namespace
 {
@@ -808,8 +816,23 @@ namespace
 			|| CastField<FUInt64Property>(Property) != nullptr;
 	}
 
+	// The legacy serializer encodes these struct types specially rather than as a plain member object
+	// (FSoftObjectPath/FGameplayTag -> string, FGameplayTagContainer -> array, FInstancedStruct ->
+	// runtime payload object). Their diff is atomic: a changed value is echoed as a complete
+	// before/after pair, never as relative leaf paths.
+	static bool IsSpecialEncodedStruct(const UScriptStruct* Struct)
+	{
+		return Struct == FGameplayTag::StaticStruct()
+			|| Struct == FGameplayTagContainer::StaticStruct()
+			|| Struct == TBaseStructure<FSoftObjectPath>::Get()
+			|| Struct == FInstancedStruct::StaticStruct();
+	}
+
 	// True when the reflected property tree can hold an integer leaf whose value is not exactly
-	// representable by the legacy JSON number encoding. Only such roots pay for an exact snapshot.
+	// representable by the legacy JSON number encoding. An FInstancedStruct carries a runtime-selected
+	// payload type that may be an int64-bearing struct and is deliberately not provable exact, so it is
+	// treated as always precision-relevant: the root takes an exact snapshot, native comparison/copy and
+	// a runtime-payload echo instead of a rounded JSON comparison.
 	static bool PropertyTreeHasWideInteger(const FProperty* Property)
 	{
 		if (!Property)
@@ -826,6 +849,10 @@ namespace
 		}
 		if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
 		{
+			if (StructProperty->Struct == FInstancedStruct::StaticStruct())
+			{
+				return true;
+			}
 			for (TFieldIterator<FProperty> It(StructProperty->Struct); It; ++It)
 			{
 				if (PropertyTreeHasWideInteger(*It))
@@ -894,12 +921,39 @@ namespace
 
 		if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
 		{
-			// Only descend into structs the exact encoding actually needs; every other struct keeps
-			// its legacy representation (FGameplayTag, FSoftObjectPath, FInstancedStruct, ...).
-			if (!PropertyTreeHasWideInteger(Property))
+			// A runtime payload struct is unwrapped exactly like the legacy serializer, but its members
+			// are encoded exactly (so a runtime int64 leaf becomes a decimal string).
+			if (StructProperty->Struct == FInstancedStruct::StaticStruct())
+			{
+				const FInstancedStruct* Instance = static_cast<const FInstancedStruct*>(Value);
+				const UScriptStruct* PayloadStruct = Instance ? Instance->GetScriptStruct() : nullptr;
+				const uint8* PayloadMemory = Instance ? Instance->GetMemory() : nullptr;
+				if (!PayloadStruct || !PayloadMemory)
+				{
+					return FCortexSerializer::PropertyToJson(Property, Value);
+				}
+				TSharedPtr<FJsonObject> PayloadObject = MakeShared<FJsonObject>();
+				for (TFieldIterator<FProperty> It(PayloadStruct); It; ++It)
+				{
+					FProperty* Member = *It;
+					PayloadObject->SetField(Member->GetName(), SerializeEchoValueExact(
+						Member,
+						Member->ContainerPtrToValuePtr<void>(PayloadMemory),
+						JoinEchoPath(Path, Member->GetName()),
+						OutEncodings));
+				}
+				PayloadObject->SetStringField(TEXT("_struct_type"), PayloadStruct->GetName());
+				return MakeShared<FJsonValueObject>(PayloadObject);
+			}
+
+			// Special encodings keep their legacy representation (string/array/...).
+			if (IsSpecialEncodedStruct(StructProperty->Struct))
 			{
 				return FCortexSerializer::PropertyToJson(Property, Value);
 			}
+
+			// Plain declared struct: recurse exactly, regardless of integer width, so the atomic
+			// ("full") echo and the nested relative-path diff agree on granularity.
 			TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
 			for (TFieldIterator<FProperty> It(StructProperty->Struct); It; ++It)
 			{
@@ -1068,7 +1122,8 @@ namespace
 			{
 				const TSharedPtr<FJsonObject>* PreviousObject = nullptr;
 				const TSharedPtr<FJsonObject>* CurrentObject = nullptr;
-				if (PreviousValue.IsValid() && CurrentValue.IsValid()
+				if (!IsSpecialEncodedStruct(NestedStruct->Struct)
+					&& PreviousValue.IsValid() && CurrentValue.IsValid()
 					&& PreviousValue->TryGetObject(PreviousObject) && PreviousObject != nullptr
 					&& CurrentValue->TryGetObject(CurrentObject) && CurrentObject != nullptr)
 				{
@@ -1115,7 +1170,10 @@ namespace
 
 			if (const FStructProperty* NestedStruct = CastField<FStructProperty>(Member))
 			{
-				if (PropertyTreeHasWideInteger(Member))
+				// Recurse into every normally object-encoded nested struct, regardless of integer width,
+				// so the diff granularity does not depend on an unrelated int64 sibling. Special
+				// encodings stay atomic.
+				if (!IsSpecialEncodedStruct(NestedStruct->Struct))
 				{
 					DiffStructLeavesNative(NestedStruct, PreviousValue, CurrentValue, Path, OutChanges, OutEncodings);
 					continue;
@@ -1239,6 +1297,22 @@ namespace
 
 			if (const FStructProperty* StructProperty = CastField<FStructProperty>(InProperty))
 			{
+				// Walk the runtime payload of an instanced struct, not its internal declared members.
+				if (StructProperty->Struct == FInstancedStruct::StaticStruct())
+				{
+					const FInstancedStruct* Instance = static_cast<const FInstancedStruct*>(Value);
+					const UScriptStruct* PayloadStruct = Instance ? Instance->GetScriptStruct() : nullptr;
+					const uint8* PayloadMemory = Instance ? Instance->GetMemory() : nullptr;
+					if (PayloadStruct && PayloadMemory)
+					{
+						for (TFieldIterator<FProperty> It(PayloadStruct); It; ++It)
+						{
+							CollectObjectReferences(*It, It->ContainerPtrToValuePtr<void>(PayloadMemory), OutObjects);
+						}
+					}
+					return;
+				}
+
 				for (TFieldIterator<FProperty> It(StructProperty->Struct); It; ++It)
 				{
 					CollectObjectReferences(*It, (*It)->ContainerPtrToValuePtr<void>(Value), OutObjects);
@@ -1371,31 +1445,52 @@ namespace
 
 		if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
 		{
-			TSharedPtr<FJsonObject> Changes = MakeShared<FJsonObject>();
-			if (bHasSnapshot)
+			// Special-encoded struct roots (FSoftObjectPath/FGameplayTag/FGameplayTagContainer/
+			// FInstancedStruct) have no plain member object to diff. They are emitted as one atomic
+			// changed value by the scalar/atomic path below, so the change is never dropped.
+			if (!IsSpecialEncodedStruct(StructProperty->Struct))
 			{
-				TSharedPtr<FJsonObject> Encodings = MakeShared<FJsonObject>();
-				DiffStructLeavesNative(
-					StructProperty, Snapshot->GetValuePtr(), CurrentValuePtr, FString(), Changes, Encodings);
-				OutRecord->SetObjectField(TEXT("changes"), Changes);
-				if (Encodings->Values.Num() > 0)
+				TSharedPtr<FJsonObject> Changes = MakeShared<FJsonObject>();
+				bool bChangesEmitted = false;
+				if (bHasSnapshot)
 				{
-					OutRecord->SetObjectField(TEXT("value_encodings"), Encodings);
+					TSharedPtr<FJsonObject> Encodings = MakeShared<FJsonObject>();
+					DiffStructLeavesNative(
+						StructProperty, Snapshot->GetValuePtr(), CurrentValuePtr, FString(), Changes, Encodings);
+					if (Changes->Values.Num() > 0)
+					{
+						OutRecord->SetObjectField(TEXT("changes"), Changes);
+						bChangesEmitted = true;
+					}
+					if (Encodings->Values.Num() > 0)
+					{
+						OutRecord->SetObjectField(TEXT("value_encodings"), Encodings);
+					}
 				}
-			}
-			else
-			{
-				const TSharedPtr<FJsonObject>* PreviousObject = nullptr;
-				const TSharedPtr<FJsonObject>* CurrentObject = nullptr;
-				if (PreviousValue.IsValid() && CurrentValue.IsValid()
-					&& PreviousValue->TryGetObject(PreviousObject) && PreviousObject != nullptr
-					&& CurrentValue->TryGetObject(CurrentObject) && CurrentObject != nullptr)
+				else
 				{
-					DiffStructLeavesJson(StructProperty->Struct, *PreviousObject, *CurrentObject, FString(), Changes);
+					const TSharedPtr<FJsonObject>* PreviousObject = nullptr;
+					const TSharedPtr<FJsonObject>* CurrentObject = nullptr;
+					if (PreviousValue.IsValid() && CurrentValue.IsValid()
+						&& PreviousValue->TryGetObject(PreviousObject) && PreviousObject != nullptr
+						&& CurrentValue->TryGetObject(CurrentObject) && CurrentObject != nullptr)
+					{
+						DiffStructLeavesJson(StructProperty->Struct, *PreviousObject, *CurrentObject, FString(), Changes);
+					}
+					if (Changes->Values.Num() > 0)
+					{
+						OutRecord->SetObjectField(TEXT("changes"), Changes);
+						bChangesEmitted = true;
+					}
 				}
-				OutRecord->SetObjectField(TEXT("changes"), Changes);
+
+				if (bChangesEmitted)
+				{
+					return;
+				}
+				// A real change whose leaves could not be represented as relative paths must never be
+				// published as an empty complete diff; fall through and emit the complete pair instead.
 			}
-			return;
 		}
 
 		// Scalar or atomic-collection root.

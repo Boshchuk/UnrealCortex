@@ -2,7 +2,15 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "GameplayTagContainer.h"
+#include "Misc/EngineVersionComparison.h"
 #include "UObject/Object.h"
+#include "UObject/SoftObjectPath.h"
+#if UE_VERSION_OLDER_THAN(5, 5, 0)
+#include "InstancedStruct.h"
+#else
+#include "StructUtils/InstancedStruct.h"
+#endif
 
 #include "CortexBPEchoContractFixture.generated.h"
 
@@ -36,6 +44,32 @@ struct FCortexBPEchoPayload
 
 	UPROPERTY(EditAnywhere)
 	FText Label;
+};
+
+/**
+ * Mixed payload: a precision-sensitive int64 sibling next to an ordinary nested struct. Adding the
+ * unrelated int64 must not collapse the nested struct's changed leaf into one atomic entry.
+ */
+USTRUCT()
+struct FCortexBPEchoMixedPayload
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere)
+	int64 Big = 0;
+
+	UPROPERTY(EditAnywhere)
+	FVector Vector = FVector(1.0, 2.0, 3.0);
+};
+
+/** Runtime payload carried by an FInstancedStruct field. */
+USTRUCT()
+struct FCortexBPEchoInstancePayload
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere)
+	int64 Big = 0;
 };
 
 /**
@@ -83,4 +117,19 @@ public:
 	// Non-null baseline so an explicit null clear is a mutation.
 	UPROPERTY(EditAnywhere)
 	TObjectPtr<UObject> EchoObject = nullptr;
+
+	// Special-encoded struct roots: their legacy encoding is not a plain member object (string / array /
+	// runtime payload), so a changed value is echoed atomically and must never be an empty diff.
+	UPROPERTY(EditAnywhere)
+	FSoftObjectPath EchoSoftPath;
+
+	UPROPERTY(EditAnywhere)
+	FGameplayTagContainer EchoTags;
+
+	UPROPERTY(EditAnywhere)
+	FInstancedStruct EchoInstance;
+
+	// Wide int64 sibling beside an ordinary nested struct.
+	UPROPERTY(EditAnywhere)
+	FCortexBPEchoMixedPayload MixedPayload;
 };

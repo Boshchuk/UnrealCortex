@@ -6,6 +6,7 @@
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "GameFramework/Actor.h"
+#include "GameplayTagsManager.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "UObject/Class.h"
@@ -194,6 +195,46 @@ namespace
 			: Int64Property->ContainerPtrToValuePtr<void>(Owner);
 		return Int64Property->GetPropertyValue(Target);
 	}
+
+	// Native oracle for the FInstancedStruct fixture field: the runtime payload pointer, or nullptr when
+	// the field is invalid or holds a different struct type. The legacy rounded getter is never used.
+	const FCortexBPEchoInstancePayload* EchoReadInstancePayload(UObject* Owner, FStructProperty* InstanceProperty)
+	{
+		if (!Owner || !InstanceProperty)
+		{
+			return nullptr;
+		}
+		const FInstancedStruct* Instance =
+			static_cast<const FInstancedStruct*>(InstanceProperty->ContainerPtrToValuePtr<void>(Owner));
+		return Instance ? Instance->GetPtr<FCortexBPEchoInstancePayload>() : nullptr;
+	}
+
+	int64 EchoReadInstanceBig(UObject* Owner, FStructProperty* InstanceProperty)
+	{
+		const FCortexBPEchoInstancePayload* Payload = EchoReadInstancePayload(Owner, InstanceProperty);
+		return Payload ? Payload->Big : 0;
+	}
+
+	// Seeds the FInstancedStruct fixture field with a runtime payload of the expected type, directly
+	// through native reflection.
+	void EchoSeedInstancePayload(UObject* Owner, FStructProperty* InstanceProperty, int64 Big)
+	{
+		if (!Owner || !InstanceProperty)
+		{
+			return;
+		}
+		FInstancedStruct* Instance =
+			static_cast<FInstancedStruct*>(InstanceProperty->ContainerPtrToValuePtr<void>(Owner));
+		if (!Instance)
+		{
+			return;
+		}
+		Instance->InitializeAs(FCortexBPEchoInstancePayload::StaticStruct());
+		if (FCortexBPEchoInstancePayload* Payload = Instance->GetMutablePtr<FCortexBPEchoInstancePayload>())
+		{
+			Payload->Big = Big;
+		}
+	}
 }
 
 // The echo fixture constructor seeds a deterministic baseline for every value field, so a change can
@@ -215,6 +256,11 @@ ACortexBPEchoContractActor::ACortexBPEchoContractActor()
 	CaseText = TEXT("abc");
 	EchoText = FText::FromString(TEXT("abc"));
 	EchoObject = UObject::StaticClass();
+
+	EchoSoftPath = FSoftObjectPath(TEXT("/Game/A.A"));
+	// EchoTags and EchoInstance start empty/invalid; the special-encoding regressions seed them.
+	MixedPayload.Big = 0;
+	MixedPayload.Vector = FVector(1.0, 2.0, 3.0);
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -1522,27 +1568,38 @@ bool FCortexBPClassDefaultsEchoPrecisionInt64AndRollbackTest::RunTest(const FStr
 				Record->TryGetBoolField(TEXT("changed"), bChanged));
 			TestTrue(TEXT("an int64 element change is not rounded-equal"), bChanged);
 
+			const TArray<TSharedPtr<FJsonValue>>* PreviousArray = nullptr;
 			const TArray<TSharedPtr<FJsonValue>>* NewArray = nullptr;
-			TestTrue(TEXT("the collection reports its atomic new value"),
-				Record->TryGetArrayField(TEXT("new_value"), NewArray) && NewArray != nullptr);
-			if (NewArray)
+			if (TestTrue(TEXT("the collection reports its atomic previous value"),
+					Record->TryGetArrayField(TEXT("previous_value"), PreviousArray) && PreviousArray != nullptr)
+				&& TestTrue(TEXT("the collection reports its atomic new value"),
+					Record->TryGetArrayField(TEXT("new_value"), NewArray) && NewArray != nullptr))
 			{
+				TestEqual(TEXT("the collection previous value keeps its element count"), PreviousArray->Num(), 1);
 				TestEqual(TEXT("the collection new value keeps its element count"), NewArray->Num(), 1);
+				FString PreviousElement;
+				FString NewElement;
+				TestTrue(TEXT("the collection previous element is an exact decimal string"),
+					PreviousArray->Num() == 1 && (*PreviousArray)[0].IsValid() && (*PreviousArray)[0]->TryGetString(PreviousElement));
+				TestEqual(TEXT("the collection previous element is the exact seeded integer"),
+					PreviousElement, FString(TEXT("9007199254740993")));
+				TestTrue(TEXT("the collection new element is an exact decimal string"),
+					NewArray->Num() == 1 && (*NewArray)[0].IsValid() && (*NewArray)[0]->TryGetString(NewElement));
+				TestEqual(TEXT("the collection new element is the exact requested integer"),
+					NewElement, FString(TEXT("9007199254740992")));
 			}
 
 			const TSharedPtr<FJsonObject>* Encodings = nullptr;
 			if (TestTrue(TEXT("the collection precision record declares per-path encodings"),
 				Record->TryGetObjectField(TEXT("value_encodings"), Encodings) && Encodings != nullptr))
 			{
-				bool bAnyDecimal = false;
-				for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*Encodings)->Values)
-				{
-					if (Pair.Value.IsValid() && Pair.Value->AsString() == TEXT("decimal_string"))
-					{
-						bAnyDecimal = true;
-					}
-				}
-				TestTrue(TEXT("the collection reports its unsafe element encoding"), bAnyDecimal);
+				TestEqual(TEXT("the collection reports exactly one encoded element path"),
+					(*Encodings)->Values.Num(), 1);
+				FString ElementEncoding;
+				TestTrue(TEXT("the encoded element path is the array index"),
+					(*Encodings)->TryGetStringField(TEXT("0"), ElementEncoding));
+				TestEqual(TEXT("the collection element uses decimal strings"),
+					ElementEncoding, FString(TEXT("decimal_string")));
 			}
 		}
 	}
@@ -1635,6 +1692,432 @@ bool FCortexBPClassDefaultsEchoPrecisionInt64AndRollbackTest::RunTest(const FStr
 					Restored, FString(TEXT("abc")));
 			}
 		}
+	}
+
+	return true;
+}
+
+// ============================================================================
+// Task 14 review fix F1 — a special-encoded struct root (FSoftObjectPath / FGameplayTag /
+// FGameplayTagContainer / FInstancedStruct) has no plain member object, so a real change must be
+// echoed as one atomic before/after value and never as an empty complete diff.
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexBPClassDefaultsEchoSpecialEncodedAtomicTest,
+	"Cortex.Blueprint.ClassDefaults.Set.EchoSpecialEncodedAtomic",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexBPClassDefaultsEchoSpecialEncodedAtomicTest::RunTest(const FString&)
+{
+	FEchoScopedFixture Fixture;
+	FCortexBPCommandHandler Handler;
+	UObject* CDO = Fixture.Create(
+		ACortexBPEchoContractActor::StaticClass(), EchoFixtureUniquePath(TEXT("Special")));
+	if (!TestNotNull(TEXT("special-encoding fixture CDO should exist"), CDO))
+	{
+		return true;
+	}
+
+	UClass* CDOClass = CDO->GetClass();
+	FStructProperty* SoftPathProperty = FindFProperty<FStructProperty>(CDOClass, TEXT("EchoSoftPath"));
+	FStructProperty* TagsProperty = FindFProperty<FStructProperty>(CDOClass, TEXT("EchoTags"));
+	FStructProperty* InstanceProperty = FindFProperty<FStructProperty>(CDOClass, TEXT("EchoInstance"));
+	if (!TestNotNull(TEXT("fixture exposes the soft object path root"), SoftPathProperty)
+		|| !TestNotNull(TEXT("fixture exposes the gameplay tag container root"), TagsProperty)
+		|| !TestNotNull(TEXT("fixture exposes the instanced struct root"), InstanceProperty))
+	{
+		return true;
+	}
+
+	// A real registered tag so the container write is unambiguous. Registered at most once per process
+	// so a repeated run never duplicates the native tag registration.
+	static const FGameplayTag EchoTag = UGameplayTagsManager::Get().AddNativeGameplayTag(
+		FName(TEXT("Cortex.Echo.Tag")), TEXT("Cortex echo regression tag"));
+	TestTrue(TEXT("the regression gameplay tag is registered"), EchoTag.IsValid());
+	TestTrue(TEXT("the regression tag resolves by name"),
+		FGameplayTag::RequestGameplayTag(FName(TEXT("Cortex.Echo.Tag")), false).IsValid());
+
+	// UHT strips the F/U/A prefix from the reflected name, so _struct_type carries the struct's
+	// reflected name (CortexBPEchoInstancePayload), exactly what the serializer emits.
+	const FString InstanceStructName = FCortexBPEchoInstancePayload::StaticStruct()->GetName();
+
+	TSharedPtr<FJsonObject> WriteValues = MakeShared<FJsonObject>();
+	WriteValues->SetStringField(TEXT("EchoSoftPath"), TEXT("/Game/B.B"));
+	WriteValues->SetArrayField(TEXT("EchoTags"), {
+		MakeShared<FJsonValueString>(TEXT("Cortex.Echo.Tag"))});
+	TSharedPtr<FJsonObject> InstanceWrite = MakeShared<FJsonObject>();
+	InstanceWrite->SetStringField(TEXT("_struct_type"), InstanceStructName);
+	InstanceWrite->SetNumberField(TEXT("Big"), 5.0);
+	WriteValues->SetObjectField(TEXT("EchoInstance"), InstanceWrite);
+
+	const FCortexCommandResult Set = Handler.Execute(
+		TEXT("set_class_defaults"), EchoSetParams(Fixture.AssetPath, WriteValues, nullptr));
+	if (!TestTrue(*FString::Printf(TEXT("special-encoding set should succeed (error %s: %s)"),
+			*Set.ErrorCode, *Set.ErrorMessage), Set.bSuccess)
+		|| !Set.Data.IsValid())
+	{
+		return true;
+	}
+
+	// Real post-state, read through native reflection.
+	const FSoftObjectPath* StoredSoftPath =
+		static_cast<const FSoftObjectPath*>(SoftPathProperty->ContainerPtrToValuePtr<void>(CDO));
+	TestEqual(TEXT("the soft object path really moved"),
+		StoredSoftPath ? StoredSoftPath->ToString() : FString(), FString(TEXT("/Game/B.B")));
+	const FGameplayTagContainer* StoredTags =
+		static_cast<const FGameplayTagContainer*>(TagsProperty->ContainerPtrToValuePtr<void>(CDO));
+	TestTrue(TEXT("the tag container really gained the tag"), StoredTags && StoredTags->HasTag(EchoTag));
+	TestTrue(TEXT("the runtime payload really holds the written value"),
+		EchoReadInstanceBig(CDO, InstanceProperty) == 5);
+
+	// Soft object path: one atomic changed value, never an empty leaf diff.
+	TSharedPtr<FJsonObject> SoftRecord = EchoResultRecord(Set, TEXT("EchoSoftPath"));
+	if (TestNotNull(TEXT("soft object path record should exist"), SoftRecord.Get()))
+	{
+		bool bChanged = false;
+		TestTrue(TEXT("soft object path declares changed"),
+			SoftRecord->TryGetBoolField(TEXT("changed"), bChanged));
+		TestTrue(TEXT("soft object path is a real change"), bChanged);
+		FString Before;
+		FString After;
+		TestTrue(TEXT("soft object path reports the previous value"),
+			SoftRecord->TryGetStringField(TEXT("previous_value"), Before));
+		TestEqual(TEXT("soft object path previous value is the seeded path"),
+			Before, FString(TEXT("/Game/A.A")));
+		TestTrue(TEXT("soft object path reports the new value"),
+			SoftRecord->TryGetStringField(TEXT("new_value"), After));
+		TestEqual(TEXT("soft object path new value is the requested path"),
+			After, FString(TEXT("/Game/B.B")));
+		TestFalse(TEXT("soft object path is not published as empty leaf changes"),
+			SoftRecord->HasField(TEXT("changes")));
+	}
+
+	// Gameplay tag container: one atomic array before/after.
+	TSharedPtr<FJsonObject> TagsRecord = EchoResultRecord(Set, TEXT("EchoTags"));
+	if (TestNotNull(TEXT("tag container record should exist"), TagsRecord.Get()))
+	{
+		bool bChanged = false;
+		TestTrue(TEXT("tag container declares changed"),
+			TagsRecord->TryGetBoolField(TEXT("changed"), bChanged));
+		TestTrue(TEXT("tag container is a real change"), bChanged);
+		const TArray<TSharedPtr<FJsonValue>>* Before = nullptr;
+		const TArray<TSharedPtr<FJsonValue>>* After = nullptr;
+		if (TestTrue(TEXT("tag container reports the previous array"),
+				TagsRecord->TryGetArrayField(TEXT("previous_value"), Before) && Before != nullptr)
+			&& TestTrue(TEXT("tag container reports the new array"),
+				TagsRecord->TryGetArrayField(TEXT("new_value"), After) && After != nullptr))
+		{
+			TestEqual(TEXT("tag container previous array was empty"), Before->Num(), 0);
+			TestEqual(TEXT("tag container new array holds the tag"), After->Num(), 1);
+			FString TagName;
+			TestTrue(TEXT("the new tag array exposes the tag name"),
+				After->Num() == 1 && (*After)[0].IsValid() && (*After)[0]->TryGetString(TagName));
+			TestEqual(TEXT("the new tag array holds the registered tag"),
+				TagName, FString(TEXT("Cortex.Echo.Tag")));
+		}
+		TestFalse(TEXT("tag container is not published as empty leaf changes"),
+			TagsRecord->HasField(TEXT("changes")));
+	}
+
+	// Instanced struct: the runtime payload is one atomic before/after object.
+	TSharedPtr<FJsonObject> InstanceRecord = EchoResultRecord(Set, TEXT("EchoInstance"));
+	if (TestNotNull(TEXT("instanced struct record should exist"), InstanceRecord.Get()))
+	{
+		bool bChanged = false;
+		TestTrue(TEXT("instanced struct declares changed"),
+			InstanceRecord->TryGetBoolField(TEXT("changed"), bChanged));
+		TestTrue(TEXT("instanced struct is a real change"), bChanged);
+		const TSharedPtr<FJsonValue> PreviousValue = InstanceRecord->TryGetField(TEXT("previous_value"));
+		TestTrue(TEXT("instanced struct previous value was an invalid payload"),
+			PreviousValue.IsValid() && PreviousValue->IsNull());
+		const TSharedPtr<FJsonObject>* NewObject = nullptr;
+		if (TestTrue(TEXT("instanced struct reports the new payload object"),
+			InstanceRecord->TryGetObjectField(TEXT("new_value"), NewObject) && NewObject != nullptr))
+		{
+			FString StructType;
+			TestTrue(TEXT("the payload names its runtime struct"),
+				(*NewObject)->TryGetStringField(TEXT("_struct_type"), StructType));
+			TestEqual(TEXT("the payload struct uses the reflected runtime struct name"),
+				StructType, FString(TEXT("CortexBPEchoInstancePayload")));
+			double Big = -1.0;
+			TestTrue(TEXT("the payload reports the written big value"),
+				(*NewObject)->TryGetNumberField(TEXT("Big"), Big));
+			TestEqual(TEXT("the payload big value is the written value"),
+				static_cast<int32>(Big), 5);
+		}
+		TestFalse(TEXT("instanced struct is not published as empty leaf changes"),
+			InstanceRecord->HasField(TEXT("changes")));
+	}
+
+	return true;
+}
+
+// ============================================================================
+// Task 14 review fix F2 — inside a precision-sensitive root, an ordinary nested struct must still be
+// diffed by relative leaf path; an unrelated int64 sibling may not change the diff granularity.
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexBPClassDefaultsEchoNestedStructRelativeLeavesTest,
+	"Cortex.Blueprint.ClassDefaults.Set.EchoNestedStructRelativeLeaves",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexBPClassDefaultsEchoNestedStructRelativeLeavesTest::RunTest(const FString&)
+{
+	FEchoScopedFixture Fixture;
+	FCortexBPCommandHandler Handler;
+	UObject* CDO = Fixture.Create(
+		ACortexBPEchoContractActor::StaticClass(), EchoFixtureUniquePath(TEXT("NestedLeaves")));
+	if (!TestNotNull(TEXT("nested-leaf fixture CDO should exist"), CDO))
+	{
+		return true;
+	}
+
+	FStructProperty* MixedProperty = FindFProperty<FStructProperty>(CDO->GetClass(), TEXT("MixedPayload"));
+	if (!TestNotNull(TEXT("fixture exposes the mixed payload root"), MixedProperty))
+	{
+		return true;
+	}
+
+	// Only the nested Vector.X changes; the unrelated wide int64 sibling must not collapse the diff.
+	TSharedPtr<FJsonObject> VectorWrite = MakeShared<FJsonObject>();
+	VectorWrite->SetNumberField(TEXT("X"), 4);
+	TSharedPtr<FJsonObject> MixedWrite = MakeShared<FJsonObject>();
+	MixedWrite->SetObjectField(TEXT("Vector"), VectorWrite);
+	TSharedPtr<FJsonObject> WriteValues = MakeShared<FJsonObject>();
+	WriteValues->SetObjectField(TEXT("MixedPayload"), MixedWrite);
+
+	const FCortexCommandResult Set = Handler.Execute(
+		TEXT("set_class_defaults"), EchoSetParams(Fixture.AssetPath, WriteValues, nullptr));
+	if (!TestTrue(*FString::Printf(TEXT("nested-leaf set should succeed (error %s: %s)"),
+			*Set.ErrorCode, *Set.ErrorMessage), Set.bSuccess)
+		|| !Set.Data.IsValid())
+	{
+		return true;
+	}
+
+	TSharedPtr<FJsonObject> Record = EchoResultRecord(Set, TEXT("MixedPayload"));
+	if (!TestNotNull(TEXT("nested-leaf record should exist"), Record.Get()))
+	{
+		return true;
+	}
+
+	bool bChanged = false;
+	TestTrue(TEXT("nested-leaf record declares changed"), Record->TryGetBoolField(TEXT("changed"), bChanged));
+	TestTrue(TEXT("a nested leaf change is a real change"), bChanged);
+	TestFalse(TEXT("nested-leaf diff drops the complete previous value"), Record->HasField(TEXT("previous_value")));
+	TestFalse(TEXT("nested-leaf diff drops the complete new value"), Record->HasField(TEXT("new_value")));
+
+	const TSharedPtr<FJsonObject>* Changes = nullptr;
+	if (TestTrue(TEXT("nested-leaf diff exposes changed leaf paths"),
+		Record->TryGetObjectField(TEXT("changes"), Changes) && Changes != nullptr))
+	{
+		TestEqual(TEXT("only the nested leaf is reported"), (*Changes)->Values.Num(), 1);
+		const TSharedPtr<FJsonObject>* VectorXChange = nullptr;
+		if (TestTrue(TEXT("the nested struct leaf uses its relative path"),
+			(*Changes)->TryGetObjectField(TEXT("Vector.X"), VectorXChange) && VectorXChange != nullptr))
+		{
+			double Before = -1.0;
+			double After = -1.0;
+			TestTrue(TEXT("the nested leaf reports its previous value"),
+				(*VectorXChange)->TryGetNumberField(TEXT("previous_value"), Before));
+			TestEqual(TEXT("the nested leaf previous value is 1"), static_cast<int32>(Before), 1);
+			TestTrue(TEXT("the nested leaf reports its new value"),
+				(*VectorXChange)->TryGetNumberField(TEXT("new_value"), After));
+			TestEqual(TEXT("the nested leaf new value is 4"), static_cast<int32>(After), 4);
+		}
+		TestFalse(TEXT("the whole nested struct is not echoed"),
+			(*Changes)->HasField(TEXT("Vector")));
+		TestFalse(TEXT("the unchanged wide sibling stays out"),
+			(*Changes)->HasField(TEXT("Big")));
+	}
+
+	// The applied state really landed while the wide sibling kept its baseline.
+	const FCortexBPEchoMixedPayload* Mixed =
+		static_cast<const FCortexBPEchoMixedPayload*>(MixedProperty->ContainerPtrToValuePtr<void>(CDO));
+	if (TestNotNull(TEXT("mixed payload should be readable"), Mixed))
+	{
+		TestEqual(TEXT("the nested X applied"), static_cast<int32>(Mixed->Vector.X), 4);
+		TestEqual(TEXT("the nested Y kept its baseline"), static_cast<int32>(Mixed->Vector.Y), 2);
+		TestEqual(TEXT("the nested Z kept its baseline"), static_cast<int32>(Mixed->Vector.Z), 3);
+		TestTrue(TEXT("the wide sibling kept its baseline"), Mixed->Big == 0);
+	}
+
+	return true;
+}
+
+// ============================================================================
+// Task 14 review fix F3 — an FInstancedStruct root carrying a runtime int64 payload must take the exact
+// snapshot path in every mode: an exactly representable neighbour write reports changed with exact
+// decimal strings, and a later property failure restores the exact native payload.
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexBPClassDefaultsEchoInstancedStructPrecisionTest,
+	"Cortex.Blueprint.ClassDefaults.Set.EchoInstancedStructPrecisionAndRollback",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexBPClassDefaultsEchoInstancedStructPrecisionTest::RunTest(const FString&)
+{
+	FEchoScopedFixture Fixture;
+	FCortexBPCommandHandler Handler;
+	UObject* CDO = Fixture.Create(
+		ACortexBPEchoContractActor::StaticClass(), EchoFixtureUniquePath(TEXT("InstancePrecision")));
+	if (!TestNotNull(TEXT("instanced precision fixture CDO should exist"), CDO))
+	{
+		return true;
+	}
+
+	FStructProperty* InstanceProperty = FindFProperty<FStructProperty>(CDO->GetClass(), TEXT("EchoInstance"));
+	if (!TestNotNull(TEXT("fixture exposes the instanced struct root"), InstanceProperty))
+	{
+		return true;
+	}
+
+	// 9007199254740993 is NOT exactly representable as a double; 9007199254740992 is.
+	constexpr int64 SeedValue = 9007199254740993LL;
+	constexpr int64 RequestedValue = 9007199254740992LL;
+
+	// UHT strips the F prefix from the reflected name; use the runtime reflected name exactly like the
+	// serializer's `_struct_type`.
+	const FString InstanceStructName = FCortexBPEchoInstancePayload::StaticStruct()->GetName();
+
+	const auto MakeInstanceWrite = [&InstanceStructName](int64 Big)
+	{
+		TSharedPtr<FJsonObject> InstanceWrite = MakeShared<FJsonObject>();
+		InstanceWrite->SetStringField(TEXT("_struct_type"), InstanceStructName);
+		InstanceWrite->SetNumberField(TEXT("Big"), static_cast<double>(Big));
+		TSharedPtr<FJsonObject> Values = MakeShared<FJsonObject>();
+		Values->SetObjectField(TEXT("EchoInstance"), InstanceWrite);
+		return Values;
+	};
+
+	// diff consolidates the runtime payload with exact decimal strings.
+	EchoSeedInstancePayload(CDO, InstanceProperty, SeedValue);
+	const FCortexCommandResult Set = Handler.Execute(
+		TEXT("set_class_defaults"),
+		EchoSetParams(Fixture.AssetPath, MakeInstanceWrite(RequestedValue), TEXT("diff")));
+	if (!TestTrue(*FString::Printf(TEXT("instanced precision set should succeed (error %s: %s)"),
+			*Set.ErrorCode, *Set.ErrorMessage), Set.bSuccess)
+		|| !Set.Data.IsValid())
+	{
+		return true;
+	}
+
+	TSharedPtr<FJsonObject> Record = EchoResultRecord(Set, TEXT("EchoInstance"));
+	if (!TestNotNull(TEXT("instanced precision record should exist"), Record.Get()))
+	{
+		return true;
+	}
+
+	bool bChanged = false;
+	TestTrue(TEXT("instanced precision record declares changed"),
+		Record->TryGetBoolField(TEXT("changed"), bChanged));
+	TestTrue(TEXT("the exact typed comparison reports a real change"), bChanged);
+	TestFalse(TEXT("instanced precision diff drops the leaf changes"), Record->HasField(TEXT("changes")));
+
+	const TSharedPtr<FJsonObject>* PreviousObject = nullptr;
+	const TSharedPtr<FJsonObject>* NewObject = nullptr;
+	if (TestTrue(TEXT("instanced precision diff reports the previous payload"),
+			Record->TryGetObjectField(TEXT("previous_value"), PreviousObject) && PreviousObject != nullptr)
+		&& TestTrue(TEXT("instanced precision diff reports the new payload"),
+			Record->TryGetObjectField(TEXT("new_value"), NewObject) && NewObject != nullptr))
+	{
+		FString PreviousBig;
+		FString NewBig;
+		TestTrue(TEXT("the previous payload reports an exact decimal string"),
+			(*PreviousObject)->TryGetStringField(TEXT("Big"), PreviousBig));
+		TestEqual(TEXT("the previous payload value is the exact seeded integer"),
+			PreviousBig, FString(TEXT("9007199254740993")));
+		TestTrue(TEXT("the new payload reports an exact decimal string"),
+			(*NewObject)->TryGetStringField(TEXT("Big"), NewBig));
+		TestEqual(TEXT("the new payload value is the exact requested integer"),
+			NewBig, FString(TEXT("9007199254740992")));
+	}
+
+	const TSharedPtr<FJsonObject>* Encodings = nullptr;
+	if (TestTrue(TEXT("instanced precision diff declares per-path encodings"),
+		Record->TryGetObjectField(TEXT("value_encodings"), Encodings) && Encodings != nullptr))
+	{
+		FString BigEncoding;
+		TestTrue(TEXT("the encoding names the payload int64 path"),
+			(*Encodings)->TryGetStringField(TEXT("Big"), BigEncoding));
+		TestEqual(TEXT("the payload int64 leaf uses decimal strings"),
+			BigEncoding, FString(TEXT("decimal_string")));
+	}
+
+	TestTrue(TEXT("the payload post-state is the requested exactly representable value"),
+		EchoReadInstanceBig(CDO, InstanceProperty) == RequestedValue);
+
+	// Every mode keeps an authoritative changed outcome; diff/full carry exact decimal strings and none
+	// omits the values.
+	for (const TCHAR* Mode : { TEXT("diff"), TEXT("full"), TEXT("none") })
+	{
+		EchoSeedInstancePayload(CDO, InstanceProperty, SeedValue);
+		const FCortexCommandResult ModeSet = Handler.Execute(
+			TEXT("set_class_defaults"), EchoSetParams(Fixture.AssetPath, MakeInstanceWrite(RequestedValue), Mode));
+		TestTrue(*FString::Printf(TEXT("%s mode applies the payload (error %s: %s)"),
+			Mode, *ModeSet.ErrorCode, *ModeSet.ErrorMessage), ModeSet.bSuccess);
+
+		TSharedPtr<FJsonObject> ModeRecord = EchoResultRecord(ModeSet, TEXT("EchoInstance"));
+		if (TestNotNull(*FString::Printf(TEXT("%s mode exposes the payload record"), Mode), ModeRecord.Get()))
+		{
+			bool bModeChanged = false;
+			TestTrue(*FString::Printf(TEXT("%s mode declares changed"), Mode),
+				ModeRecord->TryGetBoolField(TEXT("changed"), bModeChanged));
+			TestTrue(*FString::Printf(TEXT("%s mode reports a real change"), Mode), bModeChanged);
+
+			if (FCString::Strcmp(Mode, TEXT("none")) == 0)
+			{
+				TestFalse(*FString::Printf(TEXT("%s mode omits the previous value"), Mode),
+					ModeRecord->HasField(TEXT("previous_value")));
+				TestFalse(*FString::Printf(TEXT("%s mode omits the new value"), Mode),
+					ModeRecord->HasField(TEXT("new_value")));
+				TestFalse(*FString::Printf(TEXT("%s mode omits the changed leaves"), Mode),
+					ModeRecord->HasField(TEXT("changes")));
+			}
+			else
+			{
+				const TSharedPtr<FJsonObject>* ModePrevious = nullptr;
+				const TSharedPtr<FJsonObject>* ModeNew = nullptr;
+				if (TestTrue(*FString::Printf(TEXT("%s mode reports the previous payload"), Mode),
+						ModeRecord->TryGetObjectField(TEXT("previous_value"), ModePrevious) && ModePrevious != nullptr)
+					&& TestTrue(*FString::Printf(TEXT("%s mode reports the new payload"), Mode),
+						ModeRecord->TryGetObjectField(TEXT("new_value"), ModeNew) && ModeNew != nullptr))
+				{
+					FString ModePreviousBig;
+					FString ModeNewBig;
+					TestTrue(*FString::Printf(TEXT("%s mode reports the exact previous integer"), Mode),
+						(*ModePrevious)->TryGetStringField(TEXT("Big"), ModePreviousBig));
+					TestEqual(*FString::Printf(TEXT("%s mode previous value is the exact seed"), Mode),
+						ModePreviousBig, FString(TEXT("9007199254740993")));
+					TestTrue(*FString::Printf(TEXT("%s mode reports the exact new integer"), Mode),
+						(*ModeNew)->TryGetStringField(TEXT("Big"), ModeNewBig));
+					TestEqual(*FString::Printf(TEXT("%s mode new value is the exact request"), Mode),
+						ModeNewBig, FString(TEXT("9007199254740992")));
+				}
+			}
+		}
+
+		TestTrue(*FString::Printf(TEXT("%s mode applied the requested payload"), Mode),
+			EchoReadInstanceBig(CDO, InstanceProperty) == RequestedValue);
+	}
+
+	// A later property failure restores the exact native payload in every mode.
+	for (const TCHAR* Mode : { TEXT("diff"), TEXT("full"), TEXT("none") })
+	{
+		EchoSeedInstancePayload(CDO, InstanceProperty, SeedValue);
+
+		TSharedPtr<FJsonObject> FailedValues = MakeInstanceWrite(RequestedValue);
+		FailedValues->SetBoolField(TEXT("CortexEchoAbsentProperty"), true);
+		const FCortexCommandResult Failed = Handler.Execute(
+			TEXT("set_class_defaults"), EchoSetParams(Fixture.AssetPath, FailedValues, Mode));
+
+		TestFalse(*FString::Printf(TEXT("%s mode fails on the later property"), Mode), Failed.bSuccess);
+		TestEqual(*FString::Printf(TEXT("%s mode reports PROPERTY_NOT_FOUND"), Mode),
+			Failed.ErrorCode, CortexErrorCodes::PropertyNotFound);
+		TestTrue(*FString::Printf(TEXT("%s mode restores the payload type"), Mode),
+			EchoReadInstancePayload(CDO, InstanceProperty) != nullptr);
+		TestTrue(*FString::Printf(TEXT("%s mode restores the exact payload integer"), Mode),
+			EchoReadInstanceBig(CDO, InstanceProperty) == SeedValue);
 	}
 
 	return true;
