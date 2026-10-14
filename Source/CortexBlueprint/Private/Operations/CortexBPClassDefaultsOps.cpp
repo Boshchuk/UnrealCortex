@@ -25,8 +25,10 @@
 #include "ScopedTransaction.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include "UObject/GCObject.h"
 #include "UObject/TextProperty.h"
 #include "UObject/UnrealType.h"
+#include "UObject/UObjectGlobals.h"
 #include "UObject/SavePackage.h"
 
 namespace
@@ -780,6 +782,684 @@ namespace
 		return PropertyInfo;
 	}
 
+	// ========================================================================
+	// Task 14: changed-leaf class-default mutation echoes.
+	//
+	// The echo mode only decides how an applied mutation is reported back; it never changes what is
+	// applied, saved or compiled. Precision-sensitive roots (any reflected tree containing a 64-bit
+	// integer leaf) additionally get an exact native snapshot so both the change comparison and the
+	// rollback never travel through the lossy legacy JSON double encoding.
+	// ========================================================================
+	enum class EClassDefaultEchoMode : uint8
+	{
+		Diff,
+		Full,
+		None
+	};
+
+	// Largest magnitude a 64-bit integer can have and still round-trip through the legacy JSON double
+	// encoding. Mirrors CortexSTInspectOps's decimal-string convention, implemented locally so this
+	// module has no StateTree dependency.
+	static constexpr int64 ClassDefaultSafeIntegerBound = 9007199254740991LL;
+
+	static bool IsWideIntegerLeaf(const FProperty* Property)
+	{
+		return CastField<FInt64Property>(Property) != nullptr
+			|| CastField<FUInt64Property>(Property) != nullptr;
+	}
+
+	// True when the reflected property tree can hold an integer leaf whose value is not exactly
+	// representable by the legacy JSON number encoding. Only such roots pay for an exact snapshot.
+	static bool PropertyTreeHasWideInteger(const FProperty* Property)
+	{
+		if (!Property)
+		{
+			return false;
+		}
+		if (IsWideIntegerLeaf(Property))
+		{
+			return true;
+		}
+		if (const FEnumProperty* EnumProperty = CastField<FEnumProperty>(Property))
+		{
+			return PropertyTreeHasWideInteger(EnumProperty->GetUnderlyingProperty());
+		}
+		if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
+		{
+			for (TFieldIterator<FProperty> It(StructProperty->Struct); It; ++It)
+			{
+				if (PropertyTreeHasWideInteger(*It))
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+		if (const FArrayProperty* ArrayProperty = CastField<FArrayProperty>(Property))
+		{
+			return PropertyTreeHasWideInteger(ArrayProperty->Inner);
+		}
+		if (const FSetProperty* SetProperty = CastField<FSetProperty>(Property))
+		{
+			return PropertyTreeHasWideInteger(SetProperty->ElementProp);
+		}
+		if (const FMapProperty* MapProperty = CastField<FMapProperty>(Property))
+		{
+			return PropertyTreeHasWideInteger(MapProperty->KeyProp)
+				|| PropertyTreeHasWideInteger(MapProperty->ValueProp);
+		}
+		return false;
+	}
+
+	static FString JoinEchoPath(const FString& Prefix, const FString& Child)
+	{
+		return Prefix.IsEmpty() ? Child : Prefix + TEXT(".") + Child;
+	}
+
+	// Serializes a value exactly, keeping the legacy JSON shape except for 64-bit integer leaves
+	// outside the exactly representable range, which become exact decimal strings. Every leaf path
+	// that resorted to a decimal string is recorded so the caller can advertise its encoding.
+	static TSharedPtr<FJsonValue> SerializeEchoValueExact(
+		const FProperty* Property,
+		const void* Value,
+		const FString& Path,
+		const TSharedPtr<FJsonObject>& OutEncodings)
+	{
+		if (!Property || !Value)
+		{
+			return MakeShared<FJsonValueNull>();
+		}
+
+		if (const FInt64Property* Int64Property = CastField<FInt64Property>(Property))
+		{
+			const int64 Value64 = Int64Property->GetPropertyValue(Value);
+			if (Value64 < -ClassDefaultSafeIntegerBound || Value64 > ClassDefaultSafeIntegerBound)
+			{
+				OutEncodings->SetStringField(Path, TEXT("decimal_string"));
+				return MakeShared<FJsonValueString>(FString::Printf(TEXT("%lld"), static_cast<long long>(Value64)));
+			}
+			return MakeShared<FJsonValueNumber>(static_cast<double>(Value64));
+		}
+
+		if (const FUInt64Property* UnsignedProperty = CastField<FUInt64Property>(Property))
+		{
+			const uint64 Value64 = UnsignedProperty->GetPropertyValue(Value);
+			if (Value64 > static_cast<uint64>(ClassDefaultSafeIntegerBound))
+			{
+				OutEncodings->SetStringField(Path, TEXT("decimal_string"));
+				return MakeShared<FJsonValueString>(FString::Printf(TEXT("%llu"), static_cast<unsigned long long>(Value64)));
+			}
+			return MakeShared<FJsonValueNumber>(static_cast<double>(Value64));
+		}
+
+		if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
+		{
+			// Only descend into structs the exact encoding actually needs; every other struct keeps
+			// its legacy representation (FGameplayTag, FSoftObjectPath, FInstancedStruct, ...).
+			if (!PropertyTreeHasWideInteger(Property))
+			{
+				return FCortexSerializer::PropertyToJson(Property, Value);
+			}
+			TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+			for (TFieldIterator<FProperty> It(StructProperty->Struct); It; ++It)
+			{
+				FProperty* Member = *It;
+				Object->SetField(Member->GetName(), SerializeEchoValueExact(
+					Member,
+					Member->ContainerPtrToValuePtr<void>(Value),
+					JoinEchoPath(Path, Member->GetName()),
+					OutEncodings));
+			}
+			return MakeShared<FJsonValueObject>(Object);
+		}
+
+		if (const FArrayProperty* ArrayProperty = CastField<FArrayProperty>(Property))
+		{
+			FScriptArrayHelper ArrayHelper(ArrayProperty, Value);
+			TArray<TSharedPtr<FJsonValue>> Elements;
+			Elements.Reserve(ArrayHelper.Num());
+			for (int32 Index = 0; Index < ArrayHelper.Num(); ++Index)
+			{
+				Elements.Add(SerializeEchoValueExact(
+					ArrayProperty->Inner,
+					ArrayHelper.GetRawPtr(Index),
+					JoinEchoPath(Path, FString::Printf(TEXT("%d"), Index)),
+					OutEncodings));
+			}
+			return MakeShared<FJsonValueArray>(Elements);
+		}
+
+		if (const FSetProperty* SetProperty = CastField<FSetProperty>(Property))
+		{
+			FScriptSetHelper SetHelper(SetProperty, Value);
+			TArray<TSharedPtr<FJsonValue>> Elements;
+			for (int32 Index = 0; Index < SetHelper.GetMaxIndex(); ++Index)
+			{
+				if (!SetHelper.IsValidIndex(Index))
+				{
+					continue;
+				}
+				Elements.Add(SerializeEchoValueExact(
+					SetProperty->ElementProp,
+					SetHelper.GetElementPtr(Index),
+					JoinEchoPath(Path, FString::Printf(TEXT("%d"), Elements.Num())),
+					OutEncodings));
+			}
+			return MakeShared<FJsonValueArray>(Elements);
+		}
+
+		if (const FMapProperty* MapProperty = CastField<FMapProperty>(Property))
+		{
+			FScriptMapHelper MapHelper(MapProperty, Value);
+			TSharedPtr<FJsonObject> MapObject = MakeShared<FJsonObject>();
+			for (int32 Index = 0; Index < MapHelper.GetMaxIndex(); ++Index)
+			{
+				if (!MapHelper.IsValidIndex(Index))
+				{
+					continue;
+				}
+				FString KeyString;
+				MapProperty->KeyProp->ExportTextItem_Direct(KeyString, MapHelper.GetKeyPtr(Index), nullptr, nullptr, PPF_None);
+				MapObject->SetField(KeyString, SerializeEchoValueExact(
+					MapProperty->ValueProp,
+					MapHelper.GetValuePtr(Index),
+					JoinEchoPath(Path, KeyString),
+					OutEncodings));
+			}
+			return MakeShared<FJsonValueObject>(MapObject);
+		}
+
+		return FCortexSerializer::PropertyToJson(Property, Value);
+	}
+
+	// Deep structural comparison of two JSON values. Case-sensitive for strings so a case-only string
+	// change is never mistaken for representational equality.
+	static bool JsonValuesEqual(const TSharedPtr<FJsonValue>& Left, const TSharedPtr<FJsonValue>& Right)
+	{
+		if (!Left.IsValid() || !Right.IsValid())
+		{
+			return Left.IsValid() == Right.IsValid();
+		}
+		if (Left->Type != Right->Type)
+		{
+			return false;
+		}
+
+		switch (Left->Type)
+		{
+		case EJson::Null:
+			return true;
+		case EJson::String:
+			// FString::operator== is case-insensitive in Unreal; a case-only change is a real mutation
+			// and must never be reported as equal.
+			return Left->AsString().Equals(Right->AsString(), ESearchCase::CaseSensitive);
+		case EJson::Number:
+			return Left->AsNumber() == Right->AsNumber();
+		case EJson::Boolean:
+			return Left->AsBool() == Right->AsBool();
+		case EJson::Array:
+		{
+			const TArray<TSharedPtr<FJsonValue>>& LeftArray = Left->AsArray();
+			const TArray<TSharedPtr<FJsonValue>>& RightArray = Right->AsArray();
+			if (LeftArray.Num() != RightArray.Num())
+			{
+				return false;
+			}
+			for (int32 Index = 0; Index < LeftArray.Num(); ++Index)
+			{
+				if (!JsonValuesEqual(LeftArray[Index], RightArray[Index]))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+		case EJson::Object:
+		{
+			const TSharedPtr<FJsonObject>& LeftObject = Left->AsObject();
+			const TSharedPtr<FJsonObject>& RightObject = Right->AsObject();
+			if (!LeftObject.IsValid() || !RightObject.IsValid())
+			{
+				return LeftObject.IsValid() == RightObject.IsValid();
+			}
+			if (LeftObject->Values.Num() != RightObject->Values.Num())
+			{
+				return false;
+			}
+			for (const auto& Pair : LeftObject->Values)
+			{
+				const FString Key = CortexEngineCompat::JsonKeyToString(Pair.Key);
+				if (!JsonValuesEqual(Pair.Value, RightObject->TryGetField(Key)))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+		default:
+			return false;
+		}
+	}
+
+	// Emits one entry per changed leaf of a declared struct by comparing the legacy JSON objects
+	// member by member. Nested structs recurse only when the legacy representation is itself an
+	// object, so special struct encodings stay atomic.
+	static void DiffStructLeavesJson(
+		const UScriptStruct* Struct,
+		const TSharedPtr<FJsonObject>& Previous,
+		const TSharedPtr<FJsonObject>& Current,
+		const FString& Prefix,
+		const TSharedPtr<FJsonObject>& OutChanges)
+	{
+		if (!Struct)
+		{
+			return;
+		}
+
+		for (TFieldIterator<FProperty> It(Struct); It; ++It)
+		{
+			FProperty* Member = *It;
+			const FString MemberName = Member->GetName();
+			const FString Path = JoinEchoPath(Prefix, MemberName);
+			const TSharedPtr<FJsonValue> PreviousValue = Previous.IsValid() ? Previous->TryGetField(MemberName) : nullptr;
+			const TSharedPtr<FJsonValue> CurrentValue = Current.IsValid() ? Current->TryGetField(MemberName) : nullptr;
+
+			if (const FStructProperty* NestedStruct = CastField<FStructProperty>(Member))
+			{
+				const TSharedPtr<FJsonObject>* PreviousObject = nullptr;
+				const TSharedPtr<FJsonObject>* CurrentObject = nullptr;
+				if (PreviousValue.IsValid() && CurrentValue.IsValid()
+					&& PreviousValue->TryGetObject(PreviousObject) && PreviousObject != nullptr
+					&& CurrentValue->TryGetObject(CurrentObject) && CurrentObject != nullptr)
+				{
+					DiffStructLeavesJson(NestedStruct->Struct, *PreviousObject, *CurrentObject, Path, OutChanges);
+					continue;
+				}
+			}
+
+			if (JsonValuesEqual(PreviousValue, CurrentValue))
+			{
+				continue;
+			}
+
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetField(TEXT("previous_value"),
+				PreviousValue.IsValid() ? PreviousValue : MakeShared<FJsonValueNull>());
+			Entry->SetField(TEXT("new_value"),
+				CurrentValue.IsValid() ? CurrentValue : MakeShared<FJsonValueNull>());
+			OutChanges->SetObjectField(Path, Entry);
+		}
+	}
+
+	// Emits one entry per changed leaf of a declared struct using the exact native comparison and the
+	// exact-encoded before/after values, so a precision-sensitive leaf is never reported as equal.
+	static void DiffStructLeavesNative(
+		const FStructProperty* StructProperty,
+		const void* PreviousContainer,
+		const void* CurrentContainer,
+		const FString& Prefix,
+		const TSharedPtr<FJsonObject>& OutChanges,
+		const TSharedPtr<FJsonObject>& OutEncodings)
+	{
+		if (!StructProperty)
+		{
+			return;
+		}
+
+		for (TFieldIterator<FProperty> It(StructProperty->Struct); It; ++It)
+		{
+			FProperty* Member = *It;
+			const void* PreviousValue = Member->ContainerPtrToValuePtr<void>(PreviousContainer);
+			const void* CurrentValue = Member->ContainerPtrToValuePtr<void>(CurrentContainer);
+			const FString Path = JoinEchoPath(Prefix, Member->GetName());
+
+			if (const FStructProperty* NestedStruct = CastField<FStructProperty>(Member))
+			{
+				if (PropertyTreeHasWideInteger(Member))
+				{
+					DiffStructLeavesNative(NestedStruct, PreviousValue, CurrentValue, Path, OutChanges, OutEncodings);
+					continue;
+				}
+			}
+
+			if (Member->Identical(PreviousValue, CurrentValue, PPF_None))
+			{
+				continue;
+			}
+
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetField(TEXT("previous_value"),
+				SerializeEchoValueExact(Member, PreviousValue, Path, OutEncodings));
+			Entry->SetField(TEXT("new_value"),
+				SerializeEchoValueExact(Member, CurrentValue, Path, OutEncodings));
+			OutChanges->SetObjectField(Path, Entry);
+		}
+	}
+
+	// Owns one exact native copy of a precision-sensitive root taken before assignment. Object
+	// references inside the copied tree (and the owning CDO) are retained through FGCObject so they
+	// stay valid for the whole synchronous mutation loop. Alignment and destruction match the source
+	// property exactly; no class-sized or parent-CDO-layout buffer is ever used.
+	class FCortexClassDefaultValueSnapshot : public FGCObject
+	{
+	public:
+		FCortexClassDefaultValueSnapshot(FProperty* InProperty, const void* InValuePtr, UObject* InOwner)
+			: Property(InProperty)
+			, Owner(InOwner)
+		{
+			if (!Property)
+			{
+				return;
+			}
+
+			Storage = FMemory::Malloc(Property->GetSize(), Property->GetMinAlignment());
+			Property->InitializeValue(Storage);
+			if (InValuePtr)
+			{
+				Property->CopyCompleteValue(Storage, InValuePtr);
+			}
+
+			// Collect the reachable object references once from the frozen copy. The snapshot is never
+			// mutated after capture, so the reference set is stable for the whole synchronous loop, and
+			// the references are held as TObjectPtr handles so they survive incremental GC.
+			CollectObjectReferences(Property, Storage, ReferencedObjects);
+		}
+
+		FCortexClassDefaultValueSnapshot(const FCortexClassDefaultValueSnapshot&) = delete;
+		FCortexClassDefaultValueSnapshot& operator=(const FCortexClassDefaultValueSnapshot&) = delete;
+
+		virtual ~FCortexClassDefaultValueSnapshot() override
+		{
+			if (Property && Storage)
+			{
+				Property->DestroyValue(Storage);
+			}
+			if (Storage)
+			{
+				FMemory::Free(Storage);
+				Storage = nullptr;
+			}
+		}
+
+		const void* GetValuePtr() const
+		{
+			return Storage;
+		}
+
+		// Restores the exact captured native value onto the live property value pointer.
+		void RestoreTo(void* TargetValuePtr) const
+		{
+			if (Property && Storage && TargetValuePtr)
+			{
+				Property->CopyCompleteValue(TargetValuePtr, Storage);
+			}
+		}
+
+		virtual void AddReferencedObjects(FReferenceCollector& Collector) override
+		{
+			// TObjectPtr handles are passed (never raw UObject*) so the collector's handle-aware
+			// overload is selected; the raw-pointer overload is unsafe under incremental GC.
+			if (Owner)
+			{
+				Collector.AddReferencedObject(Owner);
+			}
+			for (TObjectPtr<UObject>& Object : ReferencedObjects)
+			{
+				Collector.AddReferencedObject(Object);
+			}
+		}
+
+		virtual FString GetReferencerName() const override
+		{
+			return TEXT("FCortexClassDefaultValueSnapshot");
+		}
+
+	private:
+		// Walks the same reflected struct/container tree as the serializer and gathers every object
+		// reference as a TObjectPtr handle. Populated once from the frozen snapshot storage.
+		static void CollectObjectReferences(
+			FProperty* InProperty,
+			const void* Value,
+			TArray<TObjectPtr<UObject>>& OutObjects)
+		{
+			if (!InProperty || !Value)
+			{
+				return;
+			}
+
+			if (FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(InProperty))
+			{
+				TObjectPtr<UObject> Object = ObjectProperty->GetObjectPtrPropertyValue(Value);
+				if (Object)
+				{
+					OutObjects.Add(Object);
+				}
+				return;
+			}
+
+			if (const FStructProperty* StructProperty = CastField<FStructProperty>(InProperty))
+			{
+				for (TFieldIterator<FProperty> It(StructProperty->Struct); It; ++It)
+				{
+					CollectObjectReferences(*It, (*It)->ContainerPtrToValuePtr<void>(Value), OutObjects);
+				}
+				return;
+			}
+
+			if (const FArrayProperty* ArrayProperty = CastField<FArrayProperty>(InProperty))
+			{
+				FScriptArrayHelper ArrayHelper(ArrayProperty, Value);
+				for (int32 Index = 0; Index < ArrayHelper.Num(); ++Index)
+				{
+					CollectObjectReferences(ArrayProperty->Inner, ArrayHelper.GetRawPtr(Index), OutObjects);
+				}
+				return;
+			}
+
+			if (const FSetProperty* SetProperty = CastField<FSetProperty>(InProperty))
+			{
+				FScriptSetHelper SetHelper(SetProperty, Value);
+				for (int32 Index = 0; Index < SetHelper.GetMaxIndex(); ++Index)
+				{
+					if (SetHelper.IsValidIndex(Index))
+					{
+						CollectObjectReferences(SetProperty->ElementProp, SetHelper.GetElementPtr(Index), OutObjects);
+					}
+				}
+				return;
+			}
+
+			if (const FMapProperty* MapProperty = CastField<FMapProperty>(InProperty))
+			{
+				FScriptMapHelper MapHelper(MapProperty, Value);
+				for (int32 Index = 0; Index < MapHelper.GetMaxIndex(); ++Index)
+				{
+					if (MapHelper.IsValidIndex(Index))
+					{
+						CollectObjectReferences(MapProperty->KeyProp, MapHelper.GetKeyPtr(Index), OutObjects);
+						CollectObjectReferences(MapProperty->ValueProp, MapHelper.GetValuePtr(Index), OutObjects);
+					}
+				}
+			}
+		}
+
+		FProperty* Property = nullptr;
+		void* Storage = nullptr;
+		TObjectPtr<UObject> Owner;
+		TArray<TObjectPtr<UObject>> ReferencedObjects;
+	};
+
+	// Advertises how the emitted echoes were encoded: a precision-sensitive scalar advertises a
+	// singular value_encoding, struct/atomic collections advertise per-path value_encodings.
+	static void ApplyEchoEncodings(
+		const FProperty* Property,
+		const TSharedPtr<FJsonObject>& Encodings,
+		const TSharedPtr<FJsonObject>& OutRecord)
+	{
+		if (!Encodings.IsValid() || Encodings->Values.Num() == 0)
+		{
+			return;
+		}
+
+		if (IsWideIntegerLeaf(Property))
+		{
+			OutRecord->SetStringField(TEXT("value_encoding"), TEXT("decimal_string"));
+		}
+		else
+		{
+			OutRecord->SetObjectField(TEXT("value_encodings"), Encodings);
+		}
+	}
+
+	// Fills the per-property result record with the mode-appropriate echo. `changed` survives in every
+	// mode; only the value representation differs. When `Snapshot` is present the change decision and
+	// the values come from the exact native storage instead of the lossy legacy JSON.
+	static void BuildClassDefaultEchoDiff(
+		EClassDefaultEchoMode Mode,
+		const FProperty* Property,
+		const void* CurrentValuePtr,
+		const FCortexClassDefaultValueSnapshot* Snapshot,
+		const TSharedPtr<FJsonValue>& PreviousValue,
+		const TSharedPtr<FJsonValue>& CurrentValue,
+		const TSharedPtr<FJsonObject>& OutRecord)
+	{
+		const bool bHasSnapshot = Snapshot != nullptr && Snapshot->GetValuePtr() != nullptr;
+
+		bool bChanged = false;
+		if (bHasSnapshot)
+		{
+			bChanged = !Property->Identical(Snapshot->GetValuePtr(), CurrentValuePtr, PPF_None);
+		}
+		else
+		{
+			bChanged = !JsonValuesEqual(PreviousValue, CurrentValue);
+		}
+		OutRecord->SetBoolField(TEXT("changed"), bChanged);
+
+		if (Mode == EClassDefaultEchoMode::None)
+		{
+			return;
+		}
+
+		const bool bExactEcho = bHasSnapshot && PropertyTreeHasWideInteger(Property);
+
+		if (Mode == EClassDefaultEchoMode::Full)
+		{
+			if (bExactEcho)
+			{
+				TSharedPtr<FJsonObject> Encodings = MakeShared<FJsonObject>();
+				OutRecord->SetField(TEXT("previous_value"),
+					SerializeEchoValueExact(Property, Snapshot->GetValuePtr(), FString(), Encodings));
+				OutRecord->SetField(TEXT("new_value"),
+					SerializeEchoValueExact(Property, CurrentValuePtr, FString(), Encodings));
+				ApplyEchoEncodings(Property, Encodings, OutRecord);
+				return;
+			}
+
+			OutRecord->SetField(TEXT("previous_value"),
+				PreviousValue.IsValid() ? PreviousValue : MakeShared<FJsonValueNull>());
+			OutRecord->SetField(TEXT("new_value"),
+				CurrentValue.IsValid() ? CurrentValue : MakeShared<FJsonValueNull>());
+			return;
+		}
+
+		// Diff mode: only a real change earns a value echo.
+		if (!bChanged)
+		{
+			return;
+		}
+
+		if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
+		{
+			TSharedPtr<FJsonObject> Changes = MakeShared<FJsonObject>();
+			if (bHasSnapshot)
+			{
+				TSharedPtr<FJsonObject> Encodings = MakeShared<FJsonObject>();
+				DiffStructLeavesNative(
+					StructProperty, Snapshot->GetValuePtr(), CurrentValuePtr, FString(), Changes, Encodings);
+				OutRecord->SetObjectField(TEXT("changes"), Changes);
+				if (Encodings->Values.Num() > 0)
+				{
+					OutRecord->SetObjectField(TEXT("value_encodings"), Encodings);
+				}
+			}
+			else
+			{
+				const TSharedPtr<FJsonObject>* PreviousObject = nullptr;
+				const TSharedPtr<FJsonObject>* CurrentObject = nullptr;
+				if (PreviousValue.IsValid() && CurrentValue.IsValid()
+					&& PreviousValue->TryGetObject(PreviousObject) && PreviousObject != nullptr
+					&& CurrentValue->TryGetObject(CurrentObject) && CurrentObject != nullptr)
+				{
+					DiffStructLeavesJson(StructProperty->Struct, *PreviousObject, *CurrentObject, FString(), Changes);
+				}
+				OutRecord->SetObjectField(TEXT("changes"), Changes);
+			}
+			return;
+		}
+
+		// Scalar or atomic-collection root.
+		if (bExactEcho)
+		{
+			TSharedPtr<FJsonObject> Encodings = MakeShared<FJsonObject>();
+			OutRecord->SetField(TEXT("previous_value"),
+				SerializeEchoValueExact(Property, Snapshot->GetValuePtr(), FString(), Encodings));
+			OutRecord->SetField(TEXT("new_value"),
+				SerializeEchoValueExact(Property, CurrentValuePtr, FString(), Encodings));
+			ApplyEchoEncodings(Property, Encodings, OutRecord);
+			return;
+		}
+
+		OutRecord->SetField(TEXT("previous_value"),
+			PreviousValue.IsValid() ? PreviousValue : MakeShared<FJsonValueNull>());
+		OutRecord->SetField(TEXT("new_value"),
+			CurrentValue.IsValid() ? CurrentValue : MakeShared<FJsonValueNull>());
+	}
+
+	// Validates the optional 'echo' selector before any mutation. Accepts diff (default), full, none.
+	static bool ParseClassDefaultEchoMode(
+		const TSharedPtr<FJsonObject>& Params,
+		EClassDefaultEchoMode& OutMode,
+		FCortexCommandResult& OutError)
+	{
+		OutMode = EClassDefaultEchoMode::Diff;
+
+		const TSharedPtr<FJsonValue> Found = Params ? Params->TryGetField(TEXT("echo")) : nullptr;
+		if (!Found.IsValid())
+		{
+			return true;
+		}
+		if (Found->Type != EJson::String)
+		{
+			OutError = FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidField,
+				TEXT("'echo' must be a string (diff|full|none)"));
+			return false;
+		}
+
+		const FString Mode = Found->AsString();
+		if (Mode == TEXT("diff"))
+		{
+			OutMode = EClassDefaultEchoMode::Diff;
+		}
+		else if (Mode == TEXT("full"))
+		{
+			OutMode = EClassDefaultEchoMode::Full;
+		}
+		else if (Mode == TEXT("none"))
+		{
+			OutMode = EClassDefaultEchoMode::None;
+		}
+		else
+		{
+			OutError = FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidField,
+				TEXT("'echo' must be one of diff|full|none"));
+			return false;
+		}
+		return true;
+	}
+
 	static FCortexBatchPreflightResult PreflightBatchSetClassDefaults(const FCortexBatchMutationItem& Item)
 	{
 		FString BlockReason;
@@ -1510,6 +2190,16 @@ FCortexCommandResult FCortexBPClassDefaultsOps::SetClassDefaults(const TSharedPt
 	bool bSave = true;
 	Params->TryGetBoolField(TEXT("save"), bSave);
 
+	// Echo mode is validated before any mutation so a malformed selector never leaves a partial
+	// write behind. It only controls the response representation; the mutation is identical in every
+	// mode.
+	EClassDefaultEchoMode EchoMode = EClassDefaultEchoMode::Diff;
+	FCortexCommandResult EchoError;
+	if (!ParseClassDefaultEchoMode(Params, EchoMode, EchoError))
+	{
+		return EchoError;
+	}
+
 	FString ValidationError;
 	if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(BlueprintPath, ValidationError))
 	{
@@ -1551,6 +2241,9 @@ FCortexCommandResult FCortexBPClassDefaultsOps::SetClassDefaults(const TSharedPt
 			FProperty* Property = nullptr;
 			void* ValuePtr = nullptr;
 			TSharedPtr<FJsonValue> PreviousValue;
+			// Exact native copy of a precision-sensitive root, taken before assignment. When present it
+			// is the authoritative rollback source; the legacy JSON journal stays for every other root.
+			TUniquePtr<FCortexClassDefaultValueSnapshot> Snapshot;
 		};
 		TArray<FAppliedPropertyChange> AppliedChanges;
 
@@ -1558,8 +2251,19 @@ FCortexCommandResult FCortexBPClassDefaultsOps::SetClassDefaults(const TSharedPt
 		{
 			for (int32 Index = AppliedChanges.Num() - 1; Index >= 0; --Index)
 			{
-				const FAppliedPropertyChange& Change = AppliedChanges[Index];
-				if (!Change.Property || !Change.ValuePtr || !Change.PreviousValue.IsValid())
+				FAppliedPropertyChange& Change = AppliedChanges[Index];
+				if (!Change.Property || !Change.ValuePtr)
+				{
+					continue;
+				}
+
+				if (Change.Snapshot.IsValid())
+				{
+					Change.Snapshot->RestoreTo(Change.ValuePtr);
+					continue;
+				}
+
+				if (!Change.PreviousValue.IsValid())
 				{
 					continue;
 				}
@@ -1619,6 +2323,16 @@ FCortexCommandResult FCortexBPClassDefaultsOps::SetClassDefaults(const TSharedPt
 			}
 
 			const TSharedPtr<FJsonValue> PreviousValue = FCortexSerializer::PropertyToJson(Property, ValuePtr);
+
+			// Capture the exact native value before assignment whenever the root can hold an integer
+			// the legacy JSON encoding cannot represent exactly. This backs both the exact echo and the
+			// exact rollback in every echo mode.
+			TUniquePtr<FCortexClassDefaultValueSnapshot> Snapshot;
+			if (PropertyTreeHasWideInteger(Property))
+			{
+				Snapshot = MakeUnique<FCortexClassDefaultValueSnapshot>(Property, ValuePtr, CDO);
+			}
+
 			TSharedPtr<FJsonValue> ValueForSet = JsonValue;
 
 			const FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property);
@@ -1700,7 +2414,6 @@ FCortexCommandResult FCortexBPClassDefaultsOps::SetClassDefaults(const TSharedPt
 			}
 
 			ResponseWarnings.Append(SetWarnings);
-			AppliedChanges.Add({Property, ValuePtr, PreviousValue});
 			FPropertyChangedEvent ChangedEvent(Property, EPropertyChangeType::ValueSet);
 			CDO->PostEditChangeProperty(ChangedEvent);
 
@@ -1708,15 +2421,17 @@ FCortexCommandResult FCortexBPClassDefaultsOps::SetClassDefaults(const TSharedPt
 
 			TSharedPtr<FJsonObject> PropertyResult = MakeShared<FJsonObject>();
 			PropertyResult->SetStringField(TEXT("type"), Property->GetCPPType());
-			PropertyResult->SetField(
-				TEXT("previous_value"),
-				PreviousValue.IsValid() ? PreviousValue : MakeShared<FJsonValueNull>());
-			PropertyResult->SetField(
-				TEXT("new_value"),
-				NewValue.IsValid() ? NewValue : MakeShared<FJsonValueNull>());
 			PropertyResult->SetBoolField(TEXT("success"), true);
+			BuildClassDefaultEchoDiff(
+				EchoMode, Property, ValuePtr, Snapshot.Get(), PreviousValue, NewValue, PropertyResult);
 
 			ResultsObject->SetObjectField(PropertyName, PropertyResult);
+
+			// The snapshot is moved into the journal after the echo is built. It is released with the
+			// journal, before the explicit compile/reinstance below, and is the authoritative rollback
+			// source for a precision-sensitive root.
+			AppliedChanges.Add(FAppliedPropertyChange{
+				Property, ValuePtr, PreviousValue, MoveTemp(Snapshot)});
 		}
 
 		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);

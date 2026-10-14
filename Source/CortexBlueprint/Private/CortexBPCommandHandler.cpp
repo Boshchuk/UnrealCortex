@@ -319,12 +319,13 @@ TArray<FCortexCommandInfo> FCortexBPCommandHandler::GetSupportedCommands() const
 		.Optional(TEXT("discovery_offset"), TEXT("number"), TEXT("Metadata discovery page offset; default 0"))
 		.Optional(TEXT("discovery_limit"), TEXT("number"), TEXT("Metadata discovery page size; default 100, max 200")));
 	Commands.Add(FCortexCommandInfo{TEXT("set_class_defaults"), TEXT("Set default property values on a Blueprint CDO")}
-		.OptionalBatchItems(TEXT("Batch items with target, properties, compile, save, expected_fingerprint"))
+		.OptionalBatchItems(TEXT("Batch items with target, properties, compile, save, echo, expected_fingerprint"))
 		.OptionalExpectedFingerprint()
 		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
 		.Required(TEXT("properties"), TEXT("object"), TEXT("Class default values to set"))
 		.Optional(TEXT("compile"), TEXT("boolean"), TEXT("Compile after applying defaults"))
 		.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save after applying defaults"))
+		.Optional(TEXT("echo"), TEXT("string"), TEXT("Value echo mode: diff (default, changed leaves only) | full (complete previous/new) | none (outcome only)"))
 		.Optional(TEXT("blueprint_path"), TEXT("string"), TEXT("Optional alternate Blueprint path")));
 	Commands.Add(FCortexCommandInfo{TEXT("configure_timeline"), TEXT("Configure a Timeline node's tracks and keyframes")}
 		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))

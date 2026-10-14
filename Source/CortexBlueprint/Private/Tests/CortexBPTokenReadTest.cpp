@@ -1311,3 +1311,70 @@ bool FCortexBPTokenReadIncompleteDeltaTest::RunTest(const FString&)
 
 	return true;
 }
+
+// Task 14 — echo=none must keep the authoritative write outcome while omitting every value echo.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexBPTokenReadNoEchoKeepsOutcomeTest,
+	"Cortex.Blueprint.TokenRead.Set.NoEchoKeepsAuthoritativeOutcome",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexBPTokenReadNoEchoKeepsOutcomeTest::RunTest(const FString&)
+{
+	FTokenReadScopedFixture Fixture;
+	FCortexBPCommandHandler Handler;
+	Fixture.Create(ACortexBPTestLiftActor::StaticClass(), TokenReadUniquePath(TEXT("NoEcho")));
+	if (!TestNotNull(TEXT("no-echo fixture should be created"), Fixture.Blueprint))
+	{
+		return true;
+	}
+
+	const FString PropertyName = TEXT("bReplicates");
+	auto WriteValues = MakeShared<FJsonObject>();
+	WriteValues->SetBoolField(PropertyName, true);
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("asset_path"), Fixture.AssetPath);
+	Params->SetObjectField(TEXT("properties"), WriteValues);
+	Params->SetBoolField(TEXT("compile"), false);
+	Params->SetBoolField(TEXT("save"), false);
+	Params->SetStringField(TEXT("echo"), TEXT("none"));
+	const auto Set = Handler.Execute(TEXT("set_class_defaults"), Params);
+	if (!TestTrue(TEXT("no-echo set should succeed"), Set.bSuccess) || !Set.Data.IsValid())
+	{
+		return true;
+	}
+	if (!TestTrue(TEXT("no-echo set should expose results"),
+		Set.Data->HasField(TEXT("results"))))
+	{
+		return true;
+	}
+	const auto Property = Set.Data->GetObjectField(TEXT("results"))->GetObjectField(PropertyName);
+	if (!TestNotNull(TEXT("no-echo set should expose the property record"), Property.Get()))
+	{
+		return true;
+	}
+	TestTrue(TEXT("outcome survives no echo"), Property->GetBoolField(TEXT("success")));
+	TestFalse(TEXT("no full value echo"), Property->HasField(TEXT("previous_value")));
+	TestFalse(TEXT("no value echo omits the new value"), Property->HasField(TEXT("new_value")));
+	TestFalse(TEXT("no value echo omits the changed leaf paths"), Property->HasField(TEXT("changes")));
+
+	auto ReadParams = MakeShared<FJsonObject>();
+	ReadParams->SetStringField(TEXT("asset_path"), Fixture.AssetPath);
+	ReadParams->SetArrayField(TEXT("properties"), {MakeShared<FJsonValueString>(PropertyName)});
+	const auto Read = Handler.Execute(TEXT("get_class_defaults"), ReadParams);
+	if (TestTrue(TEXT("no-echo readback should succeed"), Read.bSuccess)
+		&& Read.Data.IsValid()
+		&& TestTrue(TEXT("no-echo readback should expose properties"),
+			Read.Data->HasField(TEXT("properties")))
+		&& TestTrue(TEXT("no-echo readback should expose the property"),
+			Read.Data->GetObjectField(TEXT("properties"))->HasField(PropertyName)))
+	{
+		TestTrue(TEXT("no echo still applied the requested value"),
+			Read.Data->GetObjectField(TEXT("properties"))->GetObjectField(PropertyName)->GetBoolField(TEXT("value")));
+	}
+	else
+	{
+		TestTrue(TEXT("no echo still applied the requested value"), false);
+	}
+
+	return true;
+}
