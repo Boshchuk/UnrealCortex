@@ -1,4 +1,5 @@
 #include "Misc/AutomationTest.h"
+#include "CortexEngineCompat.h"
 
 #include "CortexBPCommandHandler.h"
 #include "CortexBPTokenReadDeltaFixture.h"
@@ -205,10 +206,10 @@ namespace
 				return Sweep;
 			}
 
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*PageProperties)->Values)
+			for (const auto& Pair : (*PageProperties)->Values)
 			{
-				Sweep.OrderedNames.Add(Pair.Key);
-				Sweep.UniqueNames.Add(Pair.Key);
+				Sweep.OrderedNames.Add(CortexEngineCompat::JsonKeyToString(Pair.Key));
+				Sweep.UniqueNames.Add(CortexEngineCompat::JsonKeyToString(Pair.Key));
 			}
 			Sweep.SumReturned += ReturnedFields;
 			++Sweep.PageCount;
@@ -296,14 +297,14 @@ bool FCortexBPTokenReadMetadataOnlyTest::RunTest(const FString&)
 	// and the fixture-owned component reference.
 	int32 ValueFields = 0;
 	int32 MemberFields = 0;
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*Properties)->Values)
+	for (const auto& Pair : (*Properties)->Values)
 	{
 		const TSharedPtr<FJsonObject> Entry = Pair.Value.IsValid() ? Pair.Value->AsObject() : nullptr;
 		if (!TestNotNull(TEXT("metadata entry should be an object"), Entry.Get()))
 		{
 			continue;
 		}
-		TestTrue(*FString::Printf(TEXT("metadata entry %s should keep its type"), *Pair.Key),
+		TestTrue(*FString::Printf(TEXT("metadata entry %s should keep its type"), *CortexEngineCompat::JsonKeyToString(Pair.Key)),
 			Entry->HasField(TEXT("type")));
 		if (Entry->HasField(TEXT("value")))
 		{
