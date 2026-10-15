@@ -5,8 +5,45 @@
 #include "CortexHttpServer.h"
 #include "CortexSettings.h"
 #include "HAL/IConsoleManager.h"
+#include "Misc/EngineVersionComparison.h"
+#include "UObject/Class.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UObjectIterator.h"
 
 DEFINE_LOG_CATEGORY(LogCortex);
+
+#if WITH_EDITORONLY_DATA && ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 6
+namespace CortexCoreGarbageCollection
+{
+// UE 5.4 reports UClass::ClassGeneratedBy to the garbage collector twice per pass: as a declared
+// intrinsic member (UCLASS_EDITOR_GC_MEMBERS in Class.cpp) and from UClass::AddReferencedObjects.
+// When the generating Blueprint is garbage while its class is still reachable, both visits
+// eliminate (null) the same slot, possibly on two GC threads at once; the visit that validated the
+// slot as non-null then queues a null reference and crashes in TReferenceBatcher::DrainValidated
+// (EXCEPTION_ACCESS_VIOLATION reading 0xc). Clearing such links on the game thread before
+// reachability starts gives the result garbage elimination produces in this same pass, minus the race.
+static FDelegateHandle PreGarbageCollectHandle;
+
+static void ClearGarbageClassGenerators()
+{
+    if (!UObject::IsGarbageEliminationEnabled())
+    {
+        return;
+    }
+    PRAGMA_DISABLE_DEPRECATION_WARNINGS
+    for (TObjectIterator<UClass> It; It; ++It)
+    {
+        UClass* Class = *It;
+        const UObject* Generator = Class->ClassGeneratedBy;
+        if (Generator != nullptr && Generator->HasAnyInternalFlags(EInternalObjectFlags::Garbage))
+        {
+            Class->ClassGeneratedBy = nullptr;
+        }
+    }
+    PRAGMA_ENABLE_DEPRECATION_WARNINGS
+}
+}
+#endif
 
 // POC: in-editor HTTP/SSE MCP transport. Port > 0 enables it alongside the TCP server.
 // Defaults ON (8127) on this isolated POC branch; production would default to 0 (off).
@@ -19,6 +56,11 @@ static TAutoConsoleVariable<int32> CVarCortexHttpPort(
 void FCortexCoreModule::StartupModule()
 {
     UE_LOG(LogCortex, Log, TEXT("CortexCore module starting up"));
+
+#if WITH_EDITORONLY_DATA && ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 6
+    CortexCoreGarbageCollection::PreGarbageCollectHandle = FCoreUObjectDelegates::GetPreGarbageCollectDelegate().AddStatic(
+        &CortexCoreGarbageCollection::ClearGarbageClassGenerators);
+#endif
 
     const UCortexSettings* Settings = UCortexSettings::Get();
     if (Settings == nullptr || !Settings->bAutoStart)
@@ -62,6 +104,11 @@ void FCortexCoreModule::StartupModule()
 void FCortexCoreModule::ShutdownModule()
 {
     UE_LOG(LogCortex, Log, TEXT("CortexCore module shutting down"));
+
+#if WITH_EDITORONLY_DATA && ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 6
+    FCoreUObjectDelegates::GetPreGarbageCollectDelegate().Remove(CortexCoreGarbageCollection::PreGarbageCollectHandle);
+    CortexCoreGarbageCollection::PreGarbageCollectHandle.Reset();
+#endif
 
     if (HttpServer.IsValid())
     {
