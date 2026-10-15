@@ -23,6 +23,9 @@ struct CORTEXCORE_API FCortexCommandInfo
 	FString Name;
 	FString Description;
 	TArray<FCortexParamInfo> Params;
+	bool bRollbackSafe = false;
+	/** Opt in to declared-contract enforcement; see FCortexCommandContract::ValidateDeclaredParams. */
+	bool bStrictParams = false;
 
 	FCortexCommandInfo& Param(
 		const FString& ParamName,
@@ -59,6 +62,26 @@ struct CORTEXCORE_API FCortexCommandInfo
 		const FString& ParamDescription = TEXT("Optional stale-write guard for single-target mode"))
 	{
 		return Optional(TEXT("expected_fingerprint"), TEXT("object"), ParamDescription);
+	}
+
+	/** Opt in commands that are safe inside graph rollback-enabled batches. */
+	FCortexCommandInfo& RollbackSafe()
+	{
+		bRollbackSafe = true;
+		return *this;
+	}
+
+	/**
+	 * Opt in to declared-contract enforcement: the command accepts only the parameters it declares,
+	 * and every declared-required parameter must be present. Declared types are not enforced.
+	 *
+	 * Enable only once this declaration matches the parameters the handler actually reads - an
+	 * incomplete declaration would refuse a parameter the handler supports.
+	 */
+	FCortexCommandInfo& StrictParams()
+	{
+		bStrictParams = true;
+		return *this;
 	}
 };
 

@@ -2,6 +2,82 @@
 #include "CortexReflectCommandHandler.h"
 #include "Operations/CortexReflectOps.h"
 #include "CortexTypes.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "DirectoryWatcherModule.h"
+#include "IDirectoryWatcher.h"
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "GameFramework/Actor.h"
+#include "HAL/FileManager.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Misc/PackageName.h"
+#include "Misc/Paths.h"
+#include "Modules/ModuleManager.h"
+#include "UObject/GarbageCollection.h"
+#include "UObject/SavePackage.h"
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexReflectProjectPluginBlueprintClassificationTest,
+	"Cortex.Reflect.ProjectPluginBlueprintClassification",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexReflectProjectPluginBlueprintClassificationTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	const FString MountRoot = TEXT("/CortexReflectClassificationTest/");
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("CortexReflectClassificationTest");
+	IFileManager::Get().MakeDirectory(*Directory, true);
+	if (!TestTrue(TEXT("Project plugin fixture directory must exist"),
+		IFileManager::Get().DirectoryExists(*Directory)))
+	{
+		return false;
+	}
+
+	FPackageName::RegisterMountPoint(MountRoot, Directory);
+	const FString PackageName = MountRoot + TEXT("BP_ProjectPluginClass");
+	UPackage* Package = CreatePackage(*PackageName);
+	UBlueprint* Blueprint = Package
+		? FKismetEditorUtilities::CreateBlueprint(
+			AActor::StaticClass(),
+			Package,
+			FName(TEXT("BP_ProjectPluginClass")),
+			BPTYPE_Normal,
+			UBlueprint::StaticClass(),
+			UBlueprintGeneratedClass::StaticClass())
+		: nullptr;
+	TestNotNull(TEXT("Project plugin Blueprint fixture must exist"), Blueprint);
+
+	if (Blueprint)
+	{
+		FKismetEditorUtilities::CompileBlueprint(Blueprint);
+		UClass* GeneratedClass = Blueprint->GeneratedClass.Get();
+		TestNotNull(TEXT("Project plugin Blueprint must compile to a generated class"),
+			GeneratedClass);
+		if (GeneratedClass)
+		{
+			TestTrue(TEXT("Blueprint under a project-owned non-/Game mount is a project class"),
+				FCortexReflectOps::IsProjectClass(GeneratedClass));
+		}
+	}
+
+	TestFalse(TEXT("Engine classes remain non-project classes"),
+		FCortexReflectOps::IsProjectClass(AActor::StaticClass()));
+	if (Blueprint)
+	{
+		Blueprint->MarkAsGarbage();
+	}
+	if (Package)
+	{
+		Package->MarkAsGarbage();
+	}
+	CollectGarbage(RF_NoFlags);
+	FPackageName::UnRegisterMountPoint(MountRoot, Directory);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+
+	return true;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexReflectMetadataProjectPluginModuleClassificationTest,
@@ -57,12 +133,31 @@ bool FCortexReflectSearchBasicTest::RunTest(const FString& Parameters)
 
 	if (Result.Data.IsValid())
 	{
-		const TArray<TSharedPtr<FJsonValue>>* ResultsArray;
+		const TArray<TSharedPtr<FJsonValue>>* ResultsArray = nullptr;
 		TestTrue(TEXT("Should have results array"),
 			Result.Data->TryGetArrayField(TEXT("results"), ResultsArray));
 
-		TestTrue(TEXT("Should have total_results field"),
+		// Truthful metadata: the emitted page size and the matched count are separate fields, and
+		// no field is allowed to label the returned page length as a total.
+		TestTrue(TEXT("Should have returned field"),
+			Result.Data->HasField(TEXT("returned")));
+		TestTrue(TEXT("Should have total_matches field"),
+			Result.Data->HasField(TEXT("total_matches")));
+		TestTrue(TEXT("Should have truncated field"),
+			Result.Data->HasField(TEXT("truncated")));
+		TestFalse(TEXT("No returned length may be labelled as total matches"),
 			Result.Data->HasField(TEXT("total_results")));
+
+		if (ResultsArray)
+		{
+			int32 Returned = -1;
+			if (TestTrue(TEXT("returned must be a number"),
+				Result.Data->TryGetNumberField(TEXT("returned"), Returned)))
+			{
+				TestEqual(TEXT("returned must equal the emitted result count"),
+					Returned, ResultsArray->Num());
+			}
+		}
 
 		if (ResultsArray && ResultsArray->Num() > 0)
 		{
@@ -125,15 +220,81 @@ bool FCortexReflectSearchLimitTest::RunTest(const FString& Parameters)
 
 	TestTrue(TEXT("search with limit should succeed"), Result.bSuccess);
 
-	if (Result.Data.IsValid())
+	if (!Result.Data.IsValid())
 	{
-		int32 TotalResults;
-		if (Result.Data->TryGetNumberField(TEXT("total_results"), TotalResults))
-		{
-			TestTrue(TEXT("total_results should not exceed limit"),
-				TotalResults <= 2);
-		}
+		AddError(TEXT("Result data is invalid"));
+		return true;
 	}
+
+	const TArray<TSharedPtr<FJsonValue>>* ResultsArray = nullptr;
+	TestTrue(TEXT("search with limit must return a results array"),
+		Result.Data->TryGetArrayField(TEXT("results"), ResultsArray));
+
+	int32 Returned = -1;
+	TestTrue(TEXT("returned must be present"),
+		Result.Data->TryGetNumberField(TEXT("returned"), Returned));
+	int32 TotalMatches = -1;
+	TestTrue(TEXT("total_matches must be present"),
+		Result.Data->TryGetNumberField(TEXT("total_matches"), TotalMatches));
+	bool bTruncated = false;
+	TestTrue(TEXT("truncated must be present"),
+		Result.Data->TryGetBoolField(TEXT("truncated"), bTruncated));
+
+	TestEqual(TEXT("returned must equal the emitted result count"),
+		Returned, ResultsArray ? ResultsArray->Num() : -1);
+	TestEqual(TEXT("a limit-capped page returns exactly the limit"), Returned, 2);
+	// The matched count is scanned before the limit is applied, so it is distinct from the
+	// emitted page length instead of repeating it.
+	TestTrue(TEXT("total_matches must exceed the emitted page"),
+		TotalMatches > Returned);
+	TestTrue(TEXT("a capped search must declare truncation"), bTruncated);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexReflectSearchUnderLimitCompleteTest,
+	"Cortex.Reflect.Search.UnderLimitComplete",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexReflectSearchUnderLimitCompleteTest::RunTest(const FString& Parameters)
+{
+	FCortexReflectCommandHandler Handler;
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	// A pattern no class can contain, so the matched count is known to be exactly zero.
+	Params->SetStringField(TEXT("pattern"), TEXT("CortexReflectSearchHonestyNoMatch"));
+	Params->SetBoolField(TEXT("include_engine"), true);
+
+	FCortexCommandResult Result = Handler.Execute(TEXT("search"), Params);
+	TestTrue(TEXT("search should succeed"), Result.bSuccess);
+
+	if (!Result.Data.IsValid())
+	{
+		AddError(TEXT("Result data is invalid"));
+		return true;
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* ResultsArray = nullptr;
+	TestTrue(TEXT("search must return a results array"),
+		Result.Data->TryGetArrayField(TEXT("results"), ResultsArray));
+
+	int32 Returned = -1;
+	int32 TotalMatches = -1;
+	TestTrue(TEXT("returned must be present"),
+		Result.Data->TryGetNumberField(TEXT("returned"), Returned));
+	TestTrue(TEXT("total_matches must be present"),
+		Result.Data->TryGetNumberField(TEXT("total_matches"), TotalMatches));
+	bool bTruncated = true;
+	TestTrue(TEXT("truncated must be present"),
+		Result.Data->TryGetBoolField(TEXT("truncated"), bTruncated));
+
+	TestEqual(TEXT("an unmatched search returns no rows"), Returned, 0);
+	TestEqual(TEXT("an unmatched search matches nothing"), TotalMatches, 0);
+	TestEqual(TEXT("returned must equal the emitted result count"),
+		Returned, ResultsArray ? ResultsArray->Num() : -1);
+	// Honest in both directions: a fully returned page must not be labelled truncated.
+	TestFalse(TEXT("a fully returned page must not declare truncation"), bTruncated);
 
 	return true;
 }
@@ -159,56 +320,499 @@ bool FCortexReflectSearchNoEngineTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+namespace CortexReflectProjectPluginBlueprintTest
+{
+	/**
+	 * Unique non-/Game mount whose backing directory is physically under the project directory
+	 * (<Project>/Saved/CortexReflectProjectPluginTest). The Reflect classifier resolves the
+	 * package to a filename and compares it against the project directory, so the fixture needs
+	 * a real mount, a real saved package, and a real Asset Registry entry.
+	 */
+	const TCHAR* const FixtureMountRoot = TEXT("/CortexReflectProjectPluginTest/");
+	const TCHAR* const FixtureFolderName = TEXT("CortexReflectProjectPluginTest");
+	const TCHAR* const FixtureAssetName = TEXT("BP_CortexReflectProjectPluginTest");
+
+	bool ResultContainsAssetPath(
+		const FCortexCommandResult& Result,
+		const FString& ExpectedAssetPath)
+	{
+		if (!Result.Data.IsValid())
+		{
+			return false;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* Results = nullptr;
+		if (!Result.Data->TryGetArrayField(TEXT("results"), Results) || !Results)
+		{
+			return false;
+		}
+
+		for (const TSharedPtr<FJsonValue>& Value : *Results)
+		{
+			const TSharedPtr<FJsonObject> Entry = Value->AsObject();
+			if (!Entry.IsValid())
+			{
+				continue;
+			}
+
+			FString AssetPath;
+			if (Entry->TryGetStringField(TEXT("asset_path"), AssetPath)
+				&& AssetPath == ExpectedAssetPath)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** Search ``results`` array, or nullptr when the response is malformed (a control-query failure). */
+	const TArray<TSharedPtr<FJsonValue>>* GetSearchResults(const FCortexCommandResult& Result)
+	{
+		if (!Result.Data.IsValid())
+		{
+			return nullptr;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* Results = nullptr;
+		if (!Result.Data->TryGetArrayField(TEXT("results"), Results))
+		{
+			return nullptr;
+		}
+		return Results;
+	}
+
+	bool ClassesArrayContainsName(
+		const FCortexCommandResult& Result,
+		const FString& ExpectedName)
+	{
+		if (!Result.Data.IsValid())
+		{
+			return false;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* Classes = nullptr;
+		if (!Result.Data->TryGetArrayField(TEXT("classes"), Classes) || !Classes)
+		{
+			return false;
+		}
+
+		for (const TSharedPtr<FJsonValue>& Value : *Classes)
+		{
+			FString ClassName;
+			if (Value->TryGetString(ClassName) && ClassName == ExpectedName)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Owns the whole fixture: mount point, package, saved file, and Asset Registry entry.
+	 * Cleanup runs from the destructor, so it happens after failed assertions as well as after
+	 * successful ones. Creation reports failure instead of leaving a partially built fixture.
+	 */
+	struct FScopedProjectPluginBlueprintFixture
+	{
+		FScopedProjectPluginBlueprintFixture()
+			: MountRoot(FixtureMountRoot)
+			, Directory(FPaths::ProjectSavedDir() / FixtureFolderName)
+		{
+		}
+
+		~FScopedProjectPluginBlueprintFixture()
+		{
+			Release();
+		}
+
+		/** Creates, compiles, registers, and saves the fixture Blueprint; false leaves OutError set. */
+		bool Create(FString& OutError)
+		{
+			if (!IFileManager::Get().MakeDirectory(*Directory, true)
+				|| !IFileManager::Get().DirectoryExists(*Directory))
+			{
+				OutError = FString::Printf(TEXT("failed to create fixture directory %s"), *Directory);
+				return false;
+			}
+
+			FPackageName::RegisterMountPoint(MountRoot, Directory);
+			bMountRegistered = true;
+
+			PackagePath = MountRoot + FixtureAssetName;
+			Package = CreatePackage(*PackagePath);
+			if (!Package)
+			{
+				OutError = FString::Printf(TEXT("failed to create fixture package %s"), *PackagePath);
+				return false;
+			}
+
+			Blueprint = FKismetEditorUtilities::CreateBlueprint(
+				AActor::StaticClass(),
+				Package,
+				FName(FixtureAssetName),
+				BPTYPE_Normal,
+				UBlueprint::StaticClass(),
+				UBlueprintGeneratedClass::StaticClass(),
+				NAME_None);
+			if (!Blueprint)
+			{
+				OutError = TEXT("failed to create fixture Blueprint");
+				return false;
+			}
+
+			FKismetEditorUtilities::CompileBlueprint(Blueprint);
+			if (!Blueprint->GeneratedClass)
+			{
+				OutError = TEXT("fixture Blueprint did not produce a generated class");
+				return false;
+			}
+
+			FAssetRegistryModule::AssetCreated(Blueprint);
+			bAssetRegistryRegistered = true;
+
+			PackageFilename = FPackageName::LongPackageNameToFilename(
+				PackagePath, FPackageName::GetAssetPackageExtension());
+
+			FSavePackageArgs SaveArgs;
+			SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+			SaveArgs.SaveFlags = SAVE_NoError;
+			if (!UPackage::SavePackage(Package, Blueprint, *PackageFilename, SaveArgs))
+			{
+				OutError = FString::Printf(
+					TEXT("failed to save fixture package to %s"), *PackageFilename);
+				return false;
+			}
+
+			AssetPath = Blueprint->GetPathName();
+			return true;
+		}
+
+		bool Resave(FString& OutError)
+		{
+			if (!Package || !Blueprint || PackageFilename.IsEmpty())
+			{
+				OutError = TEXT("fixture is incomplete");
+				return false;
+			}
+
+			Package->SetDirtyFlag(true);
+			FSavePackageArgs SaveArgs;
+			SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+			SaveArgs.SaveFlags = SAVE_NoError;
+			if (!UPackage::SavePackage(Package, Blueprint, *PackageFilename, SaveArgs))
+			{
+				OutError = FString::Printf(
+					TEXT("failed to resave fixture package to %s"), *PackageFilename);
+				return false;
+			}
+			Package->SetDirtyFlag(false);
+			return true;
+		}
+
+		/** Removes registry, package, disk, and mount state; safe to call more than once. */
+		void Release()
+		{
+			IAssetRegistry& AssetRegistry =
+				FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+			if (!PackageFilename.IsEmpty())
+			{
+				IFileManager::Get().Delete(*PackageFilename, false, true, true);
+				PackageFilename.Reset();
+			}
+
+			FDirectoryWatcherModule& DirectoryWatcherModule =
+				FModuleManager::LoadModuleChecked<FDirectoryWatcherModule>(TEXT("DirectoryWatcher"));
+			if (IDirectoryWatcher* DirectoryWatcher = DirectoryWatcherModule.Get())
+			{
+				DirectoryWatcher->Tick(-1.0f);
+			}
+			AssetRegistry.WaitForCompletion();
+			FlushAsyncLoading();
+			AssetRegistry.Tick(-1.0f);
+
+			if (Blueprint && bAssetRegistryRegistered)
+			{
+				FAssetRegistryModule::AssetDeleted(Blueprint);
+				bAssetRegistryRegistered = false;
+			}
+			if (Blueprint)
+			{
+				Blueprint->MarkAsGarbage();
+				Blueprint = nullptr;
+			}
+			if (Package)
+			{
+				Package->SetDirtyFlag(false);
+				FAssetRegistryModule::PackageDeleted(Package);
+				Package->MarkAsGarbage();
+				Package = nullptr;
+			}
+
+			// Purge the marked objects now: the mount and asset names are fixed, so a later test in
+			// the same editor process must not find this Blueprint still occupying the package.
+			CollectGarbage(RF_NoFlags);
+
+			if (bMountRegistered)
+			{
+				FPackageName::UnRegisterMountPoint(MountRoot, Directory);
+				bMountRegistered = false;
+			}
+			IFileManager::Get().DeleteDirectory(*Directory, false, true);
+		}
+
+		UClass* GetGeneratedClass() const
+		{
+			return Blueprint ? Blueprint->GeneratedClass : nullptr;
+		}
+
+		/** Generated class name exactly as the Reflect responses render it (<CPP prefix><name>). */
+		FString GetGeneratedClassName() const
+		{
+			UClass* GeneratedClass = GetGeneratedClass();
+			return GeneratedClass
+				? FString(GeneratedClass->GetPrefixCPP()) + GeneratedClass->GetName()
+				: FString();
+		}
+
+		/** Full asset path of the fixture Blueprint, e.g. /Mount/BP_X.BP_X. */
+		FString GetAssetPath() const
+		{
+			return AssetPath;
+		}
+
+		FString MountRoot;
+		FString Directory;
+
+	private:
+		FString PackagePath;
+		FString PackageFilename;
+		FString AssetPath;
+		UBlueprint* Blueprint = nullptr;
+		UPackage* Package = nullptr;
+		bool bMountRegistered = false;
+		bool bAssetRegistryRegistered = false;
+	};
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FCortexReflectSearchProjectPluginVisibleTest,
-	"Cortex.Reflect.Search.ProjectPluginVisible",
+	FCortexReflectSearchProjectPluginBlueprintVisibleTest,
+	"Cortex.Reflect.Search.ProjectPluginBlueprintVisible",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
-bool FCortexReflectSearchProjectPluginVisibleTest::RunTest(const FString& Parameters)
+bool FCortexReflectSearchProjectPluginBlueprintVisibleTest::RunTest(const FString& Parameters)
 {
-	// REFLECT-004: Project plugin classes (e.g. UCortexSettings in CortexCore module)
-	// should be visible with include_engine=false. Before the fix, IsProjectClass
-	// rejected all Plugins/ paths including project-level plugins.
+	using namespace CortexReflectProjectPluginBlueprintTest;
+
 	FCortexReflectCommandHandler Handler;
+	FScopedProjectPluginBlueprintFixture Fixture;
 
-	// First verify the class exists at all (with include_engine=true)
+	FString FixtureError;
+	if (!Fixture.Create(FixtureError))
 	{
-		TSharedPtr<FJsonObject> VerifyParams = MakeShared<FJsonObject>();
-		VerifyParams->SetStringField(TEXT("pattern"), TEXT("CortexSettings"));
-		VerifyParams->SetBoolField(TEXT("include_engine"), true);
+		AddError(FString::Printf(
+			TEXT("Project-plugin Blueprint fixture creation failed: %s"), *FixtureError));
+		return false;
+	}
 
-		FCortexCommandResult VerifyResult = Handler.Execute(TEXT("search"), VerifyParams);
-		TestTrue(TEXT("verify search should succeed"), VerifyResult.bSuccess);
+	TestNotNull(TEXT("Fixture Blueprint must have a generated class"), Fixture.GetGeneratedClass());
+	const FString FixtureAssetPath = Fixture.GetAssetPath();
+	TestFalse(TEXT("Fixture asset path must be resolved"), FixtureAssetPath.IsEmpty());
 
-		if (VerifyResult.Data.IsValid())
+	// Control: with include_engine=true the fixture must be visible, otherwise the
+	// project-only assertion below could pass for the wrong reason.
+	{
+		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("pattern"), FixtureAssetName);
+		Params->SetBoolField(TEXT("include_engine"), true);
+
+		const FCortexCommandResult Result = Handler.Execute(TEXT("search"), Params);
+		TestTrue(TEXT("Control search with include_engine=true must succeed"), Result.bSuccess);
+		TestTrue(TEXT("Control search must return the project-plugin Blueprint asset"),
+			ResultContainsAssetPath(Result, FixtureAssetPath));
+	}
+
+	// Project-only search must keep the project-plugin Blueprint.
+	{
+		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("pattern"), FixtureAssetName);
+		// include_engine defaults to false
+
+		const FCortexCommandResult Result = Handler.Execute(TEXT("search"), Params);
+		TestTrue(TEXT("Project-only search must succeed"), Result.bSuccess);
+		TestTrue(TEXT("include_engine=false must still return the project-plugin Blueprint asset"),
+			ResultContainsAssetPath(Result, FixtureAssetPath));
+	}
+
+	// Engine control: an engine class must still be filtered out in project-only mode.
+	{
+		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("pattern"), TEXT("Actor"));
+		Params->SetBoolField(TEXT("include_engine"), false);
+
+		const FCortexCommandResult Result = Handler.Execute(TEXT("search"), Params);
+		TestTrue(TEXT("Engine control search must succeed"), Result.bSuccess);
+
+		const TArray<TSharedPtr<FJsonValue>>* Results = GetSearchResults(Result);
+		if (TestTrue(TEXT("Engine control search must return a results array"), Results != nullptr))
 		{
-			int32 VerifyCount = 0;
-			VerifyResult.Data->TryGetNumberField(TEXT("total_results"), VerifyCount);
-			if (VerifyCount == 0)
+			bool bFoundNativeAActor = false;
+			for (const TSharedPtr<FJsonValue>& Value : *Results)
 			{
-				AddInfo(TEXT("UCortexSettings not found even with include_engine=true — skipping"));
-				return true;
+				const TSharedPtr<FJsonObject> Entry = Value->AsObject();
+				if (!Entry.IsValid())
+				{
+					continue;
+				}
+
+				FString Name;
+				if (Entry->TryGetStringField(TEXT("name"), Name) && Name == TEXT("AActor"))
+				{
+					bFoundNativeAActor = true;
+					break;
+				}
+			}
+
+			TestFalse(TEXT("include_engine=false must not return the engine class AActor"),
+				bFoundNativeAActor);
+		}
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexReflectClassHierarchyProjectPluginBlueprintVisibleTest,
+	"Cortex.Reflect.ClassHierarchy.ProjectPluginBlueprintVisible",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexReflectClassHierarchyProjectPluginBlueprintVisibleTest::RunTest(const FString& Parameters)
+{
+	using namespace CortexReflectProjectPluginBlueprintTest;
+
+	FCortexReflectCommandHandler Handler;
+	FScopedProjectPluginBlueprintFixture Fixture;
+
+	FString FixtureError;
+	if (!Fixture.Create(FixtureError))
+	{
+		AddError(FString::Printf(
+			TEXT("Project-plugin Blueprint fixture creation failed: %s"), *FixtureError));
+		return false;
+	}
+
+	TestNotNull(TEXT("Fixture Blueprint must have a generated class"), Fixture.GetGeneratedClass());
+	const FString ExpectedClassName = Fixture.GetGeneratedClassName();
+	TestFalse(TEXT("Fixture generated class name must be resolved"), ExpectedClassName.IsEmpty());
+
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("root"), TEXT("AActor"));
+	Params->SetNumberField(TEXT("depth"), 2);
+	Params->SetBoolField(TEXT("include_blueprint"), true);
+	Params->SetBoolField(TEXT("include_engine"), false);
+	// Flat classes are opt-in; navigation by default is through the nested tree.
+	Params->SetBoolField(TEXT("include_flat_classes"), true);
+
+	const FCortexCommandResult Result = Handler.Execute(TEXT("class_hierarchy"), Params);
+	TestTrue(TEXT("Project-only class_hierarchy must succeed"), Result.bSuccess);
+
+	int32 TotalClasses = 0;
+	if (Result.Data.IsValid())
+	{
+		Result.Data->TryGetNumberField(TEXT("total_classes"), TotalClasses);
+	}
+
+	// The fixture derives directly from AActor, so depth 2 keeps it in the tree.
+	TestTrue(FString::Printf(
+		TEXT("Project-only hierarchy must include the project-plugin Blueprint class %s (total_classes=%d)"),
+		*ExpectedClassName, TotalClasses),
+		ClassesArrayContainsName(Result, ExpectedClassName));
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexReflectProjectPluginBlueprintFixtureCleanupTest,
+	"Cortex.Reflect.Search.ProjectPluginBlueprintFixtureCleanup",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+)
+
+bool FCortexReflectProjectPluginBlueprintFixtureCleanupTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace CortexReflectProjectPluginBlueprintTest;
+
+	IAssetRegistry& AssetRegistry =
+		FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+	FString FixtureMountRootPath;
+	FString FixtureDirectory;
+	bool bFixtureRemovedFromRegistry = false;
+	bool bLateFixtureAssetAdded = false;
+	bool bFixtureResaved = false;
+	FDelegateHandle AssetAddedHandle;
+	FDelegateHandle AssetRemovedHandle;
+	{
+		FScopedProjectPluginBlueprintFixture Fixture;
+		FString FixtureError;
+		if (!Fixture.Create(FixtureError))
+		{
+			AddError(FString::Printf(
+				TEXT("Project-plugin Blueprint fixture creation failed: %s"), *FixtureError));
+			return false;
+		}
+
+		FixtureMountRootPath = Fixture.MountRoot;
+		FixtureDirectory = Fixture.Directory;
+		AssetAddedHandle = AssetRegistry.OnAssetAdded().AddLambda(
+			[&](const FAssetData& AssetData)
+			{
+				if (bFixtureRemovedFromRegistry
+					&& AssetData.PackageName.ToString().StartsWith(FixtureMountRootPath))
+				{
+					bLateFixtureAssetAdded = true;
+				}
+			});
+		AssetRemovedHandle = AssetRegistry.OnAssetRemoved().AddLambda(
+			[&](const FAssetData& AssetData)
+			{
+				if (AssetData.PackageName.ToString().StartsWith(FixtureMountRootPath))
+				{
+					bFixtureRemovedFromRegistry = true;
+				}
+			});
+		AssetRegistry.WaitForCompletion();
+		FString ResaveError;
+		bFixtureResaved = Fixture.Resave(ResaveError);
+		if (!bFixtureResaved)
+		{
+			AddError(FString::Printf(
+				TEXT("Project-plugin Blueprint fixture resave failed: %s"), *ResaveError));
+		}
+		else
+		{
+			FDirectoryWatcherModule& DirectoryWatcherModule =
+				FModuleManager::LoadModuleChecked<FDirectoryWatcherModule>(TEXT("DirectoryWatcher"));
+			if (IDirectoryWatcher* DirectoryWatcher = DirectoryWatcherModule.Get())
+			{
+				DirectoryWatcher->Tick(-1.0f);
 			}
 		}
 	}
 
-	// Now test with include_engine=false — project plugin class should still appear
-	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
-	Params->SetStringField(TEXT("pattern"), TEXT("CortexSettings"));
-	// include_engine defaults to false
+	AssetRegistry.WaitForCompletion();
+	FlushAsyncLoading();
+	AssetRegistry.Tick(-1.0f);
+	AssetRegistry.OnAssetAdded().Remove(AssetAddedHandle);
+	AssetRegistry.OnAssetRemoved().Remove(AssetRemovedHandle);
+	TestTrue(TEXT("Fixture package must resave"), bFixtureResaved);
 
-	FCortexCommandResult Result = Handler.Execute(TEXT("search"), Params);
-
-	TestTrue(TEXT("search for project plugin class should succeed"), Result.bSuccess);
-
-	if (Result.Data.IsValid())
-	{
-		int32 TotalResults = 0;
-		Result.Data->TryGetNumberField(TEXT("total_results"), TotalResults);
-		TestTrue(TEXT("Should find UCortexSettings from project plugin with include_engine=false"),
-			TotalResults > 0);
-	}
+	TArray<FAssetData> RemainingAssets;
+	AssetRegistry.GetAssetsByPath(FName(*FixtureMountRootPath), RemainingAssets, true);
+	TestTrue(TEXT("Fixture must be removed from the Asset Registry"), bFixtureRemovedFromRegistry);
+	TestFalse(TEXT("Asset Registry must not add the fixture after removal"), bLateFixtureAssetAdded);
+	TestTrue(TEXT("Asset Registry must not retain the released fixture"), RemainingAssets.IsEmpty());
+	TestFalse(TEXT("Fixture directory must be removed"), IFileManager::Get().DirectoryExists(*FixtureDirectory));
 
 	return true;
 }

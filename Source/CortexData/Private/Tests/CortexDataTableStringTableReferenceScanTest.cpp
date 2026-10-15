@@ -1,8 +1,9 @@
 #include "CoreMinimal.h"
 #include "CortexVersionCompat.h"
 #include "CortexCommandRouter.h"
-#include "Operations/CortexDataTableOps.h"
 #include "CortexDataLocalizationTestTypes.h"
+#include "CortexEngineCompat.h"
+#include "Operations/CortexDataTableOps.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Engine/DataTable.h"
@@ -46,8 +47,10 @@ bool FCortexDataTableStringTableReferenceScanNestedArrayTest::RunTest(const FStr
 		GetTransientPackage(),
 		FName(TEXT("ST_CortexDataReferenceScanTest")));
 	TestStringTable->GetMutableStringTable()->SetNamespace(TEXT("CortexDataReferenceScanTest"));
-	CortexSetSourceString(*TestStringTable->GetMutableStringTable(), TEXT("entry.fireball.title"), TEXT("Fireball"));
-	CortexSetSourceString(*TestStringTable->GetMutableStringTable(), TEXT("entry.fireball.step_0"), TEXT("Charge flame."));
+	CortexEngineCompat::SetStringTableSourceString(
+		*TestStringTable->GetMutableStringTable(), TEXT("entry.fireball.title"), TEXT("Fireball"));
+	CortexEngineCompat::SetStringTableSourceString(
+		*TestStringTable->GetMutableStringTable(), TEXT("entry.fireball.step_0"), TEXT("Charge flame."));
 
 	UDataTable* DataTable = NewObject<UDataTable>(
 		GetTransientPackage(),
@@ -260,8 +263,10 @@ bool FCortexDataTableImportRejectsMalformedNestedArrayBeforeReplaceTest::RunTest
 		GetTransientPackage(),
 		FName(TEXT("ST_CortexDataImportRejectTest")));
 	TestStringTable->GetMutableStringTable()->SetNamespace(TEXT("CortexDataImportRejectTest"));
-	CortexSetSourceString(*TestStringTable->GetMutableStringTable(), TEXT("entry.fireball.title"), TEXT("Fireball"));
-	CortexSetSourceString(*TestStringTable->GetMutableStringTable(), TEXT("entry.fireball.step_0"), TEXT("Charge flame."));
+	CortexEngineCompat::SetStringTableSourceString(
+		*TestStringTable->GetMutableStringTable(), TEXT("entry.fireball.title"), TEXT("Fireball"));
+	CortexEngineCompat::SetStringTableSourceString(
+		*TestStringTable->GetMutableStringTable(), TEXT("entry.fireball.step_0"), TEXT("Charge flame."));
 
 	UDataTable* DataTable = NewObject<UDataTable>(
 		GetTransientPackage(),

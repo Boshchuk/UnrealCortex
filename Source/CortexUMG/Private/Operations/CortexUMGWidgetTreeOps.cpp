@@ -1,6 +1,13 @@
 #include "Operations/CortexUMGWidgetTreeOps.h"
+#include "CortexVersionCompat.h"
+#include "Operations/CortexUMGAnimationTrackUtils.h"
+#include "Operations/CortexUMGPropertyBindingOps.h"
+#include "CortexBatchMutation.h"
+#include "CortexAssetFingerprint.h"
 #include "CortexUMGUtils.h"
 #include "WidgetBlueprint.h"
+#include "WidgetBlueprintEditorUtils.h"
+#include "Editor.h"
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/Widget.h"
@@ -35,10 +42,22 @@
 #include "Engine/Engine.h"
 #include "Engine/Blueprint.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "K2Node.h"
+#include "EdGraph/EdGraph.h"
+#include "UObject/UObjectIterator.h"
 #include "Misc/PackageName.h"
 #include "UObject/UObjectGlobals.h"
+#include "Animation/WidgetAnimation.h"
+#include "MovieScene.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
+#include "UObject/UnrealType.h"
+#if __has_include("UIComponentWidgetBlueprintExtension.h")
+#include "UIComponentWidgetBlueprintExtension.h"
+#include "Extensions/UIComponentContainer.h"
+#endif
 
 struct FCuratedWidgetEntry
 {
@@ -76,6 +95,54 @@ static const TArray<FCuratedWidgetEntry>& GetCuratedWidgetEntries()
         { TEXT("ComboBoxString"), TEXT("Input"), false, TEXT("Dropdown string selector"), &UComboBoxString::StaticClass },
     };
     return Entries;
+}
+
+static FCortexAssetFingerprint MakeWidgetBlueprintFingerprint(const UWidgetBlueprint* WidgetBlueprint)
+{
+	uint32 WidgetTreeSignature = 0;
+	if (WidgetBlueprint != nullptr && WidgetBlueprint->WidgetTree != nullptr)
+	{
+		TArray<UWidget*> Widgets;
+		WidgetBlueprint->WidgetTree->GetAllWidgets(Widgets);
+		Widgets.Sort([](const UWidget& Left, const UWidget& Right)
+		{
+			return Left.GetName() < Right.GetName();
+		});
+		for (const UWidget* Widget : Widgets)
+		{
+			if (Widget == nullptr)
+			{
+				continue;
+			}
+			WidgetTreeSignature = HashCombineFast(WidgetTreeSignature, GetTypeHash(Widget->GetName()));
+			WidgetTreeSignature = HashCombineFast(WidgetTreeSignature, GetTypeHash(Widget->GetClass()->GetPathName()));
+			WidgetTreeSignature = HashCombineFast(WidgetTreeSignature, GetTypeHash(Widget->bIsVariable));
+			for (TFieldIterator<FProperty> It(Widget->GetClass(), EFieldIterationFlags::IncludeSuper); It; ++It)
+			{
+				const FProperty* Property = *It;
+				if (Property == nullptr
+					|| !Property->HasAnyPropertyFlags(CPF_Edit)
+					|| Property->HasAnyPropertyFlags(CPF_Transient | CPF_DuplicateTransient | CPF_Deprecated))
+				{
+					continue;
+				}
+				FString PropertyValue;
+				Property->ExportTextItem_Direct(
+					PropertyValue,
+					Property->ContainerPtrToValuePtr<void>(Widget),
+					nullptr,
+					const_cast<UWidget*>(Widget),
+					PPF_None);
+				WidgetTreeSignature = HashCombineFast(WidgetTreeSignature, GetTypeHash(Property->GetFName()));
+				WidgetTreeSignature = HashCombineFast(WidgetTreeSignature, GetTypeHash(PropertyValue));
+			}
+		}
+	}
+
+	return MakePackageNameAssetFingerprint(
+		WidgetBlueprint && WidgetBlueprint->GetPackage() ? WidgetBlueprint->GetPackage()->GetName() : FString(),
+		WidgetBlueprint && WidgetBlueprint->GetPackage() && WidgetBlueprint->GetPackage()->IsDirty(),
+		WidgetTreeSignature);
 }
 
 UClass* FCortexUMGWidgetTreeOps::ResolveWidgetClass(const FString& ClassName)
@@ -134,41 +201,130 @@ UClass* FCortexUMGWidgetTreeOps::ResolveWidgetClass(const FString& ClassName)
     return nullptr;
 }
 
-TSharedPtr<FJsonObject> FCortexUMGWidgetTreeOps::BuildWidgetTreeJson(UWidget* Widget)
+/** Strict optional integer read: a present field must be a real JSON number, integral and in range. */
+static bool ReadBoundedTreeIntParam(const TSharedPtr<FJsonObject>& Params, const TCHAR* Field, int32 MinValue,
+                                    int32& OutValue, FCortexCommandResult& OutError)
+{
+    if (!Params->HasField(Field))
+    {
+        OutValue = -1;
+        return true;
+    }
+    double Number = 0.0;
+    if (!Params->HasTypedField<EJson::Number>(Field) || !Params->TryGetNumberField(Field, Number)
+        || !FMath::IsFinite(Number) || FMath::FloorToDouble(Number) != Number
+        || Number < static_cast<double>(MinValue) || Number > static_cast<double>(MAX_int32))
+    {
+        OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+            FString::Printf(TEXT("%s must be an integer >= %d"), Field, MinValue));
+        return false;
+    }
+    OutValue = static_cast<int32>(Number);
+    return true;
+}
+
+/** Strict optional boolean read: a present field must be an actual JSON boolean. */
+static bool ReadBoundedTreeBoolParam(const TSharedPtr<FJsonObject>& Params, const TCHAR* Field, bool& OutValue,
+                                     FCortexCommandResult& OutError)
+{
+    if (!Params->HasField(Field))
+    {
+        OutValue = false;
+        return true;
+    }
+    if (!Params->HasTypedField<EJson::Boolean>(Field) || !Params->TryGetBoolField(Field, OutValue))
+    {
+        OutError = FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+            FString::Printf(TEXT("%s must be boolean"), Field));
+        return false;
+    }
+    return true;
+}
+
+TSharedPtr<FJsonObject> FCortexUMGWidgetTreeOps::BuildWidgetTreeJson(
+    UWidget* Widget, const int32 Depth, FTreeReadBudget& Budget)
 {
     if (!Widget)
     {
         return nullptr;
     }
 
+    ++Budget.ReturnedWidgets;
+
     TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
     Obj->SetStringField(TEXT("name"), Widget->GetName());
-    Obj->SetStringField(TEXT("class"), Widget->GetClass()->GetName());
-
-    // WBP breadcrumb for nested user widgets.
-    if (Widget->GetClass()->IsChildOf(UUserWidget::StaticClass()) &&
-        Widget->GetClass() != UUserWidget::StaticClass())
+    if (!Budget.bNamesOnly)
     {
-        Obj->SetBoolField(TEXT("is_user_widget"), true);
-        if (UBlueprint* BP = Cast<UBlueprint>(Widget->GetClass()->ClassGeneratedBy))
-        {
-            Obj->SetStringField(TEXT("widget_blueprint"), BP->GetPathName());
-        }
-    }
+        Obj->SetStringField(TEXT("class"), Widget->GetClass()->GetName());
 
-    TArray<TSharedPtr<FJsonValue>> ChildArray;
-    if (UPanelWidget* Panel = Cast<UPanelWidget>(Widget))
-    {
-        for (int32 i = 0; i < Panel->GetChildrenCount(); ++i)
+        // WBP breadcrumb for nested user widgets.
+        if (Widget->GetClass()->IsChildOf(UUserWidget::StaticClass()) &&
+            Widget->GetClass() != UUserWidget::StaticClass())
         {
-            TSharedPtr<FJsonObject> ChildJson = BuildWidgetTreeJson(Panel->GetChildAt(i));
-            if (ChildJson.IsValid())
+            Obj->SetBoolField(TEXT("is_user_widget"), true);
+            if (UBlueprint* BP = Cast<UBlueprint>(Widget->GetClass()->ClassGeneratedBy))
             {
-                ChildArray.Add(MakeShared<FJsonValueObject>(ChildJson));
+                Obj->SetStringField(TEXT("widget_blueprint"), BP->GetPathName());
             }
         }
     }
-    Obj->SetArrayField(TEXT("children"), ChildArray);
+
+    UPanelWidget* Panel = Cast<UPanelWidget>(Widget);
+    const int32 ChildCount = Panel ? Panel->GetChildrenCount() : 0;
+    if (ChildCount == 0)
+    {
+        // An actual leaf has no children array and no child count.
+        return Obj;
+    }
+    Obj->SetNumberField(TEXT("child_count"), ChildCount);
+
+    // The one traversal budget is inspected before any child JSON is allocated: the depth bound and
+    // the remaining node budget both stop the walk here, and a stopped branch declares its real
+    // child total plus an explicit incomplete marker instead of pretending to be a leaf.
+    const bool bDepthBound = Budget.MaxDepth >= 0 && Depth >= Budget.MaxDepth;
+    if (bDepthBound || Budget.RemainingNodes == 0)
+    {
+        if (bDepthBound)
+        {
+            Budget.bDepthCut = true;
+        }
+        else
+        {
+            Budget.bNodeCut = true;
+        }
+        Obj->SetBoolField(TEXT("incomplete"), true);
+        return Obj;
+    }
+
+    TArray<TSharedPtr<FJsonValue>> ChildArray;
+    bool bChildrenCut = false;
+    for (int32 Index = 0; Index < ChildCount; ++Index)
+    {
+        if (Budget.RemainingNodes == 0)
+        {
+            Budget.bNodeCut = true;
+            bChildrenCut = true;
+            break;
+        }
+        if (Budget.RemainingNodes > 0)
+        {
+            --Budget.RemainingNodes;
+        }
+        TSharedPtr<FJsonObject> ChildJson = BuildWidgetTreeJson(Panel->GetChildAt(Index), Depth + 1, Budget);
+        if (ChildJson.IsValid())
+        {
+            ChildArray.Add(MakeShared<FJsonValueObject>(ChildJson));
+        }
+    }
+
+    if (bChildrenCut)
+    {
+        Obj->SetBoolField(TEXT("incomplete"), true);
+    }
+    if (ChildArray.Num() > 0)
+    {
+        Obj->SetArrayField(TEXT("children"), ChildArray);
+    }
 
     return Obj;
 }
@@ -229,6 +385,10 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::AddWidget(const TSharedPtr<FJsonOb
                 CortexErrorCodes::InvalidParent,
                 TEXT("Root widget already exists. Specify parent_name to add as child."));
         }
+        // Journal the tree before changing membership so undo/redo restores the root alongside the
+        // identity map (the engine's own add-widget path journals the tree the same way).
+        WBP->WidgetTree->SetFlags(RF_Transactional);
+        WBP->WidgetTree->Modify();
         WBP->WidgetTree->RootWidget = NewWidget;
         ActualParent = TEXT("");
         SlotIndex = 0;
@@ -251,6 +411,13 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::AddWidget(const TSharedPtr<FJsonOb
                 FString::Printf(TEXT("Parent '%s' is not a panel widget (cannot have children)"), *ParentName));
         }
 
+        // Journal the tree and the parent panel before changing membership so undo/redo restores the
+        // child slot alongside the identity map (the engine's own add-widget path journals both).
+        WBP->WidgetTree->SetFlags(RF_Transactional);
+        WBP->WidgetTree->Modify();
+        ParentPanel->SetFlags(RF_Transactional);
+        ParentPanel->Modify();
+
         int32 RequestedSlot = -1;
         if (Params->TryGetNumberField(TEXT("slot_index"), RequestedSlot))
         {
@@ -270,6 +437,16 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::AddWidget(const TSharedPtr<FJsonOb
             SlotIndex = ParentPanel->GetChildrenCount() - 1;
         }
         ActualParent = ParentName;
+    }
+
+    // The addition is attached and validated, so seed an empty legacy identity map now, just before
+    // registering this widget: the map then holds every source widget and animation, and the new widget
+    // receives the path-derived identity the compiler's own empty-map path would assign it.
+    CortexUMGUtils::InitializeLegacyIdentityMap(WBP);
+
+    if (!CortexReadWidgetVariableGuids(*WBP).Contains(NewWidget->GetFName()))
+    {
+        CortexOnWidgetVariableAdded(*WBP, NewWidget->GetFName());
     }
 
     FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
@@ -292,6 +469,17 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::GetTree(const TSharedPtr<FJsonObje
 {
     const FString AssetPath = Params->GetStringField(TEXT("asset_path"));
 
+    int32 MaxDepth = -1;
+    int32 MaxNodes = -1;
+    bool bNamesOnly = false;
+    FCortexCommandResult ParamError;
+    if (!ReadBoundedTreeIntParam(Params, TEXT("depth"), 0, MaxDepth, ParamError)
+        || !ReadBoundedTreeIntParam(Params, TEXT("max_nodes"), 1, MaxNodes, ParamError)
+        || !ReadBoundedTreeBoolParam(Params, TEXT("names_only"), bNamesOnly, ParamError))
+    {
+        return ParamError;
+    }
+
     FCortexCommandResult LoadError;
     UWidgetBlueprint* WBP = CortexUMGUtils::LoadWidgetBlueprint(AssetPath, LoadError);
     if (!WBP)
@@ -300,19 +488,77 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::GetTree(const TSharedPtr<FJsonObje
     }
 
     TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
-
-    if (WBP->WidgetTree->RootWidget)
+    if (!FCortexUMGPropertyBindingOps::AppendInspection(WBP, Params, nullptr, Data, LoadError))
     {
-        Data->SetObjectField(TEXT("root"), BuildWidgetTreeJson(WBP->WidgetTree->RootWidget));
-        Data->SetNumberField(TEXT("total_widgets"),
-            CortexUMGUtils::CountWidgets(WBP->WidgetTree->RootWidget));
+        return LoadError;
+    }
+
+    // The asset-wide tree total is a count-only traversal: it never expands widget properties, so it
+    // stays exact even when the projected walk is cut.
+    UWidget* RootWidget = WBP->WidgetTree ? WBP->WidgetTree->RootWidget : nullptr;
+    const int32 TotalWidgets = CortexUMGUtils::CountWidgets(RootWidget);
+
+    FTreeReadBudget Budget;
+    Budget.MaxDepth = MaxDepth;
+    Budget.RemainingNodes = MaxNodes;
+    Budget.bNamesOnly = bNamesOnly;
+
+    if (RootWidget)
+    {
+        if (Budget.RemainingNodes > 0)
+        {
+            --Budget.RemainingNodes;
+        }
+        Data->SetObjectField(TEXT("root"), BuildWidgetTreeJson(RootWidget, 0, Budget));
     }
     else
     {
         Data->SetField(TEXT("root"), MakeShared<FJsonValueNull>());
-        Data->SetNumberField(TEXT("total_widgets"), 0);
     }
 
+    TArray<TSharedPtr<FJsonValue>> Reasons;
+    if (Budget.bDepthCut)
+    {
+        Reasons.Add(MakeShared<FJsonValueString>(FString::Printf(
+            TEXT("depth limit %d reached; deeper widgets omitted"), MaxDepth)));
+    }
+    if (Budget.bNodeCut)
+    {
+        Reasons.Add(MakeShared<FJsonValueString>(FString::Printf(
+            TEXT("max_nodes limit %d reached; remaining widgets omitted"), MaxNodes)));
+    }
+
+    Data->SetNumberField(TEXT("total_widgets"), TotalWidgets);
+    Data->SetNumberField(TEXT("returned_widgets"), Budget.ReturnedWidgets);
+    Data->SetBoolField(TEXT("tree_complete"), !Budget.bDepthCut && !Budget.bNodeCut);
+    Data->SetArrayField(TEXT("reasons"), Reasons);
+
+    // The asset-owned binding inventory is appended by its own owner and is never shortened by the
+    // tree budget, so a combined read whose complete response exceeds the module's established
+    // bounded-response ceiling refuses explicitly instead of returning a partial payload that hides
+    // the inventory. The measured quantity is the model-facing compact JSON text this command
+    // actually ships (the transport's condensed writer), not a pretty-printed estimate of it.
+    if (Data->HasField(TEXT("property_binding_state")))
+    {
+        FString CompactText;
+        const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+            TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&CompactText);
+        FJsonSerializer::Serialize(Data.ToSharedRef(), Writer);
+        if (CompactText.Len() > CortexUMGAnimationTrackUtils::MaxDetailedResponseChars)
+        {
+            TSharedPtr<FJsonObject> Bounded = MakeShared<FJsonObject>();
+            Bounded->SetStringField(TEXT("_error"), TEXT("RESPONSE_TOO_LARGE"));
+            Bounded->SetBoolField(TEXT("reader_complete"), false);
+            Bounded->SetStringField(TEXT("asset_path"), AssetPath);
+            Bounded->SetNumberField(TEXT("total_widgets"), TotalWidgets);
+            Bounded->SetNumberField(TEXT("returned_widgets"), Budget.ReturnedWidgets);
+            Bounded->SetNumberField(TEXT("max_response_chars"),
+                CortexUMGAnimationTrackUtils::MaxDetailedResponseChars);
+            return FCortexCommandRouter::Success(Bounded);
+        }
+    }
+
+    Data->SetObjectField(TEXT("fingerprint"), MakeWidgetBlueprintFingerprint(WBP).ToJson());
     return FCortexCommandRouter::Success(Data);
 }
 
@@ -457,6 +703,10 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::GetWidget(const TSharedPtr<FJsonOb
     }
 
     TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+    if (!FCortexUMGPropertyBindingOps::AppendInspection(WBP, Params, &WidgetName, Data, LoadError))
+    {
+        return LoadError;
+    }
     Data->SetStringField(TEXT("name"), Widget->GetName());
     Data->SetStringField(TEXT("class"), Widget->GetClass()->GetName());
 
@@ -474,6 +724,7 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::GetWidget(const TSharedPtr<FJsonOb
         StaticEnum<ESlateVisibility>()->GetNameStringByValue(
             static_cast<int64>(Widget->GetVisibility())));
     Data->SetBoolField(TEXT("is_enabled"), Widget->GetIsEnabled());
+    Data->SetBoolField(TEXT("is_variable"), Widget->bIsVariable);
 
     TArray<TSharedPtr<FJsonValue>> ChildNames;
     int32 ChildCount = 0;
@@ -737,5 +988,263 @@ FCortexCommandResult FCortexUMGWidgetTreeOps::DuplicateWidget(const TSharedPtr<F
     Data->SetStringField(TEXT("new_root"), NewName);
     Data->SetNumberField(TEXT("widgets_created"), WidgetsCreated);
     Data->SetObjectField(TEXT("name_mapping"), NameMapping);
+    return FCortexCommandRouter::Success(Data);
+}
+
+FCortexCommandResult FCortexUMGWidgetTreeOps::RenameWidget(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath, WidgetName, NewName;
+    const TSharedPtr<FJsonObject>* Expected = nullptr;
+    if (!Params.IsValid() || !Params->TryGetStringField(TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty()
+        || !Params->TryGetStringField(TEXT("widget_name"), WidgetName) || WidgetName.IsEmpty()
+        || !Params->TryGetStringField(TEXT("new_name"), NewName)
+        || !Params->TryGetObjectField(TEXT("expected_fingerprint"), Expected) || !Expected || !Expected->IsValid()
+        || !(*Expected)->HasTypedField<EJson::Number>(TEXT("compiled_signature_crc")))
+    {
+        return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+            TEXT("asset_path, widget_name, new_name and a complete tree expected_fingerprint are required"));
+    }
+    // Accept literal identifiers only; UE's display-name rename otherwise silently slugs names.
+    auto IsLetter = [](TCHAR Ch) { return (Ch >= TEXT('A') && Ch <= TEXT('Z')) || (Ch >= TEXT('a') && Ch <= TEXT('z')); };
+    bool bInvalidCharacter = false;
+    for (TCHAR Ch : NewName)
+        bInvalidCharacter |= !IsLetter(Ch) && Ch != TEXT('_') && (Ch < TEXT('0') || Ch > TEXT('9'));
+    if (NewName.IsEmpty() || NewName.Len() >= NAME_SIZE || (!IsLetter(NewName[0]) && NewName[0] != TEXT('_'))
+        || bInvalidCharacter
+        || FName(*NewName).IsNone())
+    {
+        return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+            TEXT("new_name must be a literal identifier beginning with a letter or underscore; sanitizing is not supported"));
+    }
+    FCortexCommandResult LoadError;
+    UWidgetBlueprint* WBP = CortexUMGUtils::LoadWidgetBlueprint(AssetPath, LoadError);
+    if (!WBP) return LoadError;
+    if (!WBP->WidgetTree || !GEditor)
+        return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation, TEXT("Widget tree and Editor are required for rename"));
+    const TSharedPtr<FJsonObject> Before = MakeWidgetBlueprintFingerprint(WBP).ToJson();
+    if (!FCortexBatchMutation::FingerprintsMatch(Before, *Expected))
+    {
+        TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+        Details->SetObjectField(TEXT("current_fingerprint"), Before);
+        return FCortexCommandRouter::Error(CortexErrorCodes::StalePrecondition,
+            TEXT("Expected fingerprint does not match current widget tree"), Details);
+    }
+    UWidget* Widget = CortexUMGUtils::FindWidgetByName(WBP->WidgetTree, WidgetName);
+    if (!Widget || !Widget->GetName().Equals(WidgetName, ESearchCase::CaseSensitive))
+        return FCortexCommandRouter::Error(CortexErrorCodes::WidgetNotFound, TEXT("Exact widget name to rename was not found"));
+    const FString OldName = Widget->GetName();
+    const bool bChanged = !OldName.Equals(NewName, ESearchCase::CaseSensitive);
+    if (bChanged)
+    {
+        // Unreal's rename also visits loaded children and dependent graphs. This
+        // command guards one asset, so refuse any operation that could dirty another.
+        for (TObjectIterator<UBlueprint> It; It; ++It)
+        {
+            UBlueprint* Child = *It;
+            if (Child != WBP && Child->ParentClass && WBP->GeneratedClass
+                && Child->ParentClass->IsChildOf(WBP->GeneratedClass))
+            {
+                return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+                    FString::Printf(TEXT("Target-only widget rename does not support loaded child Blueprint: %s"), *Child->GetPathName()));
+            }
+        }
+        TArray<UBlueprint*> Dependents;
+        FBlueprintEditorUtils::FindDependentBlueprints(WBP, Dependents);
+        TArray<FName, TInlineAllocator<4>> RenamedMembers;
+        RenamedMembers.Add(Widget->GetFName());
+#if __has_include("UIComponentWidgetBlueprintExtension.h")
+        if (!Dependents.IsEmpty())
+        {
+            if (const UUIComponentWidgetBlueprintExtension* Extension =
+                UWidgetBlueprintExtension::GetExtension<UUIComponentWidgetBlueprintExtension>(WBP))
+            {
+                // Native rename propagates these generated members as well as the widget.
+                for (const UUIComponent* Component : Extension->GetComponentsFor(Widget))
+                {
+                    if (Component)
+                    {
+                        RenamedMembers.Add(UUIComponentContainer::GetPropertyNameForComponent(
+                            Component, Widget->GetFName()));
+                    }
+                }
+            }
+        }
+#endif
+        for (UBlueprint* Dependent : Dependents)
+        {
+            if (!Dependent || Dependent == WBP) continue;
+            TArray<UEdGraph*> Graphs;
+            Dependent->GetAllGraphs(Graphs);
+            for (UEdGraph* Graph : Graphs)
+            {
+                for (UEdGraphNode* Node : Graph->Nodes)
+                {
+                    const UK2Node* K2Node = Cast<UK2Node>(Node);
+                    if (K2Node && RenamedMembers.ContainsByPredicate([K2Node](FName MemberName)
+                        { return K2Node->ReferencesVariable(MemberName, nullptr); }))
+                    {
+                        return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+                            FString::Printf(TEXT("Widget rename would modify an unguarded dependent Blueprint: %s"), *Dependent->GetPathName()));
+                    }
+                }
+            }
+        }
+        // Case-only names cannot reliably change object identity through FName.
+        FText Error;
+        if (Widget->GetFName() == FName(*NewName)
+            || !CortexVerifyWidgetRename(WBP, Widget, FText::FromString(NewName), Error)
+            || !Widget->Rename(*NewName, nullptr, REN_Test))
+        {
+            return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+                Error.IsEmpty() ? TEXT("Widget name conflicts with an existing identity") : Error.ToString());
+        }
+        FScopedTransaction Transaction(FText::FromString(
+            FString::Printf(TEXT("Cortex: Rename Widget %s to %s"), *OldName, *NewName)));
+
+        const FName OldFName(*OldName);
+        const FName NewFName(*NewName);
+
+        // Snapshot every animation referencing OldName before the engine utility edits
+        // the first slot binding. The engine's inner transaction will join this outer
+        // transaction, ensuring all animation binding updates revert atomically on undo.
+        for (UWidgetAnimation* WidgetAnimation : WBP->Animations)
+        {
+            if (!WidgetAnimation)
+            {
+                continue;
+            }
+            for (const FWidgetAnimationBinding& AnimBinding : WidgetAnimation->AnimationBindings)
+            {
+                if (AnimBinding.WidgetName == OldFName)
+                {
+                    WidgetAnimation->Modify();
+                    if (WidgetAnimation->MovieScene)
+                    {
+                        WidgetAnimation->MovieScene->Modify();
+                    }
+                    break;
+                }
+            }
+        }
+
+        if (!CortexRenameWidget(WBP, Widget, NewName))
+        {
+            Transaction.Cancel();
+            return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation, TEXT("Unreal widget rename failed"));
+        }
+
+        // FWidgetBlueprintOperationUtils::RenameWidget prematurely breaks on the first slot
+        // binding encountered in an animation, leaving subsequent bindings for the same widget
+        // stale. Ensure every remaining binding and MovieScene possessable for OldName is updated.
+        for (UWidgetAnimation* WidgetAnimation : WBP->Animations)
+        {
+            if (!WidgetAnimation)
+            {
+                continue;
+            }
+            for (FWidgetAnimationBinding& AnimBinding : WidgetAnimation->AnimationBindings)
+            {
+                if (AnimBinding.WidgetName == OldFName)
+                {
+                    AnimBinding.WidgetName = NewFName;
+                    if (AnimBinding.SlotWidgetName == NAME_None && WidgetAnimation->MovieScene)
+                    {
+                        FMovieScenePossessable* Possessable = WidgetAnimation->MovieScene->FindPossessable(AnimBinding.AnimationGuid);
+                        if (Possessable)
+                        {
+                            Possessable->SetName(NewName);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("asset_path"), AssetPath);
+    Data->SetStringField(TEXT("old_name"), OldName);
+    Data->SetStringField(TEXT("widget_name"), Widget->GetName());
+    Data->SetBoolField(TEXT("changed"), bChanged);
+    Data->SetBoolField(TEXT("saved"), false);
+    Data->SetBoolField(TEXT("skeleton_regenerated"), bChanged);
+    Data->SetObjectField(TEXT("fingerprint"), MakeWidgetBlueprintFingerprint(WBP).ToJson());
+    return FCortexCommandRouter::Success(Data);
+}
+
+FCortexCommandResult FCortexUMGWidgetTreeOps::SetWidgetVariable(const TSharedPtr<FJsonObject>& Params)
+{
+    const FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+    const FString WidgetName = Params->GetStringField(TEXT("widget_name"));
+    bool bIsVariable = false;
+    if (!Params->TryGetBoolField(TEXT("is_variable"), bIsVariable))
+    {
+        return FCortexCommandRouter::Error(
+            CortexErrorCodes::InvalidField,
+            TEXT("Missing required param: is_variable (boolean)"));
+    }
+
+    FCortexCommandResult LoadError;
+    UWidgetBlueprint* WBP = CortexUMGUtils::LoadWidgetBlueprint(AssetPath, LoadError);
+    if (!WBP)
+    {
+        return LoadError;
+    }
+
+    UWidget* Widget = CortexUMGUtils::FindWidgetByName(WBP->WidgetTree, WidgetName);
+    if (!Widget)
+    {
+        return FCortexCommandRouter::Error(
+            CortexErrorCodes::WidgetNotFound,
+            FString::Printf(TEXT("Widget not found: %s"), *WidgetName));
+    }
+
+	const FCortexAssetFingerprint CurrentFingerprint = MakeWidgetBlueprintFingerprint(WBP);
+	const TSharedPtr<FJsonObject>* ExpectedFingerprint = nullptr;
+	if (Params->TryGetObjectField(TEXT("expected_fingerprint"), ExpectedFingerprint) && ExpectedFingerprint != nullptr)
+	{
+		const TSharedPtr<FJsonObject> CurrentFingerprintJson = CurrentFingerprint.ToJson();
+		if (!FCortexBatchMutation::FingerprintsMatch(CurrentFingerprintJson, *ExpectedFingerprint))
+		{
+			TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+			Details->SetObjectField(TEXT("current_fingerprint"), CurrentFingerprintJson);
+            return FCortexCommandRouter::Error(
+                CortexErrorCodes::StalePrecondition,
+                TEXT("Expected fingerprint does not match current widget blueprint fingerprint"),
+                Details);
+        }
+    }
+
+    const bool bWasVariable = Widget->bIsVariable;
+    if (bWasVariable == bIsVariable)
+    {
+        TSharedPtr<FJsonObject> NoOp = MakeShared<FJsonObject>();
+        NoOp->SetStringField(TEXT("asset_path"), AssetPath);
+        NoOp->SetStringField(TEXT("widget_name"), WidgetName);
+        NoOp->SetBoolField(TEXT("was_variable"), bWasVariable);
+        NoOp->SetBoolField(TEXT("is_variable"), bIsVariable);
+        NoOp->SetBoolField(TEXT("changed"), false);
+        NoOp->SetObjectField(TEXT("fingerprint"), CurrentFingerprint.ToJson());
+        return FCortexCommandRouter::Success(NoOp);
+    }
+
+    FScopedTransaction Transaction(FText::FromString(
+        FString::Printf(TEXT("Cortex: Set widget variable %s = %s"), *WidgetName, bIsVariable ? TEXT("true") : TEXT("false"))));
+    // Record the WIDGET (whose bIsVariable bit changes), not the tree: the transactor must be
+    // able to restore the bit on Undo. The Widget Blueprint is structurally marked so the
+    // compiler regenerates the skeleton and exposes the property (matching UE's own toggle
+    // path in SWidgetDetailsView which calls Widget->Modify() and
+    // MarkBlueprintAsStructurallyModified).
+    Widget->Modify();
+    Widget->bIsVariable = bIsVariable;
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
+
+	const FCortexAssetFingerprint ResultFingerprint = MakeWidgetBlueprintFingerprint(WBP);
+
+    TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("asset_path"), AssetPath);
+    Data->SetStringField(TEXT("widget_name"), WidgetName);
+    Data->SetBoolField(TEXT("was_variable"), bWasVariable);
+    Data->SetBoolField(TEXT("is_variable"), bIsVariable);
+    Data->SetBoolField(TEXT("changed"), true);
+    Data->SetObjectField(TEXT("fingerprint"), ResultFingerprint.ToJson());
     return FCortexCommandRouter::Success(Data);
 }

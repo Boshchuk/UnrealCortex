@@ -14,6 +14,7 @@ public class CortexGraph : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
+			"AssetRegistry",
 			"CoreUObject",
 			"Engine",
 			"Json",
@@ -21,6 +22,11 @@ public class CortexGraph : ModuleRules
 			"UnrealEd",
 			"BlueprintGraph",
 			"KismetCompiler",
+			"GraphEditor",
+			"Slate",
+			"SlateCore",
+			"UMG",
+			"UMGEditor",
 		});
 	}
 }

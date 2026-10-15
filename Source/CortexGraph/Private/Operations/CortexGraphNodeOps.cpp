@@ -1,4 +1,7 @@
 #include "Operations/CortexGraphNodeOps.h"
+#include "Operations/CortexGraphNodeContract.h"
+#include "Operations/CortexGraphPinDefaults.h"
+#include "Operations/CortexGraphSymbolResolver.h"
 #include "CortexAssetFingerprint.h"
 #include "CortexBatchMutation.h"
 #include "CortexGraphModule.h"
@@ -38,15 +41,20 @@
 #include "K2Node_ClearDelegate.h"
 #include "K2Node_CreateDelegate.h"
 #include "UObject/UnrealType.h"
+#include "WidgetBlueprint.h"
 #include "ScopedTransaction.h"
 #include "PackageTools.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "GameFramework/Actor.h"
 #include "Misc/PackageName.h"
 #include "Editor.h"
 #include "Engine/World.h"
 #include "Engine/LevelScriptBlueprint.h"
 #include "UObject/SavePackage.h"
 #include "UObject/UObjectIterator.h"
+#include "NodeFactory.h"
+#include "SGraphNode.h"
 
 namespace
 {
@@ -245,72 +253,52 @@ bool ReloadBlueprintPackage(UPackage* Package)
 		EReloadPackagesInteractionMode::AssumePositive);
 }
 
-UClass* ResolveGraphNodeClassIdentifier(const FString& ClassIdentifier)
+TSharedPtr<FJsonObject> AllocateProbePins(
+	UBlueprint* Blueprint,
+	const FString& NodeClassName,
+	const TSharedPtr<FJsonObject>& NodeParams,
+	UClass* NodeClass)
 {
-	if (ClassIdentifier.IsEmpty())
+	if (NodeClass == nullptr)
 	{
 		return nullptr;
 	}
-
-	if (UClass* FoundClass = FindObject<UClass>(nullptr, *ClassIdentifier))
+	UEdGraph* ProbeGraph = NewObject<UEdGraph>(Blueprint, UEdGraph::StaticClass(), NAME_None, RF_Transient);
+	// K2 nodes dereference the graph schema during AllocateDefaultPins/ReconstructNode; a null
+	// schema here would crash describe_node when construction params are provided.
+	ProbeGraph->Schema = UEdGraphSchema_K2::StaticClass();
+	UEdGraphNode* ProbeNode = NewObject<UEdGraphNode>(ProbeGraph, NodeClass, NAME_None, RF_Transient);
+	FString ApplyError;
+	FCortexGraphNodeContract::ApplyNodeConstructionParams(ProbeGraph, ProbeNode, Blueprint, NodeParams, ApplyError);
+	if (ProbeNode->Pins.Num() == 0)
 	{
-		return FoundClass;
+		ProbeNode->AllocateDefaultPins();
 	}
 
-	if (!ClassIdentifier.StartsWith(TEXT("/")))
+	if (UK2Node_Composite* Composite = Cast<UK2Node_Composite>(ProbeNode))
 	{
-		if (UClass* FoundClass = FindFirstObject<UClass>(*ClassIdentifier, EFindFirstObjectOptions::NativeFirst))
-		{
-			return FoundClass;
-		}
-
-		const FString EnginePath = FString::Printf(TEXT("/Script/Engine.%s"), *ClassIdentifier);
-		if (UClass* EngineClass = FindObject<UClass>(nullptr, *EnginePath))
-		{
-			return EngineClass;
-		}
+		Composite->PostPlacedNewNode();
+		Composite->AllocateDefaultPins();
 	}
 
-	for (TObjectIterator<UClass> It; It; ++It)
+	TSharedPtr<FJsonObject> Pins = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> PinArray;
+	for (const UEdGraphPin* Pin : ProbeNode->Pins)
 	{
-		UClass* Candidate = *It;
-		if (!IsValid(Candidate))
+		if (Pin == nullptr)
 		{
 			continue;
 		}
-
-		if (Candidate->GetName() == ClassIdentifier || Candidate->GetPathName() == ClassIdentifier)
-		{
-			return Candidate;
-		}
+		PinArray.Add(MakeShared<FJsonValueObject>(FCortexGraphNodeOps::SerializePin(Pin, false, false, Blueprint)));
 	}
+	Pins->SetArrayField(TEXT("pins"), PinArray);
 
-	if (!ClassIdentifier.StartsWith(TEXT("/")))
-	{
-		return nullptr;
-	}
+	ProbeNode->MarkAsGarbage();
+	ProbeGraph->MarkAsGarbage();
 
-	const FString PackageName = FPackageName::ObjectPathToPackageName(ClassIdentifier);
-	const bool bPackageExists =
-		PackageName.StartsWith(TEXT("/"))
-		&& (FindPackage(nullptr, *PackageName) || FPackageName::DoesPackageExist(PackageName));
-	if (!bPackageExists)
-	{
-		return nullptr;
-	}
-
-	if (UClass* LoadedClass = LoadObject<UClass>(nullptr, *ClassIdentifier))
-	{
-		return LoadedClass;
-	}
-
-	if (UBlueprint* BlueprintAsset = LoadObject<UBlueprint>(nullptr, *ClassIdentifier))
-	{
-		return BlueprintAsset->GeneratedClass;
-	}
-
-	return nullptr;
+	return Pins;
 }
+
 }
 
 UBlueprint* FCortexGraphNodeOps::LoadBlueprint(const FString& AssetPath, FCortexCommandResult& OutError)
@@ -1035,163 +1023,27 @@ FCortexCommandResult FCortexGraphNodeOps::AddNode(const TSharedPtr<FJsonObject>&
 		}
 	}
 
-	// Resolve node class
-	// For well-known classes, use StaticClass (faster, no dynamic loading)
-	// Other classes use dynamic loading from /Script/BlueprintGraph or /Script/Engine
-	UClass* NodeClass = nullptr;
-	if (NodeClassName == TEXT("UK2Node_CallFunction"))
-	{
-		NodeClass = UK2Node_CallFunction::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_IfThenElse"))
-	{
-		NodeClass = UK2Node_IfThenElse::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_VariableSet"))
-	{
-		NodeClass = UK2Node_VariableSet::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_VariableGet"))
-	{
-		NodeClass = UK2Node_VariableGet::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_Event") || NodeClassName == TEXT("Event"))
-	{
-		NodeClass = UK2Node_Event::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_ExecutionSequence"))
-	{
-		NodeClass = UK2Node_ExecutionSequence::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_CustomEvent"))
-	{
-		NodeClass = UK2Node_CustomEvent::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_Self"))
-	{
-		NodeClass = UK2Node_Self::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_Knot"))
-	{
-		NodeClass = UK2Node_Knot::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_MakeArray"))
-	{
-		NodeClass = UK2Node_MakeArray::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_Timeline"))
-	{
-		// Timeline requires a UTimelineTemplate in Blueprint->Timelines with matching name/guid.
-		// Adding without one produces a compile error.
-		const TSharedPtr<FJsonObject>* NodeParams = nullptr;
-		FString TimelineName;
-		if (!Params->TryGetObjectField(TEXT("params"), NodeParams) ||
-			!(*NodeParams)->TryGetStringField(TEXT("timeline_name"), TimelineName) ||
-			TimelineName.IsEmpty())
-		{
-			return FCortexCommandRouter::Error(
-				CortexErrorCodes::InvalidField,
-				TEXT("TimelineNameRequired: timeline_name param is required for Timeline nodes")
-			);
-		}
-		NodeClass = UK2Node_Timeline::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_SpawnActorFromClass"))
-	{
-		NodeClass = UK2Node_SpawnActorFromClass::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_DynamicCast"))
-	{
-		NodeClass = UK2Node_DynamicCast::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_MacroInstance"))
-	{
-		// MacroInstance requires SetMacroGraph(); adding without macro_path produces a node with no pins.
-		const TSharedPtr<FJsonObject>* NodeParams = nullptr;
-		FString MacroPath;
-		if (!Params->TryGetObjectField(TEXT("params"), NodeParams) ||
-			!(*NodeParams)->TryGetStringField(TEXT("macro_path"), MacroPath) ||
-			MacroPath.IsEmpty())
-		{
-			return FCortexCommandRouter::Error(
-				CortexErrorCodes::InvalidField,
-				TEXT("MacroPathRequired: macro_path param is required for MacroInstance nodes")
-			);
-		}
-		NodeClass = UK2Node_MacroInstance::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_SwitchEnum"))
-	{
-		NodeClass = UK2Node_SwitchEnum::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_SwitchString"))
-	{
-		NodeClass = UK2Node_SwitchString::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_SwitchInteger"))
-	{
-		NodeClass = UK2Node_SwitchInteger::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_AddDelegate"))
-	{
-		const TSharedPtr<FJsonObject>* NodeParams = nullptr;
-		FString DelegateName;
-		if (!Params->TryGetObjectField(TEXT("params"), NodeParams) ||
-			!(*NodeParams)->TryGetStringField(TEXT("delegate_name"), DelegateName) ||
-			DelegateName.IsEmpty())
-		{
-			return FCortexCommandRouter::Error(
-				CortexErrorCodes::InvalidField,
-				TEXT("DelegateNameRequired: delegate_name param is required for AddDelegate nodes")
-			);
-		}
-		NodeClass = UK2Node_AddDelegate::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_RemoveDelegate"))
-	{
-		const TSharedPtr<FJsonObject>* NodeParams = nullptr;
-		FString DelegateName;
-		if (!Params->TryGetObjectField(TEXT("params"), NodeParams) ||
-			!(*NodeParams)->TryGetStringField(TEXT("delegate_name"), DelegateName) ||
-			DelegateName.IsEmpty())
-		{
-			return FCortexCommandRouter::Error(
-				CortexErrorCodes::InvalidField,
-				TEXT("DelegateNameRequired: delegate_name param is required for RemoveDelegate nodes")
-			);
-		}
-		NodeClass = UK2Node_RemoveDelegate::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_ClearDelegate"))
-	{
-		const TSharedPtr<FJsonObject>* NodeParams = nullptr;
-		FString DelegateName;
-		if (!Params->TryGetObjectField(TEXT("params"), NodeParams) ||
-			!(*NodeParams)->TryGetStringField(TEXT("delegate_name"), DelegateName) ||
-			DelegateName.IsEmpty())
-		{
-			return FCortexCommandRouter::Error(
-				CortexErrorCodes::InvalidField,
-				TEXT("DelegateNameRequired: delegate_name param is required for ClearDelegate nodes")
-			);
-		}
-		NodeClass = UK2Node_ClearDelegate::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_CreateDelegate"))
-	{
-		NodeClass = UK2Node_CreateDelegate::StaticClass();
-	}
-	else if (NodeClassName == TEXT("UK2Node_Composite") || NodeClassName == TEXT("Composite"))
-	{
-		NodeClass = UK2Node_Composite::StaticClass();
-	}
-
+	UClass* NodeClass = ResolveNodeClass(NodeClassName);
 	if (NodeClass == nullptr)
 	{
 		return FCortexCommandRouter::Error(
 			CortexErrorCodes::InvalidField,
 			FString::Printf(TEXT("Node class not found: %s"), *NodeClassName)
 		);
+	}
+
+	// Node-specific construction params live under the top-level "params" key.
+	const TSharedPtr<FJsonObject>* InnerNodeParams = nullptr;
+	const bool bHasInnerParams = Params.IsValid()
+		&& Params->TryGetObjectField(TEXT("params"), InnerNodeParams)
+		&& InnerNodeParams != nullptr;
+	const TSharedPtr<FJsonObject> NodeConstructionParams = bHasInnerParams
+		? *InnerNodeParams : MakeShared<FJsonObject>();
+
+	FCortexCommandResult ContractError;
+	if (!FCortexGraphNodeContract::Validate(NodeClassName, Blueprint, NodeConstructionParams, ContractError))
+	{
+		return ContractError;
 	}
 
 	FScopedTransaction Transaction(FText::FromString(
@@ -1206,239 +1058,17 @@ FCortexCommandResult FCortexGraphNodeOps::AddNode(const TSharedPtr<FJsonObject>&
 	NewNode->NodePosY = PosY;
 	Graph->AddNode(NewNode, true, false);
 
-	// Handle type-specific setup
-	// NodeParams = node-specific parameters (nested object), distinct from outer Params
-	const TSharedPtr<FJsonObject>* NodeParams = nullptr;
-	if (Params->TryGetObjectField(TEXT("params"), NodeParams) && NodeParams)
+	FString ApplyError;
+	if (!FCortexGraphNodeContract::ApplyNodeConstructionParams(Graph, NewNode, Blueprint, NodeConstructionParams, ApplyError))
 	{
-		UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(NewNode);
-		if (CallNode)
-		{
-			FString FunctionName;
-			if ((*NodeParams)->TryGetStringField(TEXT("function_name"), FunctionName))
-			{
-				// Parse "ClassName.FunctionName" format
-				FString ClassName;
-				FString FuncName;
-				if (FunctionName.Split(TEXT("."), &ClassName, &FuncName))
-				{
-					UClass* FuncClass = FindFirstObject<UClass>(*ClassName);
-					if (FuncClass == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							FString::Printf(TEXT("Function owner class not found: %s"), *ClassName)
-						);
-					}
-
-					UFunction* Func = FuncClass->FindFunctionByName(FName(*FuncName));
-					if (Func == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							FString::Printf(TEXT("Function not found: %s on class %s"), *FuncName, *ClassName)
-						);
-					}
-
-					CallNode->SetFromFunction(Func);
-				}
-			}
-		}
-
-		UK2Node_Variable* VarNode = Cast<UK2Node_Variable>(NewNode);
-		if (VarNode)
-		{
-			FString VariableName;
-			if ((*NodeParams)->TryGetStringField(TEXT("variable_name"), VariableName))
-			{
-				FString VariableClass;
-				if ((*NodeParams)->TryGetStringField(TEXT("variable_class"), VariableClass))
-				{
-					// External class property (e.g., PlayerController.bShowMouseCursor)
-					UClass* VarClass = FindFirstObject<UClass>(*VariableClass);
-					if (VarClass == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							FString::Printf(TEXT("Variable owner class not found: %s"), *VariableClass)
-						);
-					}
-
-					FProperty* Prop = VarClass->FindPropertyByName(FName(*VariableName));
-					if (Prop == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							FString::Printf(TEXT("Property not found: %s on class %s"), *VariableName, *VariableClass)
-						);
-					}
-
-					VarNode->SetFromProperty(Prop, false, VarClass);
-				}
-				else
-				{
-					// Self-context property (on the Blueprint's own class)
-					UClass* SelfClass = Blueprint->SkeletonGeneratedClass
-						? Blueprint->SkeletonGeneratedClass
-						: Blueprint->GeneratedClass;
-					if (SelfClass)
-					{
-						FProperty* SelfProp = SelfClass->FindPropertyByName(FName(*VariableName));
-						if (SelfProp == nullptr)
-						{
-							Graph->RemoveNode(NewNode);
-							return FCortexCommandRouter::Error(
-								CortexErrorCodes::InvalidField,
-								FString::Printf(TEXT("Self property not found: %s"), *VariableName)
-							);
-						}
-					}
-					VarNode->VariableReference.SetSelfMember(FName(*VariableName));
-				}
-			}
-		}
-
-		UK2Node_DynamicCast* CastNode = Cast<UK2Node_DynamicCast>(NewNode);
-		if (CastNode)
-		{
-			FString TargetClassIdentifier;
-			const bool bHasClass =
-				(*NodeParams)->TryGetStringField(TEXT("class"), TargetClassIdentifier)
-				|| (*NodeParams)->TryGetStringField(TEXT("target_class"), TargetClassIdentifier);
-			if (bHasClass)
-			{
-				UClass* TargetClass = ResolveGraphNodeClassIdentifier(TargetClassIdentifier);
-				if (TargetClass == nullptr)
-				{
-					Graph->RemoveNode(NewNode);
-					return FCortexCommandRouter::Error(
-						CortexErrorCodes::InvalidField,
-						FString::Printf(TEXT("Cast target class not found: %s"), *TargetClassIdentifier)
-					);
-				}
-
-				CastNode->TargetType = TargetClass;
-				CastNode->ReconstructNode();
-			}
-		}
-
-		UK2Node_Event* EventNode = Cast<UK2Node_Event>(NewNode);
-		if (EventNode)
-		{
-			FString FunctionName;
-			if ((*NodeParams)->TryGetStringField(TEXT("function_name"), FunctionName))
-			{
-				FString ClassName;
-				FString FuncName;
-				if (FunctionName.Split(TEXT("."), &ClassName, &FuncName))
-				{
-					UClass* FuncClass = FindFirstObject<UClass>(*ClassName);
-					if (FuncClass == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							FString::Printf(TEXT("Event owner class not found: %s"), *ClassName)
-						);
-					}
-
-					UFunction* Func = FuncClass->FindFunctionByName(FName(*FuncName));
-					if (Func == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							FString::Printf(TEXT("Event function not found: %s on class %s"), *FuncName, *ClassName)
-						);
-					}
-
-					EventNode->EventReference.SetExternalMember(FName(*FuncName), FuncClass);
-					EventNode->bOverrideFunction = true;
-				}
-			}
-		}
-
-		UK2Node_BaseMCDelegate* DelegateNode = Cast<UK2Node_BaseMCDelegate>(NewNode);
-		if (DelegateNode)
-		{
-			FString DelegateName;
-			if ((*NodeParams)->TryGetStringField(TEXT("delegate_name"), DelegateName))
-			{
-				FString DelegateClass;
-				if ((*NodeParams)->TryGetStringField(TEXT("delegate_class"), DelegateClass))
-				{
-					// External class delegate
-					UClass* OwnerClass = FindFirstObject<UClass>(*DelegateClass);
-					if (OwnerClass == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							FString::Printf(TEXT("Delegate owner class not found: %s"), *DelegateClass)
-						);
-					}
-
-					FMulticastDelegateProperty* DelegateProp = CastField<FMulticastDelegateProperty>(
-						OwnerClass->FindPropertyByName(FName(*DelegateName)));
-					if (DelegateProp == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							FString::Printf(TEXT("Multicast delegate property not found: %s on class %s"),
-								*DelegateName, *DelegateClass)
-						);
-					}
-
-					DelegateNode->SetFromProperty(DelegateProp, false, OwnerClass);
-				}
-				else
-				{
-					// Self-context delegate (Blueprint's own event dispatcher)
-					UClass* SelfClass = Blueprint->SkeletonGeneratedClass
-						? Blueprint->SkeletonGeneratedClass
-						: Blueprint->GeneratedClass;
-					if (SelfClass == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							TEXT("Blueprint has no generated class for self-context delegate lookup")
-						);
-					}
-
-					FMulticastDelegateProperty* DelegateProp = CastField<FMulticastDelegateProperty>(
-						SelfClass->FindPropertyByName(FName(*DelegateName)));
-					if (DelegateProp == nullptr)
-					{
-						Graph->RemoveNode(NewNode);
-						return FCortexCommandRouter::Error(
-							CortexErrorCodes::InvalidField,
-							FString::Printf(TEXT("Self delegate property not found: %s"), *DelegateName)
-						);
-					}
-
-					DelegateNode->SetFromProperty(DelegateProp, true, SelfClass);
-				}
-			}
-		}
-
-		UK2Node_CreateDelegate* CreateDelegateNode = Cast<UK2Node_CreateDelegate>(NewNode);
-		if (CreateDelegateNode)
-		{
-			FString FunctionName;
-			if ((*NodeParams)->TryGetStringField(TEXT("function_name"), FunctionName))
-			{
-				CreateDelegateNode->SetFunction(FName(*FunctionName));
-			}
-		}
+		Graph->RemoveNode(NewNode);
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ApplyError);
 	}
 
-	NewNode->AllocateDefaultPins();
+	if (NewNode->Pins.Num() == 0)
+	{
+		NewNode->AllocateDefaultPins();
+	}
 
 	// Special setup for composite nodes: PostPlacedNewNode creates the BoundGraph
 	// and its tunnel entry/exit nodes. Without this call BoundGraph remains null and
@@ -1449,6 +1079,93 @@ FCortexCommandResult FCortexGraphNodeOps::AddNode(const TSharedPtr<FJsonObject>&
 		CompositeNewNode->PostPlacedNewNode();
 		// Re-allocate pins after PostPlacedNewNode so the entry/exit tunnel pins are present
 		CompositeNewNode->AllocateDefaultPins();
+	}
+
+	// Record the mutation for failure-atomic batch rollback: a failing batch removes every
+	// node it created (reverse journal order) and verifies the graph is back to its prior state.
+	if (FCortexCommandRouter::IsInBatch())
+	{
+		const TWeakObjectPtr<UBlueprint> WeakBlueprint = Blueprint;
+		const FString RootGraphName = GraphName;
+		const FString JournalSubgraphPath = SubgraphPath;
+		const FGuid NodeGuid = NewNode->NodeGuid;
+		const FString NodeId = NewNode->GetName();
+		const UK2Node_Composite* JournalComposite = Cast<UK2Node_Composite>(NewNode);
+		const FString BoundGraphName = JournalComposite && JournalComposite->BoundGraph
+			? JournalComposite->BoundGraph->GetName() : FString();
+		FCortexBatchScope::RegisterRollbackEntry(
+			TEXT("add_node"),
+			NodeId,
+			FString::Printf(TEXT("add_node %s"), *NodeClassName),
+			[WeakBlueprint, RootGraphName, JournalSubgraphPath, NodeGuid, NodeId]() -> bool
+			{
+				UBlueprint* CurrentBlueprint = WeakBlueprint.Get();
+				if (CurrentBlueprint == nullptr)
+				{
+					return false;
+				}
+				FCortexCommandResult ResolveError;
+				UEdGraph* CurrentGraph = FCortexGraphNodeOps::FindGraph(CurrentBlueprint, RootGraphName, ResolveError);
+				if (CurrentGraph != nullptr && !JournalSubgraphPath.IsEmpty())
+				{
+					CurrentGraph = FCortexGraphNodeOps::ResolveSubgraph(CurrentGraph, JournalSubgraphPath, ResolveError);
+				}
+				if (CurrentGraph == nullptr)
+				{
+					return false;
+				}
+				UEdGraphNode* CurrentNode = nullptr;
+				for (UEdGraphNode* Candidate : CurrentGraph->Nodes)
+				{
+					if (Candidate != nullptr && (Candidate->NodeGuid == NodeGuid || Candidate->GetName() == NodeId))
+					{
+						CurrentNode = Candidate;
+						break;
+					}
+				}
+				if (CurrentNode != nullptr)
+				{
+					CurrentNode->DestroyNode();
+				}
+				return true;
+			},
+			[WeakBlueprint, RootGraphName, JournalSubgraphPath, NodeGuid, NodeId, BoundGraphName]() -> bool
+			{
+				UBlueprint* CurrentBlueprint = WeakBlueprint.Get();
+				if (CurrentBlueprint == nullptr)
+				{
+					return false;
+				}
+				FCortexCommandResult ResolveError;
+				UEdGraph* CurrentGraph = FCortexGraphNodeOps::FindGraph(CurrentBlueprint, RootGraphName, ResolveError);
+				if (CurrentGraph != nullptr && !JournalSubgraphPath.IsEmpty())
+				{
+					CurrentGraph = FCortexGraphNodeOps::ResolveSubgraph(CurrentGraph, JournalSubgraphPath, ResolveError);
+				}
+				if (CurrentGraph == nullptr)
+				{
+					return false;
+				}
+				for (UEdGraphNode* Node : CurrentGraph->Nodes)
+				{
+					if (Node != nullptr && (Node->NodeGuid == NodeGuid || Node->GetName() == NodeId))
+					{
+						return false;
+					}
+				}
+				if (!BoundGraphName.IsEmpty())
+				{
+					for (const UEdGraph* SubGraph : CurrentGraph->SubGraphs)
+					{
+						if (SubGraph != nullptr && SubGraph->GetName() == BoundGraphName)
+						{
+							return false;
+						}
+					}
+				}
+				return true;
+			},
+			Cast<UPackage>(Graph->GetOutermost()));
 	}
 
 	Graph->NotifyGraphChanged();
@@ -1481,9 +1198,251 @@ FCortexCommandResult FCortexGraphNodeOps::AddNode(const TSharedPtr<FJsonObject>&
 		{
 			continue;
 		}
-		PinsArray.Add(MakeShared<FJsonValueObject>(SerializePin(Pin, false)));
+		PinsArray.Add(MakeShared<FJsonValueObject>(SerializePin(Pin, false, false, Blueprint)));
 	}
 	Data->SetArrayField(TEXT("pins"), PinsArray);
+
+	return FCortexCommandRouter::Success(Data);
+}
+
+UClass* FCortexGraphNodeOps::ResolveNodeClass(const FString& NodeClassName)
+{
+	FName FamilyName;
+	UClass* OutClass = nullptr;
+	if (FCortexGraphNodeContract::ResolveFamily(NodeClassName, FamilyName, OutClass))
+	{
+		return OutClass;
+	}
+	return nullptr;
+}
+
+
+FCortexCommandResult FCortexGraphNodeOps::DescribeNode(const TSharedPtr<FJsonObject>& Params)
+{
+	FString NodeClassName;
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("node_class"), NodeClassName) || NodeClassName.IsEmpty())
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, TEXT("Missing required param: node_class"));
+	}
+
+	const FCortexNodeConstructionContract Contract = FCortexGraphNodeContract::Describe(NodeClassName);
+	if (!Contract.bSupported)
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidField,
+			FString::Printf(TEXT("Node class not supported: %s"), *NodeClassName));
+	}
+
+	TSharedPtr<FJsonObject> Data = Contract.ToJson();
+
+	UClass* NodeClass = ResolveNodeClass(NodeClassName);
+	if (NodeClass != nullptr)
+	{
+		Data->SetStringField(TEXT("canonical_node_class"), NodeClass->GetPathName());
+	}
+
+	FString AssetPath;
+	const bool bHasAssetPath = Params->TryGetStringField(TEXT("asset_path"), AssetPath) && !AssetPath.IsEmpty();
+
+	const TSharedPtr<FJsonObject>* NodeParamsPtr = nullptr;
+	const bool bHasParams = Params->TryGetObjectField(TEXT("params"), NodeParamsPtr) && NodeParamsPtr != nullptr;
+	const TSharedPtr<FJsonObject> NodeParams = bHasParams ? *NodeParamsPtr : MakeShared<FJsonObject>();
+
+	if (!bHasAssetPath)
+	{
+		Data->SetStringField(TEXT("validation_status"), TEXT("family_only"));
+
+		if (bHasParams)
+		{
+			// Family-only probe without asset context: for static libraries or standalone nodes
+			UBlueprint* ProbeOwner = NewObject<UBlueprint>(GetTransientPackage(), UBlueprint::StaticClass());
+			ProbeOwner->AddToRoot();
+			ProbeOwner->ParentClass = AActor::StaticClass();
+			FKismetEditorUtilities::CompileBlueprint(ProbeOwner);
+			if (TSharedPtr<FJsonObject> Pins = AllocateProbePins(ProbeOwner, NodeClassName, NodeParams, NodeClass))
+			{
+				const TArray<TSharedPtr<FJsonValue>>* PinArray = nullptr;
+				if (Pins->TryGetArrayField(TEXT("pins"), PinArray) && PinArray != nullptr)
+				{
+					Data->SetArrayField(TEXT("expected_pins"), *PinArray);
+					Data->SetBoolField(TEXT("pins_allocated"), true);
+				}
+			}
+			ProbeOwner->RemoveFromRoot();
+			ProbeOwner->MarkAsGarbage();
+		}
+
+		return FCortexCommandRouter::Success(Data);
+	}
+
+	// Contextual describe with asset_path
+	FCortexCommandResult LoadError;
+	UBlueprint* Blueprint = LoadBlueprint(AssetPath, LoadError);
+	if (Blueprint == nullptr)
+	{
+		return LoadError;
+	}
+
+	if (Blueprint->ParentClass == nullptr || Blueprint->GeneratedClass == nullptr || Blueprint->Status == BS_BeingCreated)
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidOperation,
+			TEXT("Blueprint class context is unready: missing ParentClass or GeneratedClass"));
+	}
+
+	// Validate target if provided
+	const TSharedPtr<FJsonObject>* TargetObjPtr = nullptr;
+	const bool bHasTarget = Params->TryGetObjectField(TEXT("target"), TargetObjPtr) && TargetObjPtr != nullptr && (*TargetObjPtr).IsValid();
+	TSharedPtr<FJsonObject> ResolvedTargetObj;
+
+	if (bHasTarget)
+	{
+		const TSharedPtr<FJsonObject>& TargetObj = *TargetObjPtr;
+		FString TargetGuidStr;
+		FString SubgraphPath;
+		FString TargetKind;
+
+		const TSharedPtr<FJsonObject>* GraphRefPtr = nullptr;
+		if (TargetObj->TryGetObjectField(TEXT("graph_ref"), GraphRefPtr) && GraphRefPtr && (*GraphRefPtr).IsValid())
+		{
+			(*GraphRefPtr)->TryGetStringField(TEXT("graph_guid"), TargetGuidStr);
+			(*GraphRefPtr)->TryGetStringField(TEXT("subgraph_path"), SubgraphPath);
+			(*GraphRefPtr)->TryGetStringField(TEXT("graph_kind"), TargetKind);
+		}
+		else
+		{
+			TargetObj->TryGetStringField(TEXT("graph_guid"), TargetGuidStr);
+			TargetObj->TryGetStringField(TEXT("subgraph_path"), SubgraphPath);
+			TargetObj->TryGetStringField(TEXT("graph_kind"), TargetKind);
+		}
+
+		if (TargetGuidStr.IsEmpty())
+		{
+			return FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidField,
+				TEXT("target requires graph_guid or graph_ref with graph_guid"));
+		}
+
+		FGuid TargetGuid;
+		if (!FGuid::Parse(TargetGuidStr, TargetGuid))
+		{
+			return FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidField,
+				FString::Printf(TEXT("Invalid graph_guid format: '%s'"), *TargetGuidStr));
+		}
+
+		TArray<FCortexGraphEntry> Entries;
+		EnumerateUserGraphs(Blueprint, Entries);
+
+		UEdGraph* FoundGraph = nullptr;
+		ECortexGraphKind FoundKind = ECortexGraphKind::Function;
+		for (const FCortexGraphEntry& Entry : Entries)
+		{
+			if (Entry.Graph && Entry.Graph->GraphGuid == TargetGuid)
+			{
+				FoundGraph = Entry.Graph;
+				FoundKind = Entry.Kind;
+				break;
+			}
+		}
+
+		if (FoundGraph == nullptr)
+		{
+			return FCortexCommandRouter::Error(
+				CortexErrorCodes::GraphNotFound,
+				FString::Printf(TEXT("Graph with GUID %s not found on Blueprint"), *TargetGuidStr));
+		}
+
+		if (FoundKind == ECortexGraphKind::Delegate || !IsMutableGraphKind(FoundKind))
+		{
+			return FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidOperation,
+				TEXT("Delegate signature graphs are read-only and cannot be targeted for authoring"));
+		}
+
+		ResolvedTargetObj = MakeShared<FJsonObject>();
+		ResolvedTargetObj->SetStringField(TEXT("graph_guid"), FoundGraph->GraphGuid.ToString());
+		ResolvedTargetObj->SetStringField(TEXT("graph_name"), FoundGraph->GetName());
+		ResolvedTargetObj->SetStringField(TEXT("graph_kind"), GraphKindToString(FoundKind));
+		ResolvedTargetObj->SetBoolField(TEXT("is_mutable"), IsMutableGraphKind(FoundKind));
+		if (!SubgraphPath.IsEmpty())
+		{
+			ResolvedTargetObj->SetStringField(TEXT("subgraph_path"), SubgraphPath);
+		}
+	}
+
+	// Validate node params against Blueprint context
+	FCortexCommandResult ValidateError;
+	if (!FCortexGraphNodeContract::Validate(NodeClassName, Blueprint, NodeParams, ValidateError))
+	{
+		return ValidateError;
+	}
+
+	// Populate resolved symbol if applicable
+	FName FamilyName;
+	UClass* DummyClass = nullptr;
+	FCortexGraphNodeContract::ResolveFamily(NodeClassName, FamilyName, DummyClass);
+
+	if (FamilyName == FName("CallFunction") || FamilyName == FName("Event"))
+	{
+		FCortexResolvedSymbol Symbol;
+		FCortexCommandResult SymError;
+		if (FCortexGraphSymbolResolver::ResolveFunction(Blueprint, NodeParams, Symbol, SymError))
+		{
+			Data->SetObjectField(TEXT("resolved_symbol"), Symbol.ToJson());
+		}
+	}
+	else if (FamilyName == FName("VariableGet") || FamilyName == FName("VariableSet"))
+	{
+		const bool bIsWrite = (FamilyName == FName("VariableSet"));
+		FCortexResolvedSymbol Symbol;
+		FCortexCommandResult SymError;
+		if (FCortexGraphSymbolResolver::ResolveProperty(Blueprint, NodeParams, bIsWrite, Symbol, SymError))
+		{
+			Data->SetObjectField(TEXT("resolved_symbol"), Symbol.ToJson());
+		}
+	}
+
+	// Allocate probe pins in real context without mutating Blueprint or its dirty state
+	const bool bWasDirty = Blueprint->GetOutermost()->IsDirty();
+	if (TSharedPtr<FJsonObject> Pins = AllocateProbePins(Blueprint, NodeClassName, NodeParams, NodeClass))
+	{
+		const TArray<TSharedPtr<FJsonValue>>* PinArray = nullptr;
+		if (Pins->TryGetArrayField(TEXT("pins"), PinArray) && PinArray != nullptr)
+		{
+			Data->SetArrayField(TEXT("expected_pins"), *PinArray);
+			Data->SetBoolField(TEXT("pins_allocated"), true);
+		}
+	}
+
+	// Guarantee zero mutation: dirty state must remain exactly as it was before
+	if (Blueprint->GetOutermost()->IsDirty() != bWasDirty)
+	{
+		Blueprint->GetOutermost()->SetDirtyFlag(bWasDirty);
+	}
+
+	// Set validation_status
+	if (bHasTarget)
+	{
+		Data->SetStringField(TEXT("validation_status"), TEXT("validated"));
+	}
+	else
+	{
+		Data->SetStringField(TEXT("validation_status"), TEXT("context_required"));
+	}
+
+	// Set context object
+	TSharedPtr<FJsonObject> ContextObj = MakeShared<FJsonObject>();
+	ContextObj->SetStringField(TEXT("asset_path"), Blueprint->GetPathName());
+	ContextObj->SetStringField(TEXT("self_class"),
+		Blueprint->GeneratedClass ? Blueprint->GeneratedClass->GetPathName() : (Blueprint->ParentClass ? Blueprint->ParentClass->GetPathName() : TEXT("")));
+	ContextObj->SetStringField(TEXT("parent_class"),
+		Blueprint->ParentClass ? Blueprint->ParentClass->GetPathName() : TEXT(""));
+	if (ResolvedTargetObj.IsValid())
+	{
+		ContextObj->SetObjectField(TEXT("target"), ResolvedTargetObj);
+	}
+	Data->SetObjectField(TEXT("context"), ContextObj);
 
 	return FCortexCommandRouter::Success(Data);
 }
@@ -1501,12 +1460,174 @@ bool FCortexGraphNodeOps::ShouldSkipPinCompact(const UEdGraphPin* Pin)
 		&& Pin->DefaultObject == nullptr;
 }
 
-TSharedRef<FJsonObject> FCortexGraphNodeOps::SerializePin(const UEdGraphPin* Pin, bool bDetailed, bool bCompact)
+TSharedRef<FJsonObject> FCortexGraphNodeOps::SerializePin(
+	const UEdGraphPin* Pin,
+	bool bDetailed,
+	bool bCompact,
+	const UBlueprint* ContextBlueprint)
 {
 	TSharedRef<FJsonObject> PinEntry = MakeShared<FJsonObject>();
 	PinEntry->SetStringField(TEXT("name"), Pin->PinName.ToString());
 	PinEntry->SetStringField(TEXT("direction"), Pin->Direction == EGPD_Input ? TEXT("input") : TEXT("output"));
 	PinEntry->SetStringField(TEXT("type"), Pin->PinType.PinCategory.ToString());
+	PinEntry->SetStringField(TEXT("category"), Pin->PinType.PinCategory.ToString());
+	PinEntry->SetStringField(TEXT("subcategory"), Pin->PinType.PinSubCategory.ToString());
+
+	FString SubCategoryObjectPath;
+	if (Pin->PinType.PinSubCategoryObject.IsValid())
+	{
+		SubCategoryObjectPath = Pin->PinType.PinSubCategoryObject->GetPathName();
+	}
+	else if (Pin->PinType.PinSubCategory == UEdGraphSchema_K2::PSC_Self)
+	{
+		const UBlueprint* BP = ContextBlueprint;
+		if (BP == nullptr && Pin->GetOwningNode() != nullptr)
+		{
+			BP = FBlueprintEditorUtils::FindBlueprintForNode(Pin->GetOwningNode());
+		}
+		if (BP != nullptr)
+		{
+			UClass* SelfClass = BP->GeneratedClass ? BP->GeneratedClass.Get() : (BP->SkeletonGeneratedClass ? BP->SkeletonGeneratedClass.Get() : BP->ParentClass.Get());
+			if (SelfClass != nullptr)
+			{
+				SubCategoryObjectPath = SelfClass->GetPathName();
+			}
+		}
+	}
+	PinEntry->SetStringField(TEXT("sub_category_object"), SubCategoryObjectPath);
+
+	FString ContainerTypeStr = TEXT("none");
+	switch (Pin->PinType.ContainerType)
+	{
+	case EPinContainerType::Array:
+		ContainerTypeStr = TEXT("array");
+		break;
+	case EPinContainerType::Set:
+		ContainerTypeStr = TEXT("set");
+		break;
+	case EPinContainerType::Map:
+		ContainerTypeStr = TEXT("map");
+		break;
+	default:
+		break;
+	}
+	PinEntry->SetStringField(TEXT("container_type"), ContainerTypeStr);
+
+	if (Pin->PinType.ContainerType == EPinContainerType::Map || !Pin->PinType.PinValueType.TerminalCategory.IsNone())
+	{
+		TSharedRef<FJsonObject> TermObj = MakeShared<FJsonObject>();
+		TermObj->SetStringField(TEXT("category"), Pin->PinType.PinValueType.TerminalCategory.ToString());
+		TermObj->SetStringField(TEXT("subcategory"), Pin->PinType.PinValueType.TerminalSubCategory.ToString());
+		TermObj->SetStringField(TEXT("sub_category_object"),
+			Pin->PinType.PinValueType.TerminalSubCategoryObject.IsValid() ? Pin->PinType.PinValueType.TerminalSubCategoryObject->GetPathName() : TEXT(""));
+		TermObj->SetBoolField(TEXT("is_const"), Pin->PinType.PinValueType.bTerminalIsConst);
+		PinEntry->SetObjectField(TEXT("map_terminal_type"), TermObj);
+	}
+
+	PinEntry->SetBoolField(TEXT("is_reference"), (bool)Pin->PinType.bIsReference);
+	PinEntry->SetBoolField(TEXT("is_const"), (bool)Pin->PinType.bIsConst);
+	PinEntry->SetBoolField(TEXT("is_advanced"), (bool)Pin->bAdvancedView);
+	PinEntry->SetBoolField(TEXT("is_hidden"), (bool)Pin->bHidden);
+
+	if (Pin->Direction == EGPD_Input)
+	{
+		TSharedPtr<FJsonObject> DefaultDesc = MakeShared<FJsonObject>();
+		if (Pin->DefaultObject != nullptr)
+		{
+			DefaultDesc->SetStringField(TEXT("kind"), FCortexGraphPinDefaults::ReferenceLiteralKind(*Pin));
+			DefaultDesc->SetStringField(TEXT("path"), Pin->DefaultObject->GetPathName());
+		}
+		else if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Text)
+		{
+			DefaultDesc->SetStringField(TEXT("kind"), TEXT("text"));
+			if (!Pin->DefaultTextValue.IsEmpty())
+			{
+				DefaultDesc->SetObjectField(TEXT("value"), FCortexSerializer::TextToJson(Pin->DefaultTextValue));
+			}
+			else if (!Pin->DefaultValue.IsEmpty())
+			{
+				DefaultDesc->SetObjectField(TEXT("value"), FCortexSerializer::TextToJson(FText::FromString(Pin->DefaultValue)));
+			}
+			else
+			{
+				DefaultDesc->SetObjectField(TEXT("value"), FCortexSerializer::TextToJson(FText::GetEmpty()));
+			}
+		}
+		else if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Boolean)
+		{
+			if (!Pin->DefaultValue.IsEmpty())
+			{
+				DefaultDesc->SetStringField(TEXT("kind"), TEXT("bool"));
+				DefaultDesc->SetBoolField(TEXT("value"), Pin->DefaultValue.ToBool());
+			}
+		}
+		else if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Byte && Pin->PinType.PinSubCategoryObject.IsValid())
+		{
+			if (!Pin->DefaultValue.IsEmpty())
+			{
+				DefaultDesc->SetStringField(TEXT("kind"), TEXT("enum"));
+				DefaultDesc->SetStringField(TEXT("value"), Pin->DefaultValue);
+			}
+		}
+		else if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Int || Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Int64 || Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Byte)
+		{
+			if (!Pin->DefaultValue.IsEmpty())
+			{
+				DefaultDesc->SetStringField(TEXT("kind"), TEXT("int"));
+				DefaultDesc->SetNumberField(TEXT("value"), FCString::Atoi64(*Pin->DefaultValue));
+			}
+		}
+		else if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Real || Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Float || Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Double)
+		{
+			if (!Pin->DefaultValue.IsEmpty())
+			{
+				DefaultDesc->SetStringField(TEXT("kind"), TEXT("real"));
+				DefaultDesc->SetNumberField(TEXT("value"), FCString::Atod(*Pin->DefaultValue));
+			}
+		}
+		else if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_String)
+		{
+			if (!Pin->DefaultValue.IsEmpty())
+			{
+				DefaultDesc->SetStringField(TEXT("kind"), TEXT("string"));
+				DefaultDesc->SetStringField(TEXT("value"), Pin->DefaultValue);
+			}
+		}
+		else if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Name)
+		{
+			if (!Pin->DefaultValue.IsEmpty())
+			{
+				DefaultDesc->SetStringField(TEXT("kind"), TEXT("name"));
+				DefaultDesc->SetStringField(TEXT("value"), Pin->DefaultValue);
+			}
+		}
+		else if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Enum)
+		{
+			if (!Pin->DefaultValue.IsEmpty())
+			{
+				DefaultDesc->SetStringField(TEXT("kind"), TEXT("enum"));
+				DefaultDesc->SetStringField(TEXT("value"), Pin->DefaultValue);
+			}
+		}
+		else if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Object || Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Class || Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_SoftObject || Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_SoftClass)
+		{
+			if (Pin->DefaultValue.Equals(TEXT("None"), ESearchCase::IgnoreCase))
+			{
+				DefaultDesc->SetStringField(TEXT("kind"), TEXT("null"));
+			}
+			else if (!Pin->DefaultValue.IsEmpty())
+			{
+				DefaultDesc->SetStringField(TEXT("kind"), FCortexGraphPinDefaults::ReferenceLiteralKind(*Pin));
+				DefaultDesc->SetStringField(TEXT("path"), Pin->DefaultValue);
+			}
+		}
+
+		if (DefaultDesc->HasField(TEXT("kind")))
+		{
+			PinEntry->SetObjectField(TEXT("default_descriptor"), DefaultDesc);
+		}
+	}
+
 	if (bDetailed)
 	{
 		const bool bIsConnected = Pin->LinkedTo.Num() > 0;
@@ -1551,6 +1672,12 @@ TSharedRef<FJsonObject> FCortexGraphNodeOps::SerializeNode(const UEdGraphNode* N
 {
 	TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
 	Entry->SetStringField(TEXT("node_id"), Node->GetName());
+	// The canonical node identity, additive next to the unchanged name-based node_id, so a client can
+	// reconcile the deterministic identities it planned by inspection alone.
+	if (Node->NodeGuid.IsValid())
+	{
+		Entry->SetStringField(TEXT("node_guid"), Node->NodeGuid.ToString());
+	}
 
 	const FString ClassName = Node->GetClass()->GetName();
 	Entry->SetStringField(TEXT("class"), ClassName);
@@ -1599,6 +1726,7 @@ TSharedRef<FJsonObject> FCortexGraphNodeOps::SerializeNode(const UEdGraphNode* N
 	if (bIncludePins)
 	{
 		TArray<TSharedPtr<FJsonValue>> PinsArray;
+		UBlueprint* BP = Node ? FBlueprintEditorUtils::FindBlueprintForNode(Node) : nullptr;
 		for (UEdGraphPin* Pin : Node->Pins)
 		{
 			if (Pin == nullptr)
@@ -1609,7 +1737,7 @@ TSharedRef<FJsonObject> FCortexGraphNodeOps::SerializeNode(const UEdGraphNode* N
 			{
 				continue;
 			}
-			PinsArray.Add(MakeShared<FJsonValueObject>(SerializePin(Pin, true, bCompact)));
+			PinsArray.Add(MakeShared<FJsonValueObject>(SerializePin(Pin, true, bCompact, BP)));
 		}
 		Entry->SetArrayField(TEXT("pins"), PinsArray);
 	}
@@ -2156,6 +2284,11 @@ FCortexCommandResult FCortexGraphNodeOps::AutoLayout(const TSharedPtr<FJsonObjec
 
 	FString SubgraphPath;
 	Params->TryGetStringField(TEXT("subgraph_path"), SubgraphPath);
+	if (!SubgraphPath.IsEmpty() && GraphFilter.IsEmpty())
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+			TEXT("subgraph_path requires graph_name"));
+	}
 
 	// Collect graphs to process
 	TArray<UEdGraph*> Graphs;
@@ -2193,13 +2326,9 @@ FCortexCommandResult FCortexGraphNodeOps::AutoLayout(const TSharedPtr<FJsonObjec
 	}
 
 	int32 TotalNodesProcessed = 0;
+	int32 ChangedNodeCount = 0;
 
 	TUniquePtr<FScopedTransaction> Transaction;
-	if (!FCortexCommandRouter::IsInBatch())
-	{
-		Transaction = MakeUnique<FScopedTransaction>(
-			FText::FromString(TEXT("Cortex: Auto-Layout Blueprint Graphs")));
-	}
 
 	for (UEdGraph* Graph : Graphs)
 	{
@@ -2222,8 +2351,6 @@ FCortexCommandResult FCortexGraphNodeOps::AutoLayout(const TSharedPtr<FJsonObjec
 
 			bool bHasExecInput = false;
 			bool bHasExecOutput = false;
-			int32 InputPinCount = 0;
-			int32 OutputPinCount = 0;
 
 			for (UEdGraphPin* Pin : Node->Pins)
 			{
@@ -2231,21 +2358,26 @@ FCortexCommandResult FCortexGraphNodeOps::AutoLayout(const TSharedPtr<FJsonObjec
 				bool bIsExec = (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec);
 				if (Pin->Direction == EGPD_Input)
 				{
-					InputPinCount++;
 					if (bIsExec) bHasExecInput = true;
 				}
 				else
 				{
-					OutputPinCount++;
 					if (bIsExec) bHasExecOutput = true;
 				}
 			}
 
 			LN.bIsEntryPoint = (!bHasExecInput && bHasExecOutput);
 			LN.bIsExecNode = (bHasExecInput || bHasExecOutput);
-			int32 PinRows = FMath::Max(InputPinCount, OutputPinCount);
-			LN.Width = 200;
-			LN.Height = FMath::Max(100, PinRows * 28 + 40);
+			const TSharedPtr<SGraphNode> Widget = FNodeFactory::CreateNodeWidget(Node);
+			if (!Widget.IsValid())
+			{
+				return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+					FString::Printf(TEXT("Cannot measure graph node: %s"), *Node->GetName()));
+			}
+			Widget->SlatePrepass(1.0f);
+			const FVector2D BodySize = Widget->GetDesiredSize();
+			LN.Width = FMath::Max(1, FMath::CeilToInt(BodySize.X));
+			LN.Height = FMath::Max(1, FMath::CeilToInt(BodySize.Y));
 
 			for (UEdGraphPin* Pin : Node->Pins)
 			{
@@ -2281,18 +2413,32 @@ FCortexCommandResult FCortexGraphNodeOps::AutoLayout(const TSharedPtr<FJsonObjec
 		FCortexLayoutResult LayoutResult = FCortexGraphLayoutOps::CalculateLayout(
 			LayoutNodes, Config, ExistingPositions);
 
+		bool bGraphChanged = false;
 		for (const auto& Pair : LayoutResult.Positions)
 		{
 			UEdGraphNode** NodePtr = IdToNode.Find(Pair.Key);
-			if (NodePtr && *NodePtr)
+			if (NodePtr && *NodePtr &&
+				((*NodePtr)->NodePosX != Pair.Value.X || (*NodePtr)->NodePosY != Pair.Value.Y))
 			{
+				if (!bGraphChanged)
+				{
+					if (!Transaction && !FCortexCommandRouter::IsInBatch())
+					{
+						Transaction = MakeUnique<FScopedTransaction>(
+							FText::FromString(TEXT("Cortex: Auto-Layout Blueprint Graphs")));
+					}
+					Blueprint->Modify();
+					Graph->Modify();
+					bGraphChanged = true;
+				}
 				(*NodePtr)->Modify();
 				(*NodePtr)->NodePosX = Pair.Value.X;
 				(*NodePtr)->NodePosY = Pair.Value.Y;
+				++ChangedNodeCount;
 			}
 		}
 
-		if (FCortexCommandRouter::IsInBatch())
+		if (bGraphChanged && FCortexCommandRouter::IsInBatch())
 		{
 			FString GraphKey = FString::Printf(TEXT("graph.notify.%s"), *Graph->GetPathName());
 			FCortexBatchScope::AddCleanupAction(GraphKey,
@@ -2301,7 +2447,7 @@ FCortexCommandResult FCortexGraphNodeOps::AutoLayout(const TSharedPtr<FJsonObjec
 					if (UEdGraph* G = WeakGraph.Get()) G->NotifyGraphChanged();
 				});
 		}
-		else
+		else if (bGraphChanged)
 		{
 			Graph->NotifyGraphChanged();
 		}
@@ -2309,28 +2455,33 @@ FCortexCommandResult FCortexGraphNodeOps::AutoLayout(const TSharedPtr<FJsonObjec
 		TotalNodesProcessed += LayoutResult.Positions.Num();
 	}
 
-	if (FCortexCommandRouter::IsInBatch())
+	if (ChangedNodeCount > 0)
 	{
-		FString BPKey = FString::Printf(TEXT("blueprint.modified.%s"), *Blueprint->GetPathName());
-		FCortexBatchScope::AddCleanupAction(BPKey,
-			[WeakBP = TWeakObjectPtr<UBlueprint>(Blueprint)]()
-			{
-				if (UBlueprint* BP = WeakBP.Get())
+		if (FCortexCommandRouter::IsInBatch())
+		{
+			FString BPKey = FString::Printf(TEXT("blueprint.modified.%s"), *Blueprint->GetPathName());
+			FCortexBatchScope::AddCleanupAction(BPKey,
+				[WeakBP = TWeakObjectPtr<UBlueprint>(Blueprint)]()
 				{
-					FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
-				}
-			});
+					if (UBlueprint* BP = WeakBP.Get())
+					{
+						FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
+					}
+				});
+		}
+		else
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+		}
+		Blueprint->MarkPackageDirty();
 	}
-	else
-	{
-		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
-	}
-	Blueprint->MarkPackageDirty();
 
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetStringField(TEXT("asset_path"), AssetPath);
 	Data->SetNumberField(TEXT("node_count"), TotalNodesProcessed);
 	Data->SetNumberField(TEXT("graphs_processed"), Graphs.Num());
+	Data->SetNumberField(TEXT("changed_node_count"), ChangedNodeCount);
+	Data->SetBoolField(TEXT("unchanged"), ChangedNodeCount == 0);
 
 	UE_LOG(LogCortexGraph, Log, TEXT("Auto-layout completed: %d nodes across %d graphs in %s"),
 		TotalNodesProcessed, Graphs.Num(), *AssetPath);

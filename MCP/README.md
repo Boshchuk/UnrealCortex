@@ -105,12 +105,41 @@ Namespace prefix routes to the registered domain handler in C++. Built-in comman
 ## Testing
 
 ```bash
-# Unit tests (no editor required)
-cd Plugins/UnrealCortex/MCP
-uv run pytest tests/ -v -k "not e2e"
+# From a standalone UnrealCortex checkout (use Plugins/UnrealCortex/MCP in a host project)
+cd MCP
+rtk proxy uv sync --group dev
+
+# Offline tests: no editor or host .uproject required
+rtk proxy uv run pytest tests/ -m "not e2e and not scenario and not stress" -v
+rtk proxy uv run python scripts/sync_fallback.py --from-fixture --check
 
 # E2E tests (requires running UE editor)
-uv run pytest tests/test_e2e.py -v
+rtk proxy uv run pytest tests/ -m "e2e and not stress" -v
 ```
 
-First run: `uv add --dev pytest pytest-cov`
+Use marker selection (`-m`), rather than test-name selection (`-k`), to exclude
+editor tests. Live scenario modules also carry `e2e`, so
+`-m "not e2e and not stress"` is an equivalent offline selection today.
+An explicit `CORTEX_PROJECT_DIR` selects the project for connected tests; the
+connection fixture temporarily supplies the containing workspace only when this
+variable is absent and restores it even if discovery or connection fails.
+
+Schema and project-discovery unit tests create temporary project layouts.
+Checks of sibling `cortex-toolkit/` resources and CortexSandbox workspace docs
+skip with a named prerequisite when those directories are absent. When present,
+the checks still fail on missing files or invalid content. Toolkit example
+scenarios require `cortex-toolkit/examples/typed-blueprint-authoring/` as well as
+a live editor. Other live tests may require CortexSandbox assets and classes;
+this offline isolation change does not make them generic host-project tests.
+
+### Blueprint migration cleanup persistence
+
+`cleanup_blueprint_migration` and `blueprint.cleanup_migration` accept strict boolean `compile` and `save`, both defaulting to `true` for existing callers. `save=false` stages cleanup in memory and leaves package bytes on disk unchanged; compilation is independent. The response reports `saved`, `is_dirty`, `compiled` and `compile_status`. A compiler-error result is not saved. Saving writes the entire package, including any edits that were already dirty before cleanup. With `migrated_overrides`, initial cleanup and orphan pruning stay unsaved and uncompiled; final cleanup performs the requested compile/save after all pruning, and its final state is returned with the original mutation inventory.
+
+### UMG widget rename contract
+
+`umg.rename_widget` / `rename_widget` performs a guarded in-memory widget rename with structural and skeleton refresh (`skeleton_regenerated=true`, `saved=false`), leaving package saving and full recompilation to caller orchestration:
+- **Identifier discipline:** Requires literal identifier `new_name` (must begin with a letter or underscore, alphanumeric/underscore characters only, non-empty, length below `NAME_SIZE`). Sanitizing, slugging, and case-only renames are rejected.
+- **Fingerprint pre-condition:** Requires complete widget tree `expected_fingerprint` containing `compiled_signature_crc`. A mismatching supplied fingerprint returns `StalePrecondition`.
+- **Containment safeguards:** Refuses rename if loaded child Blueprints or external Blueprints reference the widget member or any generated UI-component member attached to it (`InvalidOperation`), preventing unguarded external package mutation. Class-instance-only dependencies do not block rename.
+- **Binding & animation preservation:** Maintains engine reference-aware rename for widget tree, property bindings, focus, navigation, and child variables, and guarantees all widget animation bindings are updated—including cases where slot bindings precede direct bindings for the same widget. Preserves slot names, GUIDs, MovieScene possessables, tracks, section ranges, and keyed values across the rename.

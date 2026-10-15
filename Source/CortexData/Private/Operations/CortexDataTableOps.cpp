@@ -586,10 +586,9 @@ FCortexCommandResult FCortexDataTableOps::AddDatatableRow(const TSharedPtr<FJson
 	{
 		RowStruct->DestroyStruct(RowMemory);
 		FMemory::Free(RowMemory);
-		return FCortexCommandRouter::Error(
-			CortexErrorCodes::SerializationError,
-			TEXT("Failed to deserialize row_data into row struct")
-		);
+		return FCortexDataMutationHelpers::MakeDeserializeError(
+			Warnings,
+			TEXT("Failed to deserialize row_data into row struct")).ToCommandResult();
 	}
 
 	FScopedTransaction Transaction(FText::FromString(
@@ -1303,7 +1302,68 @@ FCortexCommandResult FCortexDataTableOps::GetDataCatalog(const TSharedPtr<FJsonO
 {
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 
+	// Parse and validate the section selection BEFORE any per-section registry/load work. An
+	// omitted or empty 'sections' builds every section; an unknown name refuses instead of
+	// silently building everything.
+	static const FString SectionDatatables = TEXT("datatables");
+	static const FString SectionGameplayTags = TEXT("gameplay_tags");
+	static const FString SectionDataAssets = TEXT("data_assets");
+	static const FString SectionStringTables = TEXT("string_tables");
+	static const FString SectionCurveTables = TEXT("curve_tables");
+
+	TSet<FString> SelectedSections;
+	if (Params.IsValid() && Params->HasField(TEXT("sections")))
+	{
+		const TArray<TSharedPtr<FJsonValue>>* SectionsArray = nullptr;
+		if (!Params->TryGetArrayField(TEXT("sections"), SectionsArray) || SectionsArray == nullptr)
+		{
+			return FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidField,
+				TEXT("'sections' must be an array of section names"));
+		}
+
+		for (const TSharedPtr<FJsonValue>& SectionValue : *SectionsArray)
+		{
+			FString SectionName;
+			if (!SectionValue.IsValid() || !SectionValue->TryGetString(SectionName) || SectionName.IsEmpty())
+			{
+				return FCortexCommandRouter::Error(
+					CortexErrorCodes::InvalidField,
+					TEXT("Every 'sections' entry must be a non-empty section name string"));
+			}
+
+			if (SectionName != SectionDatatables
+				&& SectionName != SectionGameplayTags
+				&& SectionName != SectionDataAssets
+				&& SectionName != SectionStringTables
+				&& SectionName != SectionCurveTables)
+			{
+				return FCortexCommandRouter::Error(
+					CortexErrorCodes::InvalidField,
+					FString::Printf(
+						TEXT("Unknown catalog section '%s'. Valid sections: datatables, gameplay_tags, "
+							 "data_assets, string_tables, curve_tables"),
+						*SectionName));
+			}
+
+			SelectedSections.Add(SectionName);
+		}
+	}
+
+	const bool bAllSections = SelectedSections.Num() == 0;
+	auto bBuildSection = [&SelectedSections, bAllSections](const FString& SectionName)
+	{
+		return bAllSections || SelectedSections.Contains(SectionName);
+	};
+
+	bool bIncludeAssetPaths = false;
+	if (Params.IsValid())
+	{
+		Params->TryGetBoolField(TEXT("include_asset_paths"), bIncludeAssetPaths);
+	}
+
 	// --- DataTables section ---
+	if (bBuildSection(SectionDatatables))
 	{
 		TArray<TSharedPtr<FJsonValue>> DatatablesArray;
 
@@ -1378,6 +1438,7 @@ FCortexCommandResult FCortexDataTableOps::GetDataCatalog(const TSharedPtr<FJsonO
 	}
 
 	// --- GameplayTag prefixes section ---
+	if (bBuildSection(SectionGameplayTags))
 	{
 		UGameplayTagsManager& TagManager = UGameplayTagsManager::Get();
 		FGameplayTagContainer AllTags;
@@ -1413,6 +1474,7 @@ FCortexCommandResult FCortexDataTableOps::GetDataCatalog(const TSharedPtr<FJsonO
 	}
 
 	// --- DataAsset classes section ---
+	if (bBuildSection(SectionDataAssets))
 	{
 		IAssetRegistry* AssetRegistry = IAssetRegistry::Get();
 		if (AssetRegistry != nullptr)
@@ -1444,7 +1506,10 @@ FCortexCommandResult FCortexDataTableOps::GetDataCatalog(const TSharedPtr<FJsonO
 				FString ClassName = AssetData.AssetClassPath.GetAssetName().ToString();
 				const FString ObjectPath = AssetData.GetObjectPathString();
 				ClassCounts.FindOrAdd(ClassName)++;
-				ClassAssetPaths.FindOrAdd(ClassName).Add(ObjectPath);
+				if (bIncludeAssetPaths)
+				{
+					ClassAssetPaths.FindOrAdd(ClassName).Add(ObjectPath);
+				}
 				if (!ClassExamplePath.Contains(ClassName))
 				{
 					ClassExamplePath.Add(ClassName, ObjectPath);
@@ -1482,6 +1547,7 @@ FCortexCommandResult FCortexDataTableOps::GetDataCatalog(const TSharedPtr<FJsonO
 	}
 
 	// --- StringTables section ---
+	if (bBuildSection(SectionStringTables))
 	{
 		IAssetRegistry* AssetRegistry = IAssetRegistry::Get();
 		if (AssetRegistry != nullptr)
@@ -1545,6 +1611,7 @@ FCortexCommandResult FCortexDataTableOps::GetDataCatalog(const TSharedPtr<FJsonO
 	}
 
 	// --- CurveTables section ---
+	if (bBuildSection(SectionCurveTables))
 	{
 		IAssetRegistry* AssetRegistry = IAssetRegistry::Get();
 		if (AssetRegistry != nullptr)

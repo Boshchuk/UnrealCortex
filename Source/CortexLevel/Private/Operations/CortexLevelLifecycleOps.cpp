@@ -1,5 +1,8 @@
 #include "Operations/CortexLevelLifecycleOps.h"
+#include "CortexEditorUtils.h"
 
+#include "CortexEditorUtils.h"
+#include "CortexEngineCompat.h"
 #include "CortexTypes.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Editor.h"
@@ -93,10 +96,11 @@ FCortexCommandResult FCortexLevelLifecycleOps::CreateLevel(const TSharedPtr<FJso
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter, TEXT("Missing required parameter: path"));
 	}
 
-	if (!IsValidContentPath(Path))
+	FString ValidationError;
+	if (!ValidateContentPath(Path, ValidationError))
 	{
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter,
-			FString::Printf(TEXT("Invalid content path: %s. Must start with /Game/ or /Plugins/"), *Path));
+			ValidationError);
 	}
 
 	if (DoesLevelExist(Path))
@@ -204,7 +208,7 @@ FCortexCommandResult FCortexLevelLifecycleOps::CreateLevel(const TSharedPtr<FJso
 			if (!TemplateWorld)
 			{
 				// Fallback: scan the package for any UWorld
-				ForEachObjectWithPackage(TemplatePackage, [&TemplateWorld](UObject* Obj)
+				CortexEngineCompat::ForEachObjectWithPackage(TemplatePackage, [&TemplateWorld](UObject* Obj)
 				{
 					if (!TemplateWorld && Obj && Obj->IsA<UWorld>())
 					{
@@ -240,7 +244,16 @@ FCortexCommandResult FCortexLevelLifecycleOps::CreateLevel(const TSharedPtr<FJso
 			SaveArgs.TopLevelFlags = RF_Standalone;
 			const bool bSaved = UPackage::SavePackage(DestPackage, NewWorld, *FilePath, SaveArgs);
 
-			NewWorld->DestroyWorld(false);
+			// Loaded template duplicates have no initialized world resources to tear down.
+			if (NewWorld->IsInitialized())
+			{
+				NewWorld->DestroyWorld(false);
+			}
+			else
+			{
+				NewWorld->RemoveFromRoot();
+				NewWorld->ClearFlags(RF_Standalone);
+			}
 
 			if (!bSaved)
 			{
@@ -266,8 +279,10 @@ FCortexCommandResult FCortexLevelLifecycleOps::CreateLevel(const TSharedPtr<FJso
 
 			bIsWorldPartition = NewWorld->IsPartitionedWorld();
 
-			// RF_Standalone must be set on the asset object itself before saving
-			NewWorld->SetFlags(RF_Standalone);
+			// RF_Public as well as RF_Standalone: UWorld::CreateWorld sets neither, and without
+			// RF_Public the in-memory world is not an asset (UObject::IsAsset), so asset operations
+			// on it - rename_level, for one - fail until the package is unloaded and reloaded.
+			NewWorld->SetFlags(RF_Public | RF_Standalone);
 
 			const FString FilePath = FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetMapPackageExtension());
 			FSavePackageArgs SaveArgs;
@@ -303,10 +318,11 @@ FCortexCommandResult FCortexLevelLifecycleOps::OpenLevel(const TSharedPtr<FJsonO
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter, TEXT("Missing required parameter: path"));
 	}
 
-	if (!IsValidContentPath(Path))
+	FString ValidationError;
+	if (!ValidateContentPath(Path, ValidationError))
 	{
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter,
-			FString::Printf(TEXT("Invalid content path: %s"), *Path));
+			ValidationError);
 	}
 
 	if (!DoesLevelExist(Path))
@@ -390,16 +406,17 @@ FCortexCommandResult FCortexLevelLifecycleOps::DuplicateLevel(const TSharedPtr<F
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter, TEXT("Missing required parameter: dest_path"));
 	}
 
-	if (!IsValidContentPath(SourcePath))
+	FString ValidationError;
+	if (!ValidateContentPath(SourcePath, ValidationError))
 	{
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter,
-			FString::Printf(TEXT("Invalid source path: %s"), *SourcePath));
+			ValidationError);
 	}
 
-	if (!IsValidContentPath(DestPath))
+	if (!ValidateContentPath(DestPath, ValidationError))
 	{
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter,
-			FString::Printf(TEXT("Invalid dest path: %s"), *DestPath));
+			ValidationError);
 	}
 
 	if (!DoesLevelExist(SourcePath))
@@ -480,9 +497,17 @@ FCortexCommandResult FCortexLevelLifecycleOps::RenameLevel(const TSharedPtr<FJso
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter, TEXT("Missing required parameter: new_path"));
 	}
 
-	if (!IsValidContentPath(Path) || !IsValidContentPath(NewPath))
+	FString ValidationError;
+	if (!ValidateContentPath(Path, ValidationError))
 	{
-		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter, TEXT("Invalid content path"));
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter,
+			ValidationError);
+	}
+
+	if (!ValidateContentPath(NewPath, ValidationError))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter,
+			ValidationError);
 	}
 
 	if (!DoesLevelExist(Path))
@@ -547,10 +572,11 @@ FCortexCommandResult FCortexLevelLifecycleOps::DeleteLevel(const TSharedPtr<FJso
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter, TEXT("Missing required parameter: path"));
 	}
 
-	if (!IsValidContentPath(Path))
+	FString ValidationError;
+	if (!ValidateContentPath(Path, ValidationError))
 	{
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidParameter,
-			FString::Printf(TEXT("Invalid content path: %s"), *Path));
+			ValidationError);
 	}
 
 	if (!DoesLevelExist(Path))
@@ -623,7 +649,7 @@ FCortexCommandResult FCortexLevelLifecycleOps::DeleteLevel(const TSharedPtr<FJso
 	if (!LevelAsset)
 	{
 		// Try finding any UWorld in the package
-		ForEachObjectWithPackage(Package, [&LevelAsset](UObject* Obj)
+		CortexEngineCompat::ForEachObjectWithPackage(Package, [&LevelAsset](UObject* Obj)
 		{
 			if (!LevelAsset && Obj && Obj->IsA<UWorld>())
 			{
@@ -726,9 +752,17 @@ bool FCortexLevelLifecycleOps::IsCurrentLevelDirty()
 	return false;
 }
 
-bool FCortexLevelLifecycleOps::IsValidContentPath(const FString& Path)
+bool FCortexLevelLifecycleOps::ValidateContentPath(const FString& Path, FString& OutError)
 {
-	return Path.StartsWith(TEXT("/Game/")) || Path.StartsWith(TEXT("/Plugins/"));
+	OutError.Reset();
+
+	if (!FPackageName::IsValidLongPackageName(Path))
+	{
+		OutError = FString::Printf(TEXT("Invalid long package name: %s"), *Path);
+		return false;
+	}
+
+	return FCortexEditorUtils::IsWritableMountedContentPath(Path, OutError);
 }
 
 bool FCortexLevelLifecycleOps::DoesLevelExist(const FString& ContentPath)

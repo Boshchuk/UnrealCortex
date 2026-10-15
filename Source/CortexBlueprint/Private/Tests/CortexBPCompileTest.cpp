@@ -1,17 +1,22 @@
 #include "Misc/AutomationTest.h"
 #include "CortexBPCommandHandler.h"
 #include "CortexCommandRouter.h"
+#include "CortexAssetMutationGuard.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Containers/Ticker.h"
+#include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/Blueprint.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "EdGraph/EdGraph.h"
 #include "K2Node_CallFunction.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
 #include "GameFramework/Actor.h"
 #include "Misc/Guid.h"
 #include "UObject/UObjectIterator.h"
+#include "Editor.h"
+#include "Editor/Transactor.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexBPCompileTest,
@@ -175,6 +180,62 @@ bool FCortexBPCompileTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexBPBlockedMutationDispatchTest,
+	"Cortex.Blueprint.Compile.BlockedMutationDispatch",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexBPBlockedMutationDispatchTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	UPackage* Package = CreatePackage(TEXT("/Game/Blueprints/BP"));
+	UBlueprint* Blueprint = FKismetEditorUtilities::CreateBlueprint(
+		AActor::StaticClass(), Package, FName("BP"), BPTYPE_Normal,
+		UBlueprint::StaticClass(), UBlueprintGeneratedClass::StaticClass());
+	TestNotNull(TEXT("blocked Blueprint fixture created"), Blueprint);
+	if (!Blueprint) return false;
+	Package->SetDirtyFlag(false);
+	FCortexAssetMutationGuard::Block(Blueprint, TEXT("forced recovery verification failure"));
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("asset_path"), TEXT("Blueprints/BP.BP"));
+	FCortexBPCommandHandler Handler;
+	const FCortexCommandResult CompileResult = Handler.Execute(TEXT("compile"), Params);
+	const FCortexCommandResult SaveResult = Handler.Execute(TEXT("save"), Params);
+	TestFalse(TEXT("relative alias compile refuses canonical blocked asset before load side effects"), CompileResult.bSuccess);
+	TestEqual(TEXT("relative alias compile refusal is guard-specific"), CompileResult.ErrorCode, CortexErrorCodes::InvalidOperation);
+	TestTrue(TEXT("relative alias compile refusal identifies blocked asset"), CompileResult.ErrorMessage.Contains(TEXT("Asset is blocked after failed recovery")));
+	TestFalse(TEXT("relative alias save refuses canonical blocked asset before load side effects"), SaveResult.bSuccess);
+	TestEqual(TEXT("relative alias save refusal is guard-specific"), SaveResult.ErrorCode, CortexErrorCodes::InvalidOperation);
+	TSharedPtr<FJsonObject> DefaultsParams = MakeShared<FJsonObject>();
+	DefaultsParams->SetStringField(TEXT("blueprint_path"), TEXT("Blueprints/BP.BP"));
+	TSharedPtr<FJsonObject> Properties = MakeShared<FJsonObject>();
+	Properties->SetNumberField(TEXT("InitialLifeSpan"), 12.0);
+	DefaultsParams->SetObjectField(TEXT("properties"), Properties);
+	const FCortexCommandResult DefaultsResult = Handler.Execute(TEXT("set_class_defaults"), DefaultsParams);
+	TestFalse(TEXT("blueprint_path alias blocks class defaults before side effects"), DefaultsResult.bSuccess);
+	TestEqual(TEXT("blueprint_path refusal is guard-specific"), DefaultsResult.ErrorCode, CortexErrorCodes::InvalidOperation);
+	TestFalse(TEXT("blocked alias dispatch leaves package clean"), Package->IsDirty());
+	TestTrue(TEXT("relative alias read dispatch remains available"),
+		Handler.Execute(TEXT("get_info"), Params).bSuccess);
+	if (GEditor && GEditor->Trans)
+	{
+		GEditor->Trans->Reset(FText::FromString(TEXT("CortexBPBlockedMutationCleanup")));
+	}
+	if (Blueprint->IsRooted())
+	{
+		Blueprint->RemoveFromRoot();
+	}
+	Blueprint->ClearFlags(RF_Standalone);
+	Blueprint->MarkAsGarbage();
+	if (Package->IsRooted())
+	{
+		Package->RemoveFromRoot();
+	}
+	Package->ClearFlags(RF_Standalone);
+	Package->MarkAsGarbage();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexBPCompileWarningContractTest,
 	"Cortex.Blueprint.CompileWarningContract",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
@@ -183,7 +244,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCortexBPCompileWarningContractTest::RunTest(const FString& Parameters)
 {
 	FCortexBPCommandHandler Handler;
-	const FString UniqueSuffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString UniqueSuffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	const FString BlueprintName = FString::Printf(TEXT("BP_CompileWarn_%s"), *UniqueSuffix);
 	const FString BlueprintDir = FString::Printf(TEXT("/Game/Temp/CortexBPTest_CompileWarn_%s"), *UniqueSuffix);
 	const FString BlueprintPath = FString::Printf(TEXT("%s/%s"), *BlueprintDir, *BlueprintName);
@@ -220,6 +281,8 @@ bool FCortexBPCompileWarningContractTest::RunTest(const FString& Parameters)
 	{
 		UFunction* Function = *It;
 		if (!Function
+			|| Function->HasAnyFlags(RF_MirroredGarbage | RF_NewerVersionExists)
+			|| !IsValid(Function)
 			|| !Function->HasAllFunctionFlags(FUNC_BlueprintCallable | FUNC_Static)
 			|| !Function->HasMetaData(TEXT("DeprecatedFunction")))
 		{
@@ -227,7 +290,11 @@ bool FCortexBPCompileWarningContractTest::RunTest(const FString& Parameters)
 		}
 
 		UClass* OwnerClass = Function->GetOwnerClass();
-		if (!OwnerClass || !OwnerClass->IsChildOf(UBlueprintFunctionLibrary::StaticClass()))
+		if (!OwnerClass
+			|| OwnerClass->HasAnyFlags(RF_MirroredGarbage | RF_NewerVersionExists)
+			|| !IsValid(OwnerClass)
+			|| !OwnerClass->IsNative()
+			|| !OwnerClass->IsChildOf(UBlueprintFunctionLibrary::StaticClass()))
 		{
 			continue;
 		}
@@ -239,6 +306,8 @@ bool FCortexBPCompileWarningContractTest::RunTest(const FString& Parameters)
 	{
 		UFunction* Function = *It;
 		if (!Function
+			|| Function->HasAnyFlags(RF_MirroredGarbage | RF_NewerVersionExists)
+			|| !IsValid(Function)
 			|| !Function->HasAllFunctionFlags(FUNC_BlueprintCallable)
 			|| Function->HasAnyFunctionFlags(FUNC_Static)
 			|| !Function->HasMetaData(TEXT("DeprecatedFunction")))
@@ -247,7 +316,11 @@ bool FCortexBPCompileWarningContractTest::RunTest(const FString& Parameters)
 		}
 
 		UClass* OwnerClass = Function->GetOwnerClass();
-		if (!OwnerClass || !OwnerClass->IsChildOf(AActor::StaticClass()))
+		if (!OwnerClass
+			|| OwnerClass->HasAnyFlags(RF_MirroredGarbage | RF_NewerVersionExists)
+			|| !IsValid(OwnerClass)
+			|| !OwnerClass->IsNative()
+			|| !OwnerClass->IsChildOf(AActor::StaticClass()))
 		{
 			continue;
 		}
@@ -296,6 +369,7 @@ bool FCortexBPCompileWarningContractTest::RunTest(const FString& Parameters)
 		}
 
 		EventGraph->RemoveNode(Node);
+		Node->MarkAsGarbage();
 		FBlueprintEditorUtils::MarkBlueprintAsModified(TestBP);
 		FTSTicker::GetCoreTicker().Tick(0.0f);
 	}

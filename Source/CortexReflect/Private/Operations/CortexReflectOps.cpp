@@ -1,4 +1,5 @@
 #include "Operations/CortexReflectOps.h"
+#include "CortexVersionCompat.h"
 #include "CortexReflectModule.h"
 #include "UObject/UObjectIterator.h"
 #include "Engine/Blueprint.h"
@@ -16,6 +17,9 @@
 #include "K2Node_SpawnActorFromClass.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
+#include "Blueprint/BlueprintSupport.h"
+#include "UObject/SoftObjectPath.h"
+#include "UObject/CoreRedirects.h"
 #include "Modules/ModuleManager.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/FileHelper.h"
@@ -65,6 +69,29 @@ const TMap<FString, ECortexModuleOrigin>& GetPluginModuleOrigins()
 	static const TMap<FString, ECortexModuleOrigin> ModuleOrigins = BuildPluginModuleOrigins();
 	return ModuleOrigins;
 }
+
+// True when the package's resolved filename lives under the project directory.
+// Blueprint-generated classes have no module binary, so package-to-filename resolution is the
+// only ownership signal available for them. Resolving the mount is required: `/Game` is the
+// standard project mount, but project-owned content plugins mount elsewhere (and project tests
+// mount arbitrary roots) while still storing their files inside the project directory.
+bool IsPackageUnderProjectDir(const FString& PackageName)
+{
+	FString Filename;
+	if (!FPackageName::TryConvertLongPackageNameToFilename(PackageName, Filename))
+	{
+		return false;
+	}
+
+	FString AssetDir = FPaths::ConvertRelativePathToFull(FPaths::GetPath(Filename));
+	FPaths::NormalizeDirectoryName(AssetDir);
+
+	FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+	FPaths::NormalizeDirectoryName(ProjectDir);
+
+	return FPaths::IsUnderDirectory(AssetDir, ProjectDir);
+}
+
 }
 
 // Returns the full C++ name of a class (e.g. "AActor" not "Actor").
@@ -194,11 +221,13 @@ bool FCortexReflectOps::IsProjectClass(const UClass* Class)
 		return false;
 	}
 
-	// Blueprint in /Game/ is a project class
+	// Blueprint-generated class: ownership follows where the package lives on disk. That keeps
+	// project-plugin Blueprints (any mount whose files are under the project directory, not only
+	// /Game) classified like their project-plugin C++ siblings.
 	if (const UBlueprintGeneratedClass* BPGC = Cast<UBlueprintGeneratedClass>(Class))
 	{
 		UBlueprint* BP = Cast<UBlueprint>(BPGC->ClassGeneratedBy);
-		return BP && BP->GetPathName().StartsWith(TEXT("/Game/"));
+		return BP && IsPackageUnderProjectDir(BP->GetOutermost()->GetName());
 	}
 
 	// C++ class: resolve the owning module binary first. This distinguishes
@@ -471,6 +500,7 @@ void FCortexReflectOps::BuildHierarchyTree(
 	int32& OutBPCount,
 	int32& OutProjectCppCount,
 	int32& OutProjectBPCount,
+	bool& bOutTruncated,
 	const TSet<UClass*>& EngineAncestorsOfProject)
 {
 	OutNode = MakeShared<FJsonObject>();
@@ -512,9 +542,11 @@ void FCortexReflectOps::BuildHierarchyTree(
 	}
 	OutTotalCount++;
 
-	// Build children
+	// Build children. The walk is bounded by MaxResults, so the traversal itself records whether it
+	// stopped early: the emitted child count cannot prove completeness, because filtered/skipped
+	// intermediaries and deeper nodes consume the same node budget.
 	TArray<TSharedPtr<FJsonValue>> ChildrenArray;
-	if (CurrentDepth < MaxDepth && OutTotalCount < MaxResults)
+	if (CurrentDepth < MaxDepth)
 	{
 		TArray<UClass*> DirectChildren;
 		GetDerivedClasses(Root, DirectChildren, false);
@@ -523,6 +555,8 @@ void FCortexReflectOps::BuildHierarchyTree(
 		{
 			if (OutTotalCount >= MaxResults)
 			{
+				// Candidate children remain but the node budget is spent: the walk is bounded.
+				bOutTruncated = true;
 				break;
 			}
 
@@ -548,6 +582,7 @@ void FCortexReflectOps::BuildHierarchyTree(
 					MaxResults,
 					OutTotalCount, OutCppCount, OutBPCount,
 					OutProjectCppCount, OutProjectBPCount,
+					bOutTruncated,
 					EngineAncestorsOfProject
 				);
 				// Undo the count for the skipped engine class itself.
@@ -579,6 +614,7 @@ void FCortexReflectOps::BuildHierarchyTree(
 				MaxResults,
 				OutTotalCount, OutCppCount, OutBPCount,
 				OutProjectCppCount, OutProjectBPCount,
+				bOutTruncated,
 				EngineAncestorsOfProject
 			);
 			ChildrenArray.Add(MakeShared<FJsonValueObject>(ChildNode));
@@ -620,6 +656,11 @@ FCortexCommandResult FCortexReflectOps::ClassHierarchy(const TSharedPtr<FJsonObj
 	bool bIncludeEngine = false;
 	Params->TryGetBoolField(TEXT("include_engine"), bIncludeEngine);
 
+	// The flat duplicate of every node name is opt-in. The nested tree is the navigable
+	// representation; repeating all of its names as a second flat array is only built on request.
+	bool bIncludeFlatClasses = false;
+	Params->TryGetBoolField(TEXT("include_flat_classes"), bIncludeFlatClasses);
+
 	// Precompute which engine classes are ancestors of project classes.
 	// This allows BuildHierarchyTree to skip dead-end engine subtrees in O(1)
 	// instead of recursively visiting thousands of engine classes.
@@ -659,6 +700,7 @@ FCortexCommandResult FCortexReflectOps::ClassHierarchy(const TSharedPtr<FJsonObj
 	int32 BPCount = 0;
 	int32 ProjectCppCount = 0;
 	int32 ProjectBPCount = 0;
+	bool bHierarchyTruncated = false;
 	TSharedPtr<FJsonObject> TreeNode;
 	BuildHierarchyTree(
 		RootClass, TreeNode,
@@ -667,6 +709,7 @@ FCortexCommandResult FCortexReflectOps::ClassHierarchy(const TSharedPtr<FJsonObj
 		MaxResults,
 		TotalCount, CppCount, BPCount,
 		ProjectCppCount, ProjectBPCount,
+		bHierarchyTruncated,
 		EngineAncestorsOfProject
 	);
 
@@ -691,37 +734,335 @@ FCortexCommandResult FCortexReflectOps::ClassHierarchy(const TSharedPtr<FJsonObj
 	TreeNode->SetNumberField(TEXT("project_cpp_count"), ProjectCppCount);
 	TreeNode->SetNumberField(TEXT("engine_cpp_count"), FMath::Max(0, CppCount - ProjectCppCount));
 	TreeNode->SetNumberField(TEXT("project_blueprint_count"), ProjectBPCount);
+	// Authoritative traversal-exhaustion signal: true when the depth/MaxResults walk stopped early.
+	// It is produced by the walk itself, never recomputed from the emitted child array.
+	TreeNode->SetBoolField(TEXT("truncated"), bHierarchyTruncated);
 
-	// Build flat classes list for simple access
-	TArray<TSharedPtr<FJsonValue>> FlatClassesArray;
-	TFunction<void(const TSharedPtr<FJsonObject>&)> FlattenTree = [&](const TSharedPtr<FJsonObject>& Node)
+	// Build flat classes list only when explicitly requested (opt-in duplicate access).
+	if (bIncludeFlatClasses)
 	{
-		if (!Node.IsValid()) return;
-		FString Name;
-		if (Node->TryGetStringField(TEXT("name"), Name))
+		TArray<TSharedPtr<FJsonValue>> FlatClassesArray;
+		TFunction<void(const TSharedPtr<FJsonObject>&)> FlattenTree = [&](const TSharedPtr<FJsonObject>& Node)
 		{
-			FlatClassesArray.Add(MakeShared<FJsonValueString>(Name));
-		}
-		const TArray<TSharedPtr<FJsonValue>>* Children = nullptr;
-		if (Node->TryGetArrayField(TEXT("children"), Children))
-		{
-			for (const TSharedPtr<FJsonValue>& Child : *Children)
+			if (!Node.IsValid()) return;
+			FString Name;
+			if (Node->TryGetStringField(TEXT("name"), Name))
 			{
-				FlattenTree(Child->AsObject());
+				FlatClassesArray.Add(MakeShared<FJsonValueString>(Name));
 			}
-		}
-	};
-	FlattenTree(TreeNode);
-	TreeNode->SetArrayField(TEXT("classes"), FlatClassesArray);
+			const TArray<TSharedPtr<FJsonValue>>* Children = nullptr;
+			if (Node->TryGetArrayField(TEXT("children"), Children))
+			{
+				for (const TSharedPtr<FJsonValue>& Child : *Children)
+				{
+					FlattenTree(Child->AsObject());
+				}
+			}
+		};
+		FlattenTree(TreeNode);
+		TreeNode->SetArrayField(TEXT("classes"), FlatClassesArray);
+	}
 
 	TSharedPtr<FJsonObject> CacheParams = MakeShared<FJsonObject>();
 	CacheParams->SetStringField(TEXT("root"), RootName);
 	CacheParams->SetNumberField(TEXT("depth"), Depth);
 	CacheParams->SetNumberField(TEXT("max_results"), MaxResults);
 	CacheParams->SetBoolField(TEXT("include_engine"), bIncludeEngine);
+	CacheParams->SetBoolField(TEXT("include_flat_classes"), bIncludeFlatClasses);
 	WriteReflectCache(TreeNode, CacheParams);
 
 	return FCortexCommandRouter::Success(TreeNode);
+}
+
+bool FCortexReflectOps::ParseBlueprintCatalogClassPaths(
+	const FString& GeneratedTag,
+	const FString& ParentTag,
+	const FString& NativeParentTag,
+	FCortexBlueprintCatalogClassPaths& OutPaths,
+	TArray<FString>& OutInvalidFields)
+{
+	OutPaths = FCortexBlueprintCatalogClassPaths();
+	OutInvalidFields.Reset();
+
+	auto ParsePath = [&OutInvalidFields](
+		const FString& Tag,
+		const TCHAR* FieldName,
+		FTopLevelAssetPath& OutPath)
+	{
+		if (Tag.IsEmpty())
+		{
+			OutInvalidFields.Add(FieldName);
+			return;
+		}
+
+		const FString ObjectPath = FPackageName::ExportTextPathToObjectPath(Tag);
+		const FSoftObjectPath SoftPath(ObjectPath);
+		if (!SoftPath.IsValid())
+		{
+			OutInvalidFields.Add(FieldName);
+			return;
+		}
+
+		OutPath = SoftPath.GetAssetPath();
+		if (!OutPath.IsValid())
+		{
+			OutInvalidFields.Add(FieldName);
+		}
+		OutPath = FCortexReflectOps::ResolveBlueprintCatalogClassRedirect(OutPath);
+	};
+
+	ParsePath(GeneratedTag, TEXT("GeneratedClassPath"), OutPaths.GeneratedClassPath);
+	ParsePath(ParentTag, TEXT("ParentClassPath"), OutPaths.ParentClassPath);
+	ParsePath(NativeParentTag, TEXT("NativeParentClassPath"), OutPaths.NativeParentClassPath);
+	return OutInvalidFields.IsEmpty();
+}
+
+FTopLevelAssetPath FCortexReflectOps::ResolveBlueprintCatalogClassRedirect(
+	const FTopLevelAssetPath& ClassPath)
+{
+	if (!ClassPath.IsValid())
+	{
+		return ClassPath;
+	}
+
+	const FCoreRedirectObjectName RedirectedName = FCoreRedirects::GetRedirectedName(
+		ECoreRedirectFlags::Type_Class,
+		FCoreRedirectObjectName(ClassPath)
+	);
+	if (!RedirectedName.IsValid() || !RedirectedName.OuterName.IsNone())
+	{
+		return ClassPath;
+	}
+
+	return FTopLevelAssetPath(RedirectedName.PackageName, RedirectedName.ObjectName);
+}
+
+bool FCortexReflectOps::HasUnresolvedBlueprintCatalogMembership(
+	const bool bGeneratedPathInTree,
+	const bool bParentPathValid,
+	const bool bParentPathInTree)
+{
+	if (bGeneratedPathInTree || bParentPathInTree)
+	{
+		return false;
+	}
+
+	return !bParentPathValid;
+}
+
+FCortexCommandResult FCortexReflectOps::BlueprintCatalog(const TSharedPtr<FJsonObject>& Params)
+{
+	FString RootName;
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("root"), RootName) || RootName.IsEmpty())
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidField,
+			TEXT("root parameter is required")
+		);
+	}
+
+	// This read-only query accepts native classes only. Resolving a Blueprint
+	// asset path here would load that asset and defeat the purpose of the catalog.
+	UClass* RootClass = nullptr;
+	if (RootName.StartsWith(TEXT("/Script/")))
+	{
+		RootClass = FindObject<UClass>(nullptr, *RootName);
+	}
+	else if (!RootName.StartsWith(TEXT("/")))
+	{
+		FCortexCommandResult FindError;
+		RootClass = FindClassByName(RootName, FindError);
+		if (!RootClass)
+		{
+			return FindError;
+		}
+	}
+
+	if (!RootClass || Cast<UBlueprintGeneratedClass>(RootClass))
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::ClassNotFound,
+			FString::Printf(TEXT("Native root class not found: %s"), *RootName)
+		);
+	}
+
+	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+	if (CortexIsAssetRegistryGathering(AssetRegistry))
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::EditorNotReady,
+			TEXT("Asset Registry is gathering assets; retry the Blueprint catalog after gathering completes")
+		);
+	}
+
+	TArray<FTopLevelAssetPath> RootClasses;
+	RootClasses.Add(RootClass->GetClassPathName());
+	TSet<FTopLevelAssetPath> ExcludedClasses;
+	TSet<FTopLevelAssetPath> DerivedClassPaths;
+	AssetRegistry.GetDerivedClassNames(RootClasses, ExcludedClasses, DerivedClassPaths);
+
+	FARFilter Filter;
+	Filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
+	Filter.bRecursiveClasses = true;
+	Filter.PackagePaths.Add(FName(TEXT("/Game")));
+	Filter.bRecursivePaths = true;
+	Filter.bIncludeOnlyOnDiskAssets = true;
+
+	TArray<FAssetData> BlueprintAssets;
+	AssetRegistry.GetAssets(Filter, BlueprintAssets);
+
+	struct FBlueprintCatalogRecord
+	{
+		FString Name;
+		FString GeneratedClassPath;
+		FString ParentName;
+		FString ParentClassPath;
+		FString NativeParentClassPath;
+		FString AssetPath;
+	};
+
+	TArray<FBlueprintCatalogRecord> Records;
+	TSet<FTopLevelAssetPath> AddedClassPaths;
+	TArray<TSharedPtr<FJsonValue>> Diagnostics;
+	int32 InvalidAssetCount = 0;
+	const FTopLevelAssetPath RootClassPath = RootClass->GetClassPathName();
+	auto AddDiagnostic = [&Diagnostics, &InvalidAssetCount](
+		const FAssetData& Asset,
+		const TArray<FString>& InvalidFields)
+	{
+		++InvalidAssetCount;
+		if (Diagnostics.Num() >= 20)
+		{
+			return;
+		}
+
+		TSharedPtr<FJsonObject> Diagnostic = MakeShared<FJsonObject>();
+		Diagnostic->SetStringField(TEXT("asset_path"),
+			Asset.PackageName.ToString() + TEXT(".") + Asset.AssetName.ToString());
+		TArray<TSharedPtr<FJsonValue>> Fields;
+		for (const FString& Field : InvalidFields)
+		{
+			Fields.Add(MakeShared<FJsonValueString>(Field));
+		}
+		Diagnostic->SetArrayField(TEXT("invalid_fields"), Fields);
+		Diagnostics.Add(MakeShared<FJsonValueObject>(Diagnostic));
+	};
+
+	for (const FAssetData& Asset : BlueprintAssets)
+	{
+		if (!Asset.PackageName.ToString().StartsWith(TEXT("/Game/")))
+		{
+			continue;
+		}
+
+		const FAssetTagValueRef GeneratedTag = Asset.TagsAndValues.FindTag(FBlueprintTags::GeneratedClassPath);
+		const FAssetTagValueRef ParentTag = Asset.TagsAndValues.FindTag(FBlueprintTags::ParentClassPath);
+		const FAssetTagValueRef NativeParentTag = Asset.TagsAndValues.FindTag(FBlueprintTags::NativeParentClassPath);
+		FCortexBlueprintCatalogClassPaths ClassPaths;
+		TArray<FString> ParseInvalidFields;
+		ParseBlueprintCatalogClassPaths(
+			GeneratedTag.IsSet() ? GeneratedTag.AsString() : FString(),
+			ParentTag.IsSet() ? ParentTag.AsString() : FString(),
+			NativeParentTag.IsSet() ? NativeParentTag.AsString() : FString(),
+			ClassPaths,
+			ParseInvalidFields
+		);
+		const FTopLevelAssetPath& GeneratedClassPath = ClassPaths.GeneratedClassPath;
+		const FTopLevelAssetPath& ParentPath = ClassPaths.ParentClassPath;
+		const FTopLevelAssetPath& NativeParentPath = ClassPaths.NativeParentClassPath;
+		const bool bGeneratedPathValid = GeneratedClassPath.IsValid();
+		const bool bParentPathValid = ParentPath.IsValid();
+		const bool bNativeParentPathValid = NativeParentPath.IsValid();
+
+		const bool bGeneratedPathInTree = bGeneratedPathValid && DerivedClassPaths.Contains(GeneratedClassPath);
+		const bool bParentPathInTree = bParentPathValid
+			&& (ParentPath == RootClassPath || DerivedClassPaths.Contains(ParentPath));
+		if (!bGeneratedPathInTree && !bParentPathInTree)
+		{
+			// A valid direct parent outside the requested tree proves the asset is
+			// unrelated. Without it, missing metadata leaves membership unknown.
+			if (HasUnresolvedBlueprintCatalogMembership(
+				bGeneratedPathInTree,
+				bParentPathValid,
+				bParentPathInTree))
+			{
+				AddDiagnostic(Asset, ParseInvalidFields);
+			}
+			continue;
+		}
+
+		TArray<FString> InvalidFields;
+		if (!bGeneratedPathValid || !bGeneratedPathInTree)
+		{
+			InvalidFields.Add(TEXT("GeneratedClassPath"));
+		}
+		if (!bParentPathValid || !bParentPathInTree)
+		{
+			InvalidFields.Add(TEXT("ParentClassPath"));
+		}
+		if (!bNativeParentPathValid)
+		{
+			InvalidFields.Add(TEXT("NativeParentClassPath"));
+		}
+		if (InvalidFields.Num() > 0)
+		{
+			AddDiagnostic(Asset, InvalidFields);
+			continue;
+		}
+
+		const FString ClassName = GeneratedClassPath.GetAssetName().ToString();
+		if (ClassName.StartsWith(TEXT("SKEL_")) || ClassName.StartsWith(TEXT("REINST_")))
+		{
+			continue;
+		}
+		if (AddedClassPaths.Contains(GeneratedClassPath))
+		{
+			continue;
+		}
+
+		FBlueprintCatalogRecord& Record = Records.AddDefaulted_GetRef();
+		Record.Name = ClassName;
+		Record.GeneratedClassPath = GeneratedClassPath.ToString();
+		Record.ParentClassPath = ParentPath.ToString();
+		Record.ParentName = ParentPath.GetAssetName().ToString();
+		Record.NativeParentClassPath = NativeParentPath.ToString();
+		Record.AssetPath = Asset.PackageName.ToString() + TEXT(".") + Asset.AssetName.ToString();
+		AddedClassPaths.Add(GeneratedClassPath);
+	}
+
+	Records.Sort([](const FBlueprintCatalogRecord& Left, const FBlueprintCatalogRecord& Right)
+	{
+		const int32 AssetCompare = Left.AssetPath.Compare(Right.AssetPath, ESearchCase::IgnoreCase);
+		if (AssetCompare != 0)
+		{
+			return AssetCompare < 0;
+		}
+		return Left.GeneratedClassPath.Compare(Right.GeneratedClassPath, ESearchCase::CaseSensitive) < 0;
+	});
+
+	TArray<TSharedPtr<FJsonValue>> Classes;
+	Classes.Reserve(Records.Num());
+	for (const FBlueprintCatalogRecord& Record : Records)
+	{
+		TSharedPtr<FJsonObject> ClassData = MakeShared<FJsonObject>();
+		ClassData->SetStringField(TEXT("name"), Record.Name);
+		ClassData->SetStringField(TEXT("type"), TEXT("blueprint"));
+		ClassData->SetStringField(TEXT("generated_class_path"), Record.GeneratedClassPath);
+		ClassData->SetStringField(TEXT("parent_name"), Record.ParentName);
+		ClassData->SetStringField(TEXT("parent_class_path"), Record.ParentClassPath);
+		ClassData->SetStringField(TEXT("native_parent_class_path"), Record.NativeParentClassPath);
+		ClassData->SetStringField(TEXT("asset_path"), Record.AssetPath);
+		Classes.Add(MakeShared<FJsonValueObject>(ClassData));
+	}
+
+	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+	Data->SetBoolField(TEXT("complete"), InvalidAssetCount == 0);
+	Data->SetNumberField(TEXT("invalid_asset_count"), InvalidAssetCount);
+	Data->SetArrayField(TEXT("classes"), Classes);
+	Data->SetArrayField(TEXT("diagnostics"), Diagnostics);
+	Data->SetNumberField(TEXT("blueprint_count"), Records.Num());
+	return FCortexCommandRouter::Success(Data);
 }
 
 bool FCortexReflectOps::WriteReflectCache(
@@ -796,6 +1137,17 @@ FCortexCommandResult FCortexReflectOps::ClassDetail(const TSharedPtr<FJsonObject
 	{
 		Params->TryGetBoolField(TEXT("include_inherited"), bIncludeInherited);
 		Params->TryGetStringField(TEXT("detail"), DetailLevel);
+	}
+	// Native implements exactly two extraction modes. A supplied level must name one of them: an
+	// unknown value is refused instead of silently degrading to the full (most expensive) read.
+	if (!DetailLevel.Equals(TEXT("summary"), ESearchCase::IgnoreCase)
+		&& !DetailLevel.Equals(TEXT("full"), ESearchCase::IgnoreCase))
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidField,
+			FString::Printf(
+				TEXT("Invalid detail '%s'; expected 'summary' or 'full'"),
+				*DetailLevel));
 	}
 	const bool bSummaryOnly = DetailLevel.Equals(TEXT("summary"), ESearchCase::IgnoreCase);
 
@@ -1788,6 +2140,7 @@ FCortexCommandResult FCortexReflectOps::Search(const TSharedPtr<FJsonObject>& Pa
 	}
 
 	TArray<TSharedPtr<FJsonValue>> ResultsArray;
+	int32 TotalMatches = 0;
 
 	for (TObjectIterator<UClass> It; It; ++It)
 	{
@@ -1820,6 +2173,14 @@ FCortexCommandResult FCortexReflectOps::Search(const TSharedPtr<FJsonObject>& Pa
 			{
 				continue;
 			}
+		}
+
+		// Every match is counted, even past the page size, so the reported match total is not the
+		// returned page length. Only the first Limit matches are materialized into rows.
+		TotalMatches++;
+		if (ResultsArray.Num() >= Limit)
+		{
+			continue;
 		}
 
 		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
@@ -1864,16 +2225,13 @@ FCortexCommandResult FCortexReflectOps::Search(const TSharedPtr<FJsonObject>& Pa
 		Entry->SetNumberField(TEXT("blueprint_children_count"), BPChildCount);
 
 		ResultsArray.Add(MakeShared<FJsonValueObject>(Entry));
-
-		if (ResultsArray.Num() >= Limit)
-		{
-			break;
-		}
 	}
 
 	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetArrayField(TEXT("results"), ResultsArray);
-	Result->SetNumberField(TEXT("total_results"), ResultsArray.Num());
+	Result->SetNumberField(TEXT("returned"), ResultsArray.Num());
+	Result->SetNumberField(TEXT("total_matches"), TotalMatches);
+	Result->SetBoolField(TEXT("truncated"), TotalMatches > ResultsArray.Num());
 
 	return FCortexCommandRouter::Success(Result);
 }

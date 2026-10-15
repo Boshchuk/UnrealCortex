@@ -1,6 +1,8 @@
 """Unit tests for TCP client timeout handling."""
 
+import json
 import socket
+import time
 from unittest.mock import MagicMock, patch, PropertyMock
 from pathlib import Path
 
@@ -52,10 +54,10 @@ class TestSendCommandTimeout:
 
         conn._send_and_receive("ping", timeout=120.0)
 
-        # Socket timeout should be set to 120.0 before recv
+        # Socket timeout should be positive and bounded by the requested deadline.
         calls = mock_socket.settimeout.call_args_list
-        assert any(call[0][0] == 120.0 for call in calls), \
-            f"Expected settimeout(120.0) in calls: {calls}"
+        assert any(0 < call[0][0] <= 120.0 for call in calls), \
+            f"Expected a positive settimeout no greater than 120.0: {calls}"
 
     def test_timeout_uses_deadline_based_socket_timeout(self):
         """send_and_receive should apply per-read timeout from remaining deadline."""
@@ -129,7 +131,56 @@ class TestSendCommandTimeout:
         assert exc_info.value.message == "Failed to write report"
         assert exc_info.value.details == {"applied_count": 1}
 
+def test_send_command_once_never_replays_after_request_dispatch(monkeypatch):
+    conn = UEConnection(port=99999)
+    sent = []
+    sock = MagicMock()
+    sock.sendall.side_effect = lambda payload: sent.append(payload)
+    sock.recv.side_effect = socket.timeout("receive timed out after dispatch")
+    conn._socket = sock
+    connect_calls = []
+    monkeypatch.setattr(conn, "connect", lambda: connect_calls.append(True))
+    discover_calls = []
+    monkeypatch.setattr("cortex_mcp.tcp_client._discover_port", lambda: discover_calls.append(True))
+    attempts = []
+    original = conn._send_and_receive
 
+    def record_attempt(*args, **kwargs):
+        attempts.append(args)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(conn, "_send_and_receive", record_attempt)
+    send_once = getattr(conn, "send_command_once", None)
+    assert callable(send_once), "UEConnection.send_command_once must be available"
+
+    with pytest.raises(ConnectionError):
+        send_once("graph.apply_patch", {"patch_id": "patch-1"}, timeout=0.01)
+
+    assert len(sent) == 1
+    assert len(attempts) == 1
+    assert len(connect_calls) == 1
+    assert discover_calls == []
+
+
+
+def test_send_command_once_distinguishes_failure_before_dispatch(monkeypatch):
+    conn = UEConnection(port=99999)
+    connect = MagicMock(side_effect=ConnectionError("connection refused"))
+    send_attempt = MagicMock()
+    monkeypatch.setattr(conn, "connect", connect)
+    monkeypatch.setattr(conn, "_send_and_receive", send_attempt)
+    not_dispatched = getattr(
+        sys.modules["cortex_mcp.tcp_client"],
+        "UECommandNotDispatchedError",
+        None,
+    )
+    assert not_dispatched is not None, "pre-dispatch failures must remain distinguishable"
+
+    with pytest.raises(not_dispatched, match="connection refused"):
+        conn.send_command_once("graph.apply_patch", {"patch_id": "patch-1"})
+
+    connect.assert_called_once()
+    send_attempt.assert_not_called()
 class TestPortFileParsing:
     """Tests for JSON and plain-text port file backward compatibility."""
 
@@ -440,12 +491,30 @@ class TestProjectValidation:
 class TestProjectRootDiscovery:
     """Tests for _find_project_root() and _find_saved_dir() path resolution."""
 
-    def test_find_project_root_from_file_walk(self):
+    @pytest.fixture(autouse=True)
+    def project_layout(self, tmp_path, monkeypatch):
+        from cortex_mcp import project
+
+        root = tmp_path / "DiscoveryProject"
+        package = root / "Plugins/UnrealCortex/MCP/src/cortex_mcp"
+        package.mkdir(parents=True)
+        (root / "DiscoveryProject.uproject").write_text("{}", encoding="utf-8")
+        (root / "Saved").mkdir()
+        module = package / "project.py"
+        module.touch()
+        monkeypatch.setattr(project, "__file__", str(module))
+        monkeypatch.delenv("CORTEX_PROJECT_DIR", raising=False)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        project._walk_up_for_uproject.cache_clear()
+        try:
+            yield root
+        finally:
+            project._walk_up_for_uproject.cache_clear()
+
+    def test_find_project_root_from_file_walk(self, project_layout):
         """_find_project_root should find the project root by walking up from __file__."""
         root = _find_project_root()
-        # tcp_client.py lives inside the project tree, so root should be found
-        assert root is not None
-        assert list(root.glob("*.uproject"))
+        assert root == project_layout
 
     def test_find_saved_dir_with_absolute_env(self, tmp_path):
         """Absolute CORTEX_PROJECT_DIR should be used directly."""
@@ -456,28 +525,24 @@ class TestProjectRootDiscovery:
             assert result is not None
             assert result == saved
 
-    def test_find_saved_dir_with_relative_env_resolves_against_project_root(self):
+    def test_find_saved_dir_with_relative_env_resolves_against_project_root(self, project_layout, tmp_path, monkeypatch):
         """Relative CORTEX_PROJECT_DIR='.' should resolve against project root, not CWD."""
+        monkeypatch.chdir(tmp_path)
         with patch.dict(os.environ, {"CORTEX_PROJECT_DIR": "."}):
             result = _find_saved_dir()
-            assert result is not None, "Expected to find Saved/ in project root"
-            assert "Saved" in str(result)
-            # Must NOT be under MCP directory
-            assert "MCP\\Saved" not in str(result) and "MCP/Saved" not in str(result)
+            assert result == project_layout / "Saved"
 
-    def test_find_saved_dir_without_env_uses_file_walk(self):
+    def test_find_saved_dir_without_env_uses_file_walk(self, project_layout):
         """Without CORTEX_PROJECT_DIR, should walk up from __file__."""
         with patch.dict(os.environ, {}, clear=True):
             os.environ.pop("CORTEX_PROJECT_DIR", None)
             result = _find_saved_dir()
-            assert result is not None, "Expected to find Saved/ via __file__ walk-up"
-            assert result.name == "Saved"
+            assert result == project_layout / "Saved"
 
     def test_get_expected_project_from_uproject(self):
         """_get_expected_project should return project name from .uproject filename."""
         project = _get_expected_project()
-        # We're running inside CortexSandboxMirror which has CortexSandbox.uproject
-        assert project == "CortexSandbox"
+        assert project == "DiscoveryProject"
 
 
 class TestNoEditorFallback:
@@ -510,3 +575,25 @@ class TestNoEditorFallback:
         """Passing port= explicitly should skip discovery entirely."""
         conn = UEConnection(port=9999)
         assert conn.port == 9999
+
+
+class TestFragmentedResponseReassembly:
+    """Tests for reassembling a large response delivered across several reads."""
+
+    def test_read_response_line_reassembles_large_fragmented_line_and_preserves_remainder(self):
+        """A >40,000 character line split over three reads must be reassembled and the next line kept queued."""
+        conn = UEConnection(port=99999)
+        payload = json.dumps({"success": True, "data": {"payload": "x" * 50_000}}).encode()
+        second = b'{"success":true,"data":{"second":true}}\n'
+        chunks = [payload[:10_000], payload[10_000:35_000], payload[35_000:] + b"\n" + second]
+        sock = MagicMock()
+        sock.recv.side_effect = chunks
+        conn._socket = sock
+
+        first = json.loads(conn._read_response_line(time.monotonic() + 5))
+        assert len(first["data"]["payload"]) == 50_000
+        second_result = json.loads(conn._read_response_line(time.monotonic() + 5))
+        assert second_result["data"]["second"] is True
+
+        # The second line was already buffered behind the first line's delimiter.
+        assert sock.recv.call_count == 3

@@ -2,6 +2,7 @@
 #include "CortexVersionCompat.h"
 #include "CortexBPCommandHandler.h"
 #include "CortexCommandRouter.h"
+#include "CortexEngineCompat.h"
 #include "CortexGraphCommandHandler.h"
 #include "CortexTypes.h"
 #include "Misc/Guid.h"
@@ -55,7 +56,10 @@ namespace
 		UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *AssetPath);
 		if (Blueprint)
 		{
-			Blueprint->GetOutermost()->MarkAsGarbage();
+			if (UPackage* Package = Blueprint->GetOutermost())
+			{
+				Package->MarkAsGarbage();
+			}
 		}
 	}
 }
@@ -141,7 +145,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPSearchCDOMatchTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	FCortexBPCommandHandler Handler;
 	const FString AssetPath = CreateSearchTestBlueprint(Handler, Suffix);
 	TestFalse(TEXT("Test Blueprint should be created"), AssetPath.IsEmpty());
@@ -215,7 +219,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPSearchPinMatchTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	FCortexBPCommandHandler Handler;
 	const FString AssetPath = CreateSearchTestBlueprint(Handler, Suffix);
 	TestFalse(TEXT("Test Blueprint should be created"), AssetPath.IsEmpty());
@@ -311,7 +315,7 @@ bool FCortexBPSearchPinTextMatchTest::RunTest(const FString& Parameters)
 		GEngine->Exec(nullptr, TEXT("log LogStringTable Error"));
 	}
 
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	FCortexBPCommandHandler Handler;
 	const FString AssetPath = CreateSearchTestBlueprint(Handler, Suffix);
 	TestFalse(TEXT("Test Blueprint should be created"), AssetPath.IsEmpty());
@@ -449,7 +453,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCortexBPSearchWidgetStringTableMatchTest::RunTest(const FString& Parameters)
 {
 	FCortexBPCommandHandler Handler;
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	const FString Name = FString::Printf(TEXT("WBP_SearchWidget_%s"), *Suffix);
 	const FString Dir = FString::Printf(TEXT("/Game/Temp/CortexBPSearchWidget_%s"), *Suffix);
 
@@ -520,7 +524,8 @@ bool FCortexBPSearchWidgetStringTableMatchTest::RunTest(const FString& Parameter
 		GetTransientPackage(),
 		FName(TEXT("TestStringTable_BPSearchWidget")));
 	TestTable->GetMutableStringTable()->SetNamespace(TEXT("BPWidgetTest"));
-	CortexSetSourceString(*TestTable->GetMutableStringTable(), TEXT("WidgetSearchKey"), TEXT("Widget Search Value"));
+	CortexEngineCompat::SetStringTableSourceString(
+		*TestTable->GetMutableStringTable(), TEXT("WidgetSearchKey"), TEXT("Widget Search Value"));
 
 	void* ValuePtr = TextProperty->ContainerPtrToValuePtr<void>(TextWidget);
 	TextProperty->SetPropertyValue(ValuePtr,
@@ -587,7 +592,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexBPSearchPinTypedTextStringTableMatchTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	FCortexBPCommandHandler Handler;
 	const FString AssetPath = CreateSearchTestBlueprint(Handler, Suffix);
 	TestFalse(TEXT("Test Blueprint should be created"), AssetPath.IsEmpty());
@@ -619,11 +624,15 @@ bool FCortexBPSearchPinTypedTextStringTableMatchTest::RunTest(const FString& Par
 	}
 	TestFalse(TEXT("Added node should have node_id"), TextNodeId.IsEmpty());
 
+	const FString TablePackageName = FString::Printf(TEXT("/Game/Temp/TestTable_%s"), *Suffix);
+	UPackage* TablePackage = CreatePackage(*TablePackageName);
 	UStringTable* TestTable = NewObject<UStringTable>(
-		GetTransientPackage(),
-		FName(TEXT("TestStringTable_BPSearchPinTypedText")));
+		TablePackage,
+		FName(TEXT("TestStringTable_BPSearchPinTypedText")),
+		RF_Public | RF_Standalone);
 	TestTable->GetMutableStringTable()->SetNamespace(TEXT("BPPinSearch"));
-	CortexSetSourceString(*TestTable->GetMutableStringTable(), TEXT("Mail.Button.Pay"), TEXT("Pay"));
+	CortexEngineCompat::SetStringTableSourceString(
+		*TestTable->GetMutableStringTable(), TEXT("Mail.Button.Pay"), TEXT("Pay"));
 
 	TSharedPtr<FJsonObject> StringTablePayload = MakeShared<FJsonObject>();
 	StringTablePayload->SetStringField(TEXT("table_id"), TestTable->GetStringTableId().ToString());
@@ -692,7 +701,7 @@ bool FCortexBPSearchPinTypedTextStringTableMatchTest::RunTest(const FString& Par
 
 	TestTrue(TEXT("search should match typed text pin StringTable key"), bFoundPinMatch);
 
-	TestTable->MarkAsGarbage();
+	TablePackage->MarkAsGarbage();
 	CleanupSearchTestBlueprint(AssetPath);
 	return true;
 }

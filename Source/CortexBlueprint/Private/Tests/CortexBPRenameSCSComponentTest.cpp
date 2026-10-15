@@ -1,9 +1,11 @@
 #include "Misc/AutomationTest.h"
 #include "Operations/CortexBPCleanupOps.h"
+#include "CortexAssetMutationGuard.h"
 #include "CortexBPTestLiftActor.h"
 #include "CortexEditorUtils.h"
 #include "CortexTypes.h"
 #include "Components/TimelineComponent.h"
+#include "Containers/Ticker.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraphSchema_K2.h"
 #include "Editor.h"
@@ -17,6 +19,7 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Misc/Paths.h"
 #include "UObject/GarbageCollection.h"
 #include "UObject/Package.h"
@@ -38,23 +41,48 @@ namespace
 		{
 			Root = FString::Printf(
 				TEXT("/CortexReadOnlyRename%s"),
-				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
-			PhysicalDir = FPaths::ProjectSavedDir() / TEXT("CortexReadOnlyBlueprintTests") / Root.RightChop(1);
+				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8));
+			PhysicalDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("CortexReadOnlyBlueprintTests") / Root.RightChop(1));
 			IFileManager::Get().MakeDirectory(*PhysicalDir, true);
 			FPackageName::RegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
 		}
 
 		~FScopedRenameReadOnlyMountedRoot()
 		{
+			for (TObjectIterator<UObject> It; It; ++It)
+			{
+				UObject* Asset = *It;
+				if (!Asset || !Asset->IsAsset())
+				{
+					continue;
+				}
+
+				UPackage* Package = Asset->GetOutermost();
+				if (Package && RenameIsPackageUnderRoot(Package->GetName(), Root))
+				{
+					FAssetRegistryModule::AssetDeleted(Asset);
+					Asset->MarkAsGarbage();
+				}
+			}
+
 			for (TObjectIterator<UPackage> It; It; ++It)
 			{
 				UPackage* Package = *It;
 				if (Package && RenameIsPackageUnderRoot(Package->GetName(), Root))
 				{
+					Package->SetDirtyFlag(false);
+					FAssetRegistryModule::PackageDeleted(Package);
 					Package->MarkAsGarbage();
 				}
 			}
 			CollectGarbage(RF_NoFlags);
+
+			IAssetRegistry& AssetRegistry =
+				FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+			AssetRegistry.WaitForCompletion();
+			FlushAsyncLoading();
+			FTSTicker::GetCoreTicker().Tick(0.0f);
+
 			FPackageName::UnRegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
 			IFileManager::Get().DeleteDirectory(*PhysicalDir, false, true);
 		}
@@ -69,8 +97,8 @@ namespace
 		{
 			Root = FString::Printf(
 				TEXT("/CortexRename%s"),
-				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
-			PhysicalDir = FPaths::ProjectSavedDir() / TEXT("CortexRenameBlueprintTests") / Root.RightChop(1);
+				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8));
+			PhysicalDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("CortexRenameBlueprintTests") / Root.RightChop(1));
 			IFileManager::Get().MakeDirectory(*PhysicalDir, true);
 			FPackageName::RegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
 			FCortexEditorUtils::AddTestWritableContentRoot(Root);
@@ -78,15 +106,40 @@ namespace
 
 		~FScopedRenameWritableMountedRoot()
 		{
+			for (TObjectIterator<UObject> It; It; ++It)
+			{
+				UObject* Asset = *It;
+				if (!Asset || !Asset->IsAsset())
+				{
+					continue;
+				}
+
+				UPackage* Package = Asset->GetOutermost();
+				if (Package && RenameIsPackageUnderRoot(Package->GetName(), Root))
+				{
+					FAssetRegistryModule::AssetDeleted(Asset);
+					Asset->MarkAsGarbage();
+				}
+			}
+
 			for (TObjectIterator<UPackage> It; It; ++It)
 			{
 				UPackage* Package = *It;
 				if (Package && RenameIsPackageUnderRoot(Package->GetName(), Root))
 				{
+					Package->SetDirtyFlag(false);
+					FAssetRegistryModule::PackageDeleted(Package);
 					Package->MarkAsGarbage();
 				}
 			}
 			CollectGarbage(RF_NoFlags);
+
+			IAssetRegistry& AssetRegistry =
+				FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+			AssetRegistry.WaitForCompletion();
+			FlushAsyncLoading();
+			FTSTicker::GetCoreTicker().Tick(0.0f);
+
 			FCortexEditorUtils::RemoveTestWritableContentRoot(Root);
 			FPackageName::UnRegisterMountPoint(Root + TEXT("/"), PhysicalDir / TEXT(""));
 			IFileManager::Get().DeleteDirectory(*PhysicalDir, false, true);
@@ -107,7 +160,7 @@ namespace
 				TEXT("%s/%s_%s"),
 				*RenameWritableRoot(),
 				Name,
-				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8))),
+				*FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8))),
 			FName(Name),
 			BPTYPE_Normal,
 			UBlueprint::StaticClass(),
@@ -691,7 +744,6 @@ bool FCortexBPRenameSCSComponentRejectsNonWritableDependentTest::RunTest(const F
 	TestFalse(TEXT("Parent was not renamed"), RenameHasSCSNode(ParentBP, TEXT("NewComp")));
 	TestEqual(TEXT("Child was not compiled"), ChildBP->Status, EBlueprintStatus::BS_Dirty);
 
-	ChildBP->MarkAsGarbage();
 	ParentBP->MarkAsGarbage();
 	return true;
 }
@@ -863,4 +915,61 @@ bool FCortexBPRenameSCSComponentCompileFailureRollbackTest::RunTest(const FStrin
 	AddInfo(TEXT("WITH_DEV_AUTOMATION_TESTS disabled; skipping compile failure rollback test."));
 	return true;
 #endif
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCortexBPRenameSCSComponentBlockedDependentTest,
+	"Cortex.Blueprint.Cleanup.RenameSCSComponent.BlockedDependent",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCortexBPRenameSCSComponentBlockedDependentTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	UBlueprint* Parent = RenameCreateLiftBP(TEXT("BP_RenameBlockedParent"), AActor::StaticClass());
+	TestNotNull(TEXT("rename parent created"), Parent);
+	if (!Parent) return false;
+	TestNotNull(TEXT("rename component created"), RenameAddSCSNode(Parent, UCortexBPTestSubobjComponent::StaticClass(), TEXT("OldComp")));
+	UBlueprint* Child = RenameCreateLiftBP(TEXT("BP_RenameBlockedChild"), Parent->GeneratedClass);
+	TestNotNull(TEXT("rename dependent created"), Child);
+	if (!Child)
+	{
+		Parent->MarkAsGarbage();
+		return false;
+	}
+	FKismetEditorUtilities::CompileBlueprint(Child);
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Parent);
+	FKismetEditorUtilities::CompileBlueprint(Parent);
+	TArray<UBlueprint*> Dependents;
+	FBlueprintEditorUtils::GetDependentBlueprints(Parent, Dependents);
+	const bool bChildDiscovered = Dependents.Contains(Child);
+	TestTrue(TEXT("engine discovers compiled child before blocked dependent fanout"), bChildDiscovered);
+	if (!bChildDiscovered)
+	{
+		Child->MarkAsGarbage();
+		Parent->MarkAsGarbage();
+		return false;
+	}
+	FCortexAssetMutationGuard::Block(Child, TEXT("forced recovery verification failure"));
+	const FCortexCommandResult Result = FCortexBPCleanupOps::RenameSCSComponent(
+		RenameMakeParams(Parent, TEXT("OldComp"), TEXT("NewComp"), false));
+	TestFalse(TEXT("blocked dependent rejects rename before parent side effects"), Result.bSuccess);
+	TestTrue(TEXT("parent component name remains unchanged"), RenameHasSCSNode(Parent, TEXT("OldComp")));
+	TestFalse(TEXT("blocked dependent did not receive the new component name"), RenameHasSCSNode(Parent, TEXT("NewComp")));
+	if (GEditor && GEditor->Trans)
+	{
+		GEditor->Trans->Reset(FText::FromString(TEXT("CortexBPRenameBlockedDependentCleanup")));
+	}
+	if (Child->IsRooted())
+	{
+		Child->RemoveFromRoot();
+	}
+	if (Parent->IsRooted())
+	{
+		Parent->RemoveFromRoot();
+	}
+	Child->ClearFlags(RF_Standalone);
+	Parent->ClearFlags(RF_Standalone);
+	Child->MarkAsGarbage();
+	Parent->MarkAsGarbage();
+	return true;
 }

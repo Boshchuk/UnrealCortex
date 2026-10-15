@@ -1,7 +1,7 @@
 """MCP tools for asset referencer queries."""
 
 import logging
-from cortex_mcp.response import format_response
+from cortex_mcp.response import format_native_page
 from cortex_mcp.tcp_client import UEConnection
 
 logger = logging.getLogger(__name__)
@@ -20,29 +20,21 @@ def register_reflect_referencer_tools(mcp, connection: UEConnection):
     ) -> str:
         """Use when you need a quick list of what references an asset.
 
-        This is package-level and fast (Asset Registry, no loading). Use BEFORE
-        destructive operations on any asset.
-
-        For detailed graph-level usage (which nodes, read/write/call), use
-        `query_usages`. For full risk-scored analysis before C++ changes, use
+        Package-level and fast (Asset Registry, no loading); use BEFORE destructive operations on any
+        asset. `category` filters to 'all' or 'package'. For detailed graph-level usage (which nodes,
+        read/write/call) use `query_usages`; for full risk-scored analysis before C++ changes use
         `impact_analysis`.
 
-        Args:
-            asset_path: Asset or package path to check referencers for.
-                Object paths with .AssetName suffix are OK.
-            category: Filter referencers - 'all' or 'package' (default 'all').
-            limit: Maximum referencers to return (default 100).
-
-        Returns:
-            List of referencers with package name, type (hard/soft), is_code flag,
-            and module name or asset_class.
+        Returns the referencer list with package name, hard/soft type, is_code flag, and module name
+        or asset_class.
         """
         try:
+            params = {"asset_path": asset_path, "category": category, "limit": limit}
             response = connection.send_command_cached(
                 "reflect.get_referencers",
-                {"asset_path": asset_path, "category": category, "limit": limit},
+                params,
                 ttl=_TTL_REFS,
             )
-            return format_response(response.get("data", {}), "get_referencers")
+            return format_native_page(response.get("data", {}), "reflect.get_referencers", params)
         except ConnectionError as e:
             return f"Error: {e}"

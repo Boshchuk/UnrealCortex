@@ -28,5 +28,10 @@ public class CortexBlueprint : ModuleRules
 			"Slate",
 			"SlateCore",
 		});
+		// FInstancedStruct is still supplied by the StructUtils plugin before 5.5.
+		if (Target.Version.MajorVersion == 5 && Target.Version.MinorVersion < 5)
+		{
+			PrivateDependencyModuleNames.Add("StructUtils");
+		}
 	}
 }

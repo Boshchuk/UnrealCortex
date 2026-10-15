@@ -12,7 +12,9 @@ from types import SimpleNamespace
 import pytest
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult
 from cortex_mcp.server import _register_explicit_tools
+from cortex_mcp.operation_schema import reset_operation_schema_budget
 from cortex_mcp.tcp_client import UEConnection
 from tools.level.composites import _build_level_batch_commands, _validate_level_batch_spec
 
@@ -28,6 +30,14 @@ for path in (_SRC_DIR, _TOOLS_DIR, _EDITOR_TOOLS_DIR):
     path_str = str(path)
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_operation_schema_budget():
+    """Each pytest case is an independent authoring task, including anyio backends."""
+    reset_operation_schema_budget()
+    yield
+    reset_operation_schema_budget()
 
 
 def _uniq(prefix: str) -> str:
@@ -53,7 +63,7 @@ def _normalize_data_args(command: str, args: dict) -> dict:
 
 def _normalize_level_args(command: str, args: dict) -> dict:
     normalized = dict(args)
-    if command in {"spawn_actor", "add_component", "describe_class"}:
+    if command in {"add_component", "describe_class"}:
         class_name = normalized.pop("class_name", None)
         if class_name and "class" not in normalized:
             normalized["class"] = class_name
@@ -133,14 +143,13 @@ def _format_level_batch_response(batch_data: dict, total_steps: int) -> dict:
 
 @pytest.fixture(scope="session")
 def tcp_connection():
-    old_project_dir = os.environ.get("CORTEX_PROJECT_DIR")
-    os.environ["CORTEX_PROJECT_DIR"] = str(_PROJECT_ROOT)
-    conn = UEConnection()
-    conn.connect()
-    if old_project_dir is None:
-        os.environ.pop("CORTEX_PROJECT_DIR", None)
-    else:
-        os.environ["CORTEX_PROJECT_DIR"] = old_project_dir
+    # Use the workspace default only when the caller has not selected a project.
+    # Restore temporary discovery state even if construction or connection fails.
+    with pytest.MonkeyPatch.context() as discovery_env:
+        if "CORTEX_PROJECT_DIR" not in os.environ:
+            discovery_env.setenv("CORTEX_PROJECT_DIR", str(_PROJECT_ROOT))
+        conn = UEConnection()
+        conn.connect()
     try:
         yield conn
     finally:
@@ -218,7 +227,7 @@ def actors_for_test(tcp_connection, cleanup_actors):
     for key, spec in specs.items():
         resp = tcp_connection.send_command(
             "level.spawn_actor",
-            {"class": spec["class"], "label": spec["label"]},
+            {"class_name": spec["class"], "label": spec["label"]},
         )
         cleanup_actors.append(spec["label"])
         actors[key] = spec["label"]
@@ -227,7 +236,7 @@ def actors_for_test(tcp_connection, cleanup_actors):
 
 
 def _map_tool_call(name: str, args: dict) -> tuple[str, dict]:
-    if name in {"core_cmd", "data_cmd", "blueprint_cmd", "graph_cmd", "level_cmd", "material_cmd", "umg_cmd", "qa_cmd", "reflect_cmd", "editor_cmd", "statetree_cmd", "anim_cmd", "blueprint_compose", "material_compose", "material_instance_compose", "widget_compose", "level_compose", "scenario_compose", "editor_restart", "schema_generate", "qa_test_step"}:
+    if name in {"core_cmd", "data_cmd", "blueprint_cmd", "graph_cmd", "level_cmd", "material_cmd", "umg_cmd", "qa_cmd", "reflect_cmd", "editor_cmd", "statetree_cmd", "anim_cmd", "blueprint_compose", "material_compose", "material_instance_compose", "widget_compose", "level_compose", "scenario_compose", "editor_restart", "schema_generate", "qa_test_step", "profile_operation_schema"}:
         return name, args
 
     if name == "level_batch":
@@ -263,10 +272,12 @@ def _map_tool_call(name: str, args: dict) -> tuple[str, dict]:
 
     umg_names = {
         "add_widget", "remove_widget", "reparent", "get_tree", "get_widget", "list_widget_classes",
-        "duplicate_widget", "set_color", "set_text", "set_font", "set_brush", "set_padding",
-        "set_anchor", "set_alignment", "set_size", "set_visibility", "set_property",
+        "duplicate_widget", "set_widget_variable", "set_color", "set_text", "set_font", "set_brush",
+        "set_padding", "set_anchor", "set_alignment", "set_size", "set_visibility", "set_property",
         "get_property", "get_schema", "create_animation", "list_animations", "remove_animation",
+        "list_animation_bindings", "remove_animation_binding",
     }
+
     if name in umg_names:
         return "umg_cmd", {"command": name, "params": args}
 
@@ -283,7 +294,7 @@ def _map_tool_call(name: str, args: dict) -> tuple[str, dict]:
         return "data_cmd", {"command": name, "params": _normalize_data_args(name, args)}
 
     level_names = {
-        "list_actor_classes", "list_component_classes", "describe_class", "spawn_actor", "delete_actor",
+        "list_actor_classes", "list_component_classes", "describe_class", "delete_actor",
         "duplicate_actor", "rename_actor", "get_actor", "set_transform", "set_actor_property",
         "get_actor_property", "list_components", "add_component", "remove_component",
         "get_component_property", "set_component_property", "list_actors", "find_actors",
@@ -355,11 +366,15 @@ def mcp_client(tcp_connection):
         async def call_tool(self, name: str, args: dict):
             if name == "batch_query":
                 normalized_args = _normalize_data_args(name, args)
-                response = tcp_connection.send_command(
-                    "batch",
-                    {"commands": normalized_args["commands"]},
-                )
-                return SimpleNamespace(content=[SimpleNamespace(text=json.dumps(response.get("data", {})))])
+                params = {"commands": normalized_args["commands"]}
+                for key in ("stop_on_error", "rollback_on_error", "verify_rollback"):
+                    if key in normalized_args:
+                        params[key] = normalized_args[key]
+                response = tcp_connection.send_command("batch", params)
+                if response.get("success"):
+                    return SimpleNamespace(content=[SimpleNamespace(text=json.dumps(response.get("data", {})))])
+                error = response.get("error", {})
+                return SimpleNamespace(content=[SimpleNamespace(text=json.dumps({"success": False, "error": error}))])
 
             if name == "level_batch":
                 _validate_level_batch_spec(args["operations"])
@@ -382,6 +397,10 @@ def mcp_client(tcp_connection):
                 response = tcp_connection.send_command(mapped_args["command"], mapped_args.get("params"))
                 return SimpleNamespace(content=[SimpleNamespace(text=json.dumps(response.get("data", {})))])
             result = await test_mcp.call_tool(mapped_name, mapped_args)
+            if isinstance(result, CallToolResult):
+                # Public tools are registered through the output adapter and return a
+                # CallToolResult; keep the mock client's text-block view for existing tests.
+                return SimpleNamespace(content=list(result.content))
             content = result[0] if isinstance(result, tuple) else result
             if isinstance(content, (list, tuple)):
                 blocks = list(content)

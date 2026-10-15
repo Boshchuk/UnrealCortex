@@ -68,6 +68,10 @@ FCortexCommandResult FCortexEditorCommandHandler::Execute(
 	{
 		return FCortexEditorInputOps::InjectInputAction(*PIEState, Params);
 	}
+	if (PIEState.IsValid() && Command == TEXT("inject_input_continuous"))
+	{
+		return FCortexEditorInputOps::InjectInputContinuous(PIEState, Params, MoveTemp(DeferredCallback));
+	}
 	if (PIEState.IsValid() && Command == TEXT("inject_input_sequence"))
 	{
 		return FCortexEditorInputOps::InjectInputSequence(PIEState, Params, MoveTemp(DeferredCallback));
@@ -156,25 +160,30 @@ TArray<FCortexCommandInfo> FCortexEditorCommandHandler::GetSupportedCommands() c
 			.Required(TEXT("key"), TEXT("string"), TEXT("Key to inject"))
 			.Optional(TEXT("action"), TEXT("string"), TEXT("tap, press, or release"))
 			.Optional(TEXT("duration_ms"), TEXT("number"), TEXT("Press duration in milliseconds")),
-		FCortexCommandInfo{ TEXT("inject_mouse"), TEXT("Inject mouse input into PIE") }
-			.Required(TEXT("button"), TEXT("string"), TEXT("Mouse button to inject"))
-			.Optional(TEXT("action"), TEXT("string"), TEXT("tap, press, or release"))
-			.Optional(TEXT("duration_ms"), TEXT("number"), TEXT("Press duration in milliseconds"))
-			.Optional(TEXT("delta"), TEXT("object"), TEXT("Optional relative mouse delta")),
-		FCortexCommandInfo{ TEXT("inject_input_action"), TEXT("Inject Enhanced Input action into PIE") }
-			.Required(TEXT("action"), TEXT("string"), TEXT("Input action asset or name"))
-			.Optional(TEXT("value"), TEXT("object"), TEXT("Input value payload"))
-			.Optional(TEXT("trigger_event"), TEXT("string"), TEXT("Trigger event to simulate")),
+		FCortexCommandInfo{ TEXT("inject_mouse"), TEXT("Inject Slate mouse input into PIE") }
+			.Required(TEXT("action"), TEXT("string"), TEXT("click, move, or scroll"))
+			.Optional(TEXT("button"), TEXT("string"), TEXT("left (default), right, or middle; used for click"))
+			.Optional(TEXT("x"), TEXT("number"), TEXT("Screen-space X coordinate; defaults to current cursor X"))
+			.Optional(TEXT("y"), TEXT("number"), TEXT("Screen-space Y coordinate; defaults to current cursor Y"))
+			.Optional(TEXT("delta"), TEXT("number"), TEXT("Scroll delta; required for scroll")),
+		FCortexCommandInfo{ TEXT("inject_input_action"), TEXT("Inject one frame of Enhanced Input into active PIE") }
+			.Required(TEXT("action_name"), TEXT("string"), TEXT("Input action asset path or loaded name"))
+			.Optional(TEXT("value"), TEXT("any"), TEXT("Number or x/y/z numeric object; action type determines axes; defaults to 1")),
+		FCortexCommandInfo{ TEXT("inject_input_continuous"), TEXT("Start, update, or stop session-owned Enhanced Input in active PIE") }
+			.Required(TEXT("action_name"), TEXT("string"), TEXT("Input action asset path or loaded name"))
+			.Optional(TEXT("value"), TEXT("any"), TEXT("Number or x/y/z numeric object; defaults to 1; unused for stop"))
+			.Optional(TEXT("mode"), TEXT("string"), TEXT("start (default), update, or stop; update requires an owned run"))
+			.Optional(TEXT("duration_ms"), TEXT("number"), TEXT("Finite positive start duration; omitted runs until stop or session cancellation")),
 		FCortexCommandInfo{ TEXT("inject_input_sequence"), TEXT("Execute timed input sequence") }
 			.Required(TEXT("steps"), TEXT("array"), TEXT("Timed input steps to execute"))
 			.Optional(TEXT("timeout"), TEXT("number"), TEXT("Overall timeout in seconds")),
-		FCortexCommandInfo{ TEXT("capture_screenshot"), TEXT("Capture viewport screenshot") }
+		FCortexCommandInfo{ TEXT("capture_screenshot"), TEXT("Redraw and capture the active viewport with explicit camera provenance") }
 			.Optional(TEXT("output_path"), TEXT("string"), TEXT("Optional screenshot output path")),
 		FCortexCommandInfo{ TEXT("get_viewport_info"), TEXT("Get viewport state") },
-		FCortexCommandInfo{ TEXT("set_viewport_camera"), TEXT("Position viewport camera") }
-			.Required(TEXT("location"), TEXT("array"), TEXT("Camera location"))
-			.Optional(TEXT("rotation"), TEXT("array"), TEXT("Camera rotation"))
-			.Optional(TEXT("speed"), TEXT("number"), TEXT("Viewport camera speed")),
+		FCortexCommandInfo{ TEXT("set_viewport_camera"), TEXT("Position editor viewport camera; possessed PIE requires explicit transient override") }
+			.Required(TEXT("location"), TEXT("object"), TEXT("Camera location with numeric x/y/z"))
+			.Optional(TEXT("rotation"), TEXT("object"), TEXT("Camera rotation with numeric pitch/yaw/roll"))
+			.Optional(TEXT("allow_during_pie"), TEXT("boolean"), TEXT("Allow transient editor-client change during possessed PIE; does not control game camera")),
 		FCortexCommandInfo{ TEXT("focus_actor"), TEXT("Frame actor in viewport") }
 			.Required(TEXT("actor_path"), TEXT("string"), TEXT("Actor path to frame (alias: actor_name, actor)")),
 		FCortexCommandInfo{ TEXT("focus_node"), TEXT("Open Blueprint editor and focus a specific graph node") }
@@ -195,8 +204,11 @@ TArray<FCortexCommandInfo> FCortexEditorCommandHandler::GetSupportedCommands() c
 			.Optional(TEXT("limit"), TEXT("number"), TEXT("Maximum results, clamped to 1..500")),
 		FCortexCommandInfo{ TEXT("get_recent_logs"), TEXT("Get recent log entries") }
 			.Optional(TEXT("severity"), TEXT("string"), TEXT("Minimum severity filter"))
-			.Optional(TEXT("since_seconds"), TEXT("number"), TEXT("Only include recent entries"))
-			.Optional(TEXT("since_cursor"), TEXT("string"), TEXT("Resume from a previous cursor"))
+			.Optional(TEXT("since_seconds"), TEXT("number"), TEXT("Only include entries newer than this many seconds; exactly -1 disables time filtering"))
+			.Optional(TEXT("since_cursor"), TEXT("number"), TEXT("Resume from a previous cursor"))
+			.Optional(TEXT("until_cursor"), TEXT("number"), TEXT("Inclusive end-of-window cursor pinning the window"))
+			.Optional(TEXT("limit"), TEXT("number"), TEXT("Maximum retained entries, 1..2000; omitted uses 200"))
+			.Optional(TEXT("count_only"), TEXT("boolean"), TEXT("Return window metadata and matched_count without entry rows"))
 			.Optional(TEXT("category"), TEXT("string"), TEXT("Optional log category filter")),
 		FCortexCommandInfo{ TEXT("set_time_dilation"), TEXT("Set game time scale") }
 			.Required(TEXT("factor"), TEXT("number"), TEXT("Global time dilation factor")),

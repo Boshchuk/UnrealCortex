@@ -66,6 +66,7 @@ def register_blueprint_analysis_tools(mcp, connection: UEConnection):
         remove_functions: list[str] | None = None,
         migrated_overrides: list[str] | None = None,
         compile: bool = True,
+        save: bool = True,
     ) -> str:
         """Clean up a Blueprint after C++ migration.
 
@@ -87,9 +88,13 @@ def register_blueprint_analysis_tools(mcp, connection: UEConnection):
                 lives in the ConstructionScript graph as a UK2Node_FunctionEntry, not in
                 EventGraph as UK2Node_Event.
             compile: Whether to compile the Blueprint after cleanup (default: True)
+            save: Persist the whole package, including pre-existing dirty edits (default: True).
+                False stages cleanup in memory without writing the package. Failed compilation
+                never saves; staged edits remain dirty for inspection or repair.
 
         Returns:
-            JSON with fields from bp.cleanup_migration plus (when migrated_overrides provided):
+            JSON includes saved, is_dirty, compiled, compile_status from final cleanup,
+            plus (when migrated_overrides provided):
             - pruned_event_nodes: count of EventGraph entry nodes removed
             - pruned_event_node_names: list of display names of removed nodes
             - unrecognized_overrides: list of override names not in the known mapping table
@@ -105,9 +110,16 @@ def register_blueprint_analysis_tools(mcp, connection: UEConnection):
             # Event ActorBeginOverlap entry nodes, deletes orphaned downstream chains,
             # then compiles.
         """
-        # Defer compile when we have overrides to process after bp.cleanup_migration.
+        if not isinstance(compile, bool) or not isinstance(save, bool):
+            return json.dumps({"error": "compile and save must be booleans"})
+
+        # Stage the first step: override pruning must finish before compilation or persistence.
         effective_compile = False if migrated_overrides else compile
-        params: dict = {"asset_path": asset_path, "compile": effective_compile}
+        params: dict = {
+            "asset_path": asset_path,
+            "compile": effective_compile,
+            "save": False if migrated_overrides else save,
+        }
         if new_parent_class:
             params["new_parent_class"] = new_parent_class
         if remove_variables:
@@ -161,17 +173,25 @@ def register_blueprint_analysis_tools(mcp, connection: UEConnection):
                             pruned_names.append(node["display_name"])
 
             if pruned_names:
-                # Clean up orphaned downstream chains and compile.
+                # Keep downstream cleanup staged; the final native cleanup owns compile/save.
                 connection.send_command("blueprint.delete_orphaned_nodes", {
                     "asset_path": asset_path,
                     "graph_name": "EventGraph",
-                    "compile": compile,
+                    "compile": False,
                 })
-            elif compile:
-                # No event nodes removed but compile was deferred from bp.cleanup_migration.
-                connection.send_command("blueprint.compile", {"asset_path": asset_path})
+
+            final_response = connection.send_command("blueprint.cleanup_migration", {
+                "asset_path": asset_path,
+                "compile": compile,
+                "save": save,
+            })
 
             result = dict(cleanup_data)
+            result.update(final_response.get("data", {}))
+            # The first step's mutation inventory must survive the finalize-only response.
+            for key in ("reparented", "new_parent", "removed_variables", "removed_functions", "warnings"):
+                if key in cleanup_data:
+                    result[key] = cleanup_data[key]
             result["pruned_event_nodes"] = len(pruned_names)
             result["pruned_event_node_names"] = pruned_names
             if unrecognized:

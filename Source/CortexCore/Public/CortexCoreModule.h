@@ -50,6 +50,9 @@ public:
 	/** Returns the number of registered command domains. */
 	int32 GetDomainCount() const;
 
+	/** Per-process instance identity for live operation-schema responses. */
+	const FString& GetInstanceId() const { return InstanceId; }
+
 	// Serialization callback — CortexBlueprint binds at startup, unbinds at shutdown
 	void SetSerializationHandler(FOnCortexSerializationRequested Handler)
 	{
@@ -64,6 +67,7 @@ private:
 	TUniquePtr<FCortexTcpServer> TcpServer;
 	// POC: optional in-editor HTTP/SSE MCP transport (opt-in via cortex.http.port CVar).
 	TUniquePtr<class FCortexHttpServer> HttpServer;
+	FString InstanceId;
 
 	FOnCortexConversionRequested ConversionRequestedDelegate;
 	FOnCortexAnalysisRequested AnalysisRequestedDelegate;

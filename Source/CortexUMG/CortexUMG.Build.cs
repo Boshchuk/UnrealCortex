@@ -19,11 +19,23 @@ public class CortexUMG : ModuleRules
             "Json",
             "JsonUtilities",
             "UnrealEd",
+            "BlueprintGraph",
+            // The legacy headless rename adapter also updates any open Designer preview.
+            "Kismet",
+            "KismetCompiler",
+            "GraphEditor",
+            "PropertyEditor",
+            "SourceControl",
+            "Merge",
+            "AssetRegistry",
             "UMG",
             "UMGEditor",
             "Slate",
             "SlateCore",
             "MovieScene",
+            "MovieSceneTracks",
         });
+        // Canonical serialized binding guards use the engine-adopted SHA-256 implementation.
+        AddEngineThirdPartyPrivateStaticDependencies(Target, "OpenSSL");
     }
 }

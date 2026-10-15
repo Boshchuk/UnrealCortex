@@ -29,6 +29,11 @@ FCortexCommandResult FCortexReflectCommandHandler::Execute(
 		return FCortexReflectOps::ClassHierarchy(Params);
 	}
 
+	if (Command == TEXT("blueprint_catalog"))
+	{
+		return FCortexReflectOps::BlueprintCatalog(Params);
+	}
+
 	if (Command == TEXT("class_detail"))
 	{
 		return FCortexReflectOps::ClassDetail(Params);
@@ -58,11 +63,14 @@ TArray<FCortexCommandInfo> FCortexReflectCommandHandler::GetSupportedCommands() 
 			.Optional(TEXT("depth"), TEXT("number"), TEXT("Maximum inheritance depth to traverse"))
 			.Optional(TEXT("include_blueprint"), TEXT("boolean"), TEXT("Include Blueprint-derived classes"))
 			.Optional(TEXT("include_engine"), TEXT("boolean"), TEXT("Include engine classes"))
+			.Optional(TEXT("include_flat_classes"), TEXT("boolean"), TEXT("Include the flat duplicate of every tree node name (default false)"))
 			.Optional(TEXT("max_results"), TEXT("number"), TEXT("Maximum classes to return")),
+		FCortexCommandInfo{ TEXT("blueprint_catalog"), TEXT("List saved project Blueprint classes derived from a native class") }
+			.Required(TEXT("root"), TEXT("string"), TEXT("Native root class name or script class path")),
 		FCortexCommandInfo{ TEXT("class_detail"), TEXT("Get detailed info for a single class") }
 			.Required(TEXT("class_name"), TEXT("string"), TEXT("Class name or Blueprint asset path"))
 			.Optional(TEXT("include_inherited"), TEXT("boolean"), TEXT("Include inherited members in the response"))
-			.Optional(TEXT("detail"), TEXT("string"), TEXT("Detail level: full (default) or summary (name/type/parent/module only)")),
+			.Optional(TEXT("detail"), TEXT("string"), TEXT("Detail level: 'summary' (identity/parent/routing only) or 'full' (default); any other value is refused")),
 		FCortexCommandInfo{ TEXT("find_overrides"), TEXT("Find Blueprint overrides of a class") }
 			.Required(TEXT("class_name"), TEXT("string"), TEXT("Base class to inspect for overrides"))
 			.Optional(TEXT("depth"), TEXT("number"), TEXT("Inheritance depth to search"))

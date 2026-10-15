@@ -1,9 +1,11 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "CortexVersionCompat.h"
 #include "CortexCommandRouter.h"
 #include "CortexPropertyUtils.h"
 #include "WidgetBlueprint.h"
+#include "Animation/WidgetAnimation.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/PanelWidget.h"
 #include "Components/Widget.h"
@@ -42,7 +44,8 @@ namespace CortexUMGUtils
         return WBP;
     }
 
-    inline UWidget* FindWidgetByName(UWidgetTree* WidgetTree, const FString& Name)
+    inline UWidget* FindWidgetByName(UWidgetTree* WidgetTree, const FString& Name,
+        ESearchCase::Type SearchCase = ESearchCase::IgnoreCase)
     {
         if (!WidgetTree || !WidgetTree->RootWidget)
         {
@@ -55,7 +58,7 @@ namespace CortexUMGUtils
             {
                 return nullptr;
             }
-            if (Widget->GetName() == Name)
+            if (Widget->GetName().Equals(Name, SearchCase))
             {
                 return Widget;
             }
@@ -97,6 +100,41 @@ namespace CortexUMGUtils
             }
         }
         return Count;
+    }
+
+    /**
+     * Seeds an empty identity map with the native compiler's deterministic identities for every
+     * pre-existing source widget and animation. Assets saved before the map existed start empty, and
+     * the compiler only seeds such a map while it is still empty, so the first mutation has to seed it
+     * before registering anything new. Populated maps are the authority and are never rewritten.
+     */
+    inline void InitializeLegacyIdentityMap(UWidgetBlueprint* WidgetBlueprint)
+    {
+        if (!WidgetBlueprint)
+        {
+            return;
+        }
+
+        auto& Guids = CortexWidgetVariableGuids(*WidgetBlueprint);
+        if (!Guids.IsEmpty()) { return; }
+
+        WidgetBlueprint->ForEachSourceWidget([&Guids](UWidget* Widget)
+        {
+            if (Widget)
+            {
+                Guids.Add(
+                    Widget->GetFName(), FGuid::NewDeterministicGuid(Widget->GetPathName()));
+            }
+        });
+
+        for (UWidgetAnimation* Existing : WidgetBlueprint->Animations)
+        {
+            if (Existing)
+            {
+                Guids.Add(
+                    Existing->GetFName(), FGuid::NewDeterministicGuid(Existing->GetPathName()));
+            }
+        }
     }
 
     inline bool ResolvePropertyPath(UObject* Object, const FString& PropertyPath, FProperty*& OutProperty, void*& OutValuePtr)

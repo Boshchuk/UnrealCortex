@@ -3,6 +3,7 @@
 #include "Operations/CortexBPSCSDiagnostics.h"
 #include "CortexBlueprintModule.h"
 #include "CortexCommandRouter.h"
+#include "CortexAssetMutationGuard.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Engine/Blueprint.h"
@@ -12,6 +13,8 @@
 #include "EdGraph/EdGraph.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "KismetCompilerModule.h"
+#include "Modules/ModuleManager.h"
 #include "Components/ActorComponent.h"
 #include "Components/SceneComponent.h"
 #include "Components/TimelineComponent.h"
@@ -285,6 +288,18 @@ FCortexCommandResult FCortexBPCleanupOps::CleanupMigration(const TSharedPtr<FJso
 	{
 		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
 	}
+	bool bCompile = true;
+	bool bSave = true;
+	for (const TCHAR* Field : { TEXT("compile"), TEXT("save") })
+	{
+		if (Params->HasField(Field) && !Params->HasTypedField<EJson::Boolean>(Field))
+		{
+			return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField,
+				FString::Printf(TEXT("%s must be a boolean"), Field));
+		}
+	}
+	Params->TryGetBoolField(TEXT("compile"), bCompile);
+	Params->TryGetBoolField(TEXT("save"), bSave);
 
 	FString LoadError;
 	UBlueprint* BP = FCortexBPAssetOps::LoadBlueprint(AssetPath, LoadError);
@@ -292,8 +307,6 @@ FCortexCommandResult FCortexBPCleanupOps::CleanupMigration(const TSharedPtr<FJso
 	{
 		return FCortexCommandRouter::Error(CortexErrorCodes::BlueprintNotFound, LoadError);
 	}
-
-	const bool bCompile = Params->HasField(TEXT("compile")) ? Params->GetBoolField(TEXT("compile")) : true;
 
 	TSharedPtr<FJsonObject> ResponseData = MakeShared<FJsonObject>();
 	TArray<TSharedPtr<FJsonValue>> Warnings;
@@ -327,14 +340,28 @@ FCortexCommandResult FCortexBPCleanupOps::CleanupMigration(const TSharedPtr<FJso
 		const bool bNewIsActor = NewParentClass->IsChildOf(AActor::StaticClass());
 		const bool bNewIsComponent = NewParentClass->IsChildOf(UActorComponent::StaticClass());
 		const bool bNewIsWidget = UserWidgetClass && NewParentClass->IsChildOf(UserWidgetClass);
+		bool bOrdinaryObjectFamily = false;
+		if (CurrentParent && BP->GetClass() == UBlueprint::StaticClass() && BP->BlueprintType == BPTYPE_Normal
+			&& !bCurrentIsActor && !bCurrentIsComponent && !bCurrentIsWidget
+			&& !bNewIsActor && !bNewIsComponent && !bNewIsWidget
+			&& !NewParentClass->HasAnyClassFlags(CLASS_Interface)
+			&& FKismetEditorUtilities::CanCreateBlueprintOfClass(NewParentClass))
+		{
+			UClass* BlueprintClass = nullptr;
+			UClass* GeneratedClass = nullptr;
+			FModuleManager::LoadModuleChecked<IKismetCompilerInterface>(TEXT("KismetCompiler"))
+				.GetBlueprintTypesForClass(NewParentClass, BlueprintClass, GeneratedClass);
+			bOrdinaryObjectFamily = BlueprintClass == UBlueprint::StaticClass()
+				&& GeneratedClass == UBlueprintGeneratedClass::StaticClass();
+		}
 
 		if (!((bCurrentIsActor && bNewIsActor) ||
 			  (bCurrentIsComponent && bNewIsComponent) ||
-			  (bCurrentIsWidget && bNewIsWidget)))
+			  (bCurrentIsWidget && bNewIsWidget) || bOrdinaryObjectFamily))
 		{
 			return FCortexCommandRouter::Error(
 				CortexErrorCodes::InvalidField,
-				TEXT("Type mismatch: reparenting is only supported within the same type family (Actor->Actor, Component->Component, Widget->Widget)"));
+				TEXT("Type mismatch: reparenting requires the same Actor, Component, Widget, or ordinary Object Blueprint family"));
 		}
 	}
 
@@ -434,6 +461,8 @@ FCortexCommandResult FCortexBPCleanupOps::CleanupMigration(const TSharedPtr<FJso
 		}
 	}
 	ResponseData->SetArrayField(TEXT("removed_functions"), RemovedFuncs);
+	ResponseData->SetArrayField(TEXT("warnings"), Warnings);
+	ResponseData->SetBoolField(TEXT("saved"), false);
 
 	// --- Finalize ---
 	// Note: BP->Modify() is omitted here — RemoveMemberVariable and RemoveGraph
@@ -450,10 +479,20 @@ FCortexCommandResult FCortexBPCleanupOps::CleanupMigration(const TSharedPtr<FJso
 	else
 	{
 		ResponseData->SetBoolField(TEXT("compiled"), false);
+		ResponseData->SetStringField(TEXT("compile_status"), TEXT("NotCompiled"));
+	}
+	ResponseData->SetBoolField(TEXT("is_dirty"), BP->GetPackage()->IsDirty());
+	const bool bCompileFailed = bCompile && BP->Status != BS_UpToDate && BP->Status != BS_UpToDateWithWarnings;
+	if (bCompileFailed || (bSave && BP->Status == BS_Error))
+	{
+		FCortexCommandResult Failure = FCortexCommandRouter::Error(CortexErrorCodes::CompileFailed,
+			TEXT("Cleanup left a Blueprint with compiler errors; the package was not saved"));
+		Failure.ErrorDetails = ResponseData;
+		return Failure;
 	}
 
 	// Persist to disk (skip transient packages used by tests)
-	if (!BP->GetPackage()->GetName().StartsWith(TEXT("/Engine/Transient")))
+	if (bSave && !BP->GetPackage()->GetName().StartsWith(TEXT("/Engine/Transient")))
 	{
 		FString PackageFilename;
 		if (FPackageName::TryConvertLongPackageNameToFilename(
@@ -464,20 +503,26 @@ FCortexCommandResult FCortexBPCleanupOps::CleanupMigration(const TSharedPtr<FJso
 			const bool bSaved = UPackage::SavePackage(BP->GetPackage(), BP, *PackageFilename, SaveArgs);
 			if (!bSaved)
 			{
-				return FCortexCommandRouter::Error(
+				ResponseData->SetBoolField(TEXT("is_dirty"), BP->GetPackage()->IsDirty());
+				FCortexCommandResult Failure = FCortexCommandRouter::Error(
 					CortexErrorCodes::SaveFailed,
 					FString::Printf(TEXT("Failed to save cleaned Blueprint package: %s"), *BP->GetPackage()->GetName()));
+				Failure.ErrorDetails = ResponseData;
+				return Failure;
 			}
+			ResponseData->SetBoolField(TEXT("saved"), true);
 		}
 		else
 		{
-			return FCortexCommandRouter::Error(
+			FCortexCommandResult Failure = FCortexCommandRouter::Error(
 				CortexErrorCodes::SaveFailed,
 				FString::Printf(TEXT("Failed to resolve package filename for: %s"), *BP->GetPackage()->GetName()));
+			Failure.ErrorDetails = ResponseData;
+			return Failure;
 		}
 	}
 
-	ResponseData->SetArrayField(TEXT("warnings"), Warnings);
+	ResponseData->SetBoolField(TEXT("is_dirty"), BP->GetPackage()->IsDirty());
 
 	UE_LOG(LogCortexBlueprint, Log, TEXT("Cleanup migration: %s — reparented=%d, removed %d vars, %d funcs"),
 		*BP->GetName(), bReparented, RemovedVars.Num(), RemovedFuncs.Num());
@@ -495,6 +540,12 @@ FCortexCommandResult FCortexBPCleanupOps::RecompileDependents(const TSharedPtr<F
 			TEXT("Missing required param: asset_path"));
 	}
 
+	FString BlockReason;
+	if (FCortexAssetMutationGuard::IsPathBlocked(AssetPath, BlockReason))
+	{
+		return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+			FString::Printf(TEXT("Asset is blocked after failed recovery: %s"), *BlockReason));
+	}
 	FString ValidationError;
 	if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(AssetPath, ValidationError))
 	{
@@ -518,6 +569,12 @@ FCortexCommandResult FCortexBPCleanupOps::RecompileDependents(const TSharedPtr<F
 			continue;
 		}
 
+		FString DependentBlockReason;
+		if (FCortexAssetMutationGuard::IsBlocked(DependentBlueprint, DependentBlockReason))
+		{
+			return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("Asset is blocked after failed recovery: %s"), *DependentBlockReason));
+		}
 		if (!FCortexBPAssetOps::ValidateWritableBlueprintAssetPath(DependentBlueprint->GetPathName(), ValidationError))
 		{
 			return FCortexCommandRouter::Error(CortexErrorCodes::InvalidField, ValidationError);
@@ -697,6 +754,12 @@ FCortexCommandResult FCortexBPCleanupOps::RenameSCSComponent(const TSharedPtr<FJ
 			continue;
 		}
 
+		FString DependentBlockReason;
+		if (FCortexAssetMutationGuard::IsBlocked(DependentBP, DependentBlockReason))
+		{
+			return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+				FString::Printf(TEXT("Dependent Blueprint is blocked after failed recovery: %s"), *DependentBlockReason));
+		}
 		const bool bDependentVariableCollision = DependentBP->NewVariables.ContainsByPredicate(
 			[&NewFName](const FBPVariableDescription& Variable)
 			{
@@ -790,6 +853,15 @@ FCortexCommandResult FCortexBPCleanupOps::RenameSCSComponent(const TSharedPtr<FJ
 			if (!IsValid(DependentBP) || DependentBP == BP)
 			{
 				continue;
+			}
+
+			FString BlockReason;
+			if (FCortexAssetMutationGuard::IsBlocked(DependentBP, BlockReason))
+			{
+				RestoreSCSComponentName(BP, SCS, NewFName, OldFName);
+				Transaction.Cancel();
+				return FCortexCommandRouter::Error(CortexErrorCodes::InvalidOperation,
+					FString::Printf(TEXT("Dependent Blueprint is blocked after failed recovery: %s"), *BlockReason));
 			}
 
 			DependentBP->Modify();
@@ -1126,4 +1198,5 @@ void FCortexBPCleanupOps::SetRenameSCSComponentPostCompileTestHook(TFunction<voi
 {
 	GRenameSCSComponentPostCompileTestHook = MoveTemp(InHook);
 }
+
 #endif

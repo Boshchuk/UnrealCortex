@@ -9,4 +9,6 @@ public:
     static FCortexCommandResult CreateAnimation(const TSharedPtr<FJsonObject>& Params);
     static FCortexCommandResult ListAnimations(const TSharedPtr<FJsonObject>& Params);
     static FCortexCommandResult RemoveAnimation(const TSharedPtr<FJsonObject>& Params);
+    static FCortexCommandResult ListAnimationBindings(const TSharedPtr<FJsonObject>& Params);
+    static FCortexCommandResult RemoveAnimationBinding(const TSharedPtr<FJsonObject>& Params);
 };

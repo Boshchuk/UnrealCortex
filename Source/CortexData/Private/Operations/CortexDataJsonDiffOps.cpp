@@ -1,6 +1,7 @@
 #include "Operations/CortexDataJsonDiffOps.h"
 #include "CortexVersionCompat.h"
 
+#include "CortexEngineCompat.h"
 #include "CortexSafeFileContract.h"
 #include "CortexTypes.h"
 #include "Dom/JsonObject.h"
@@ -256,11 +257,12 @@ namespace
 			return Copy;
 		}
 
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Entry : Source->Values)
+		for (const auto& Entry : Source->Values)
 		{
-			if (!IgnoredFields.Contains(Entry.Key) && Entry.Value.IsValid())
+			const FString FieldName = CortexEngineCompat::JsonKeyToString(Entry.Key);
+			if (!IgnoredFields.Contains(FieldName) && Entry.Value.IsValid())
 			{
-				Copy->SetField(Entry.Key, Entry.Value);
+				Copy->SetField(FieldName, Entry.Value);
 			}
 		}
 
@@ -506,16 +508,16 @@ namespace
 		TSet<FString> FieldNames;
 		if (LeftFields.IsValid())
 		{
-			for (const auto& Entry : LeftFields->Values)
+			for (const auto& Pair : LeftFields->Values)
 			{
-				FieldNames.Add(CortexJsonKeyToString(Entry.Key));
+				FieldNames.Add(CortexEngineCompat::JsonKeyToString(Pair.Key));
 			}
 		}
 		if (RightFields.IsValid())
 		{
-			for (const auto& Entry : RightFields->Values)
+			for (const auto& Pair : RightFields->Values)
 			{
-				FieldNames.Add(CortexJsonKeyToString(Entry.Key));
+				FieldNames.Add(CortexEngineCompat::JsonKeyToString(Pair.Key));
 			}
 		}
 

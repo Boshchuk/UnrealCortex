@@ -94,7 +94,8 @@ FCortexCommandResult FCortexEditorViewportOps::GetViewportInfo()
 	switch (CurrentViewMode)
 	{
 	case VMI_Lit:
-		ViewModeStr = TEXT("lit");
+		// UE 5.8 deprecated VMI_Lit_Wireframe; the mode is now Lit plus mesh edges.
+		ViewModeStr = ViewportClient.EngineShowFlags.MeshEdges ? TEXT("lit_wireframe") : TEXT("lit");
 		break;
 	case VMI_Unlit:
 		ViewModeStr = TEXT("unlit");
@@ -102,11 +103,6 @@ FCortexCommandResult FCortexEditorViewportOps::GetViewportInfo()
 	case VMI_BrushWireframe:
 		ViewModeStr = TEXT("wireframe");
 		break;
-#if !UE_VERSION_OLDER_THAN(5, 6, 0)
-	case VMI_Lit_Wireframe:
-		ViewModeStr = TEXT("lit_wireframe");
-		break;
-#endif
 	default:
 		ViewModeStr = FString::Printf(TEXT("other_%d"), static_cast<int32>(CurrentViewMode));
 		break;
@@ -153,11 +149,12 @@ FCortexCommandResult FCortexEditorViewportOps::CaptureScreenshot(const TSharedPt
 	FEditorViewportClient& Client = Viewport->GetAssetViewportClient();
 	Client.Invalidate(true, true);
 
-	// Force a Slate tick to trigger DrawWindow() → FSceneViewport::Draw()
-	// which populates RenderTargetTextureRHI with the current scene state.
-	// Without this, Slate skips re-rendering idle viewports and ReadPixels()
-	// returns the last cached frame (which may predate material changes).
+	// A Slate tick alone is not enough: Slate can skip drawing a viewport that is not
+	// visible (minimized editor, hidden tab, remote desktop), leaving ReadPixels() to
+	// return the stale render target. Draw the ACTUAL active viewport explicitly so the
+	// readback reflects the current scene/camera state before the render flush.
 	FSlateApplication::Get().Tick(ESlateTickType::All);
+	ActiveViewport->Draw(false);
 
 	FlushRenderingCommands();
 
@@ -198,17 +195,75 @@ FCortexCommandResult FCortexEditorViewportOps::CaptureScreenshot(const TSharedPt
 
 	const double CaptureTimeMs = (FPlatformTime::Seconds() - StartTime) * 1000.0;
 
+	// Classify the viewport actually captured using the ACTIVE viewport's own PIE
+	// state. HasPlayInEditorViewport() would also report an inactive PIE viewport
+	// that remains after ejecting into SIE, which does not describe the image read.
+	const bool bPieActive = (GEditor != nullptr && GEditor->PlayWorld != nullptr);
+	const bool bActiveGameViewport = ActiveViewport->IsPlayInEditorViewport();
+
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetStringField(TEXT("path"), FPaths::ConvertRelativePathToFull(OutputPath));
 	Data->SetNumberField(TEXT("width"), Size.X);
 	Data->SetNumberField(TEXT("height"), Size.Y);
 	Data->SetNumberField(TEXT("file_size_bytes"), static_cast<double>(IFileManager::Get().FileSize(*OutputPath)));
 	Data->SetNumberField(TEXT("capture_time_ms"), CaptureTimeMs);
+	Data->SetStringField(TEXT("view"), bActiveGameViewport ? TEXT("pie_game_camera") : TEXT("editor_camera"));
+	Data->SetBoolField(TEXT("pie_active"), bPieActive);
+
+	if (bActiveGameViewport)
+	{
+		// The active viewport renders the PIE game camera, which the editor client
+		// does not control and whose exact pose is not known here. Report it as
+		// unavailable rather than guessing a first-player-controller pose.
+		Data->SetBoolField(TEXT("camera_available"), false);
+		Data->SetStringField(TEXT("camera_provenance"), TEXT("unavailable"));
+	}
+	else
+	{
+		// The editor client camera is what the viewport renders; its pose is a
+		// client pose (a locked actor/view may differ from the rendered image).
+		TSharedPtr<FJsonObject> Camera = MakeShared<FJsonObject>();
+
+		TSharedPtr<FJsonObject> CameraLocation = MakeShared<FJsonObject>();
+		const FVector ViewLoc = Client.GetViewLocation();
+		CameraLocation->SetNumberField(TEXT("x"), ViewLoc.X);
+		CameraLocation->SetNumberField(TEXT("y"), ViewLoc.Y);
+		CameraLocation->SetNumberField(TEXT("z"), ViewLoc.Z);
+		Camera->SetObjectField(TEXT("location"), CameraLocation);
+
+		TSharedPtr<FJsonObject> CameraRotation = MakeShared<FJsonObject>();
+		const FRotator ViewRot = Client.GetViewRotation();
+		CameraRotation->SetNumberField(TEXT("pitch"), ViewRot.Pitch);
+		CameraRotation->SetNumberField(TEXT("yaw"), ViewRot.Yaw);
+		CameraRotation->SetNumberField(TEXT("roll"), ViewRot.Roll);
+		Camera->SetObjectField(TEXT("rotation"), CameraRotation);
+
+		Data->SetObjectField(TEXT("camera"), Camera);
+		Data->SetBoolField(TEXT("camera_available"), true);
+		Data->SetStringField(TEXT("camera_provenance"), TEXT("editor_client"));
+	}
+
 	return FCortexCommandRouter::Success(Data);
 }
 
 FCortexCommandResult FCortexEditorViewportOps::SetViewportCamera(const TSharedPtr<FJsonObject>& Params)
 {
+	// Validate the optional PIE override type before any camera mutation. The field must
+	// be an explicit JSON boolean: boolean-coercible numbers/strings must not authorize a
+	// camera change (TryGetBoolField would accept 1 / "true").
+	bool bAllowDuringPIE = false;
+	if (Params.IsValid() && Params->HasField(TEXT("allow_during_pie")))
+	{
+		const TSharedPtr<FJsonValue> AllowValue = Params->TryGetField(TEXT("allow_during_pie"));
+		if (!AllowValue.IsValid() || AllowValue->Type != EJson::Boolean)
+		{
+			return FCortexCommandRouter::Error(
+				CortexErrorCodes::InvalidField,
+				TEXT("allow_during_pie must be a boolean"));
+		}
+		bAllowDuringPIE = AllowValue->AsBool();
+	}
+
 	const TSharedPtr<FJsonObject>* LocationObj = nullptr;
 	if (!Params.IsValid() || !Params->TryGetObjectField(TEXT("location"), LocationObj) || LocationObj == nullptr)
 	{
@@ -221,6 +276,21 @@ FCortexCommandResult FCortexEditorViewportOps::SetViewportCamera(const TSharedPt
 	if (!Viewport.IsValid())
 	{
 		return FCortexCommandRouter::Error(CortexErrorCodes::ViewportNotFound, TEXT("No active editor viewport found"));
+	}
+
+	FViewport* ActiveViewport = Viewport->GetActiveViewport();
+	const bool bPieActive = (GEditor != nullptr && GEditor->PlayWorld != nullptr);
+	const bool bActiveGameViewport = ActiveViewport != nullptr && ActiveViewport->IsPlayInEditorViewport();
+
+	// A possessed in-viewport PIE image comes from the game camera, so repositioning
+	// the editor client would not change what is rendered. Reject before mutating
+	// unless the caller explicitly opts into a transient editor-client override.
+	if (bActiveGameViewport && !bAllowDuringPIE)
+	{
+		return FCortexCommandRouter::Error(
+			CortexErrorCodes::InvalidOperation,
+			TEXT("set_viewport_camera cannot control a possessed in-viewport PIE camera; "
+				"pass allow_during_pie=true for a transient editor-client override"));
 	}
 
 	double X = 0.0;
@@ -247,6 +317,14 @@ FCortexCommandResult FCortexEditorViewportOps::SetViewportCamera(const TSharedPt
 
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetStringField(TEXT("status"), TEXT("ok"));
+	Data->SetBoolField(TEXT("pie_active"), bPieActive);
+	Data->SetBoolField(TEXT("editor_camera_visible"), !bActiveGameViewport);
+	if (bActiveGameViewport && bAllowDuringPIE)
+	{
+		Data->SetStringField(TEXT("note"),
+			TEXT("Editor client camera repositioned for a transient view only; PIE keeps rendering the "
+				"game camera and the engine may restore the pre-PIE editor pose when the session ends."));
+	}
 	return FCortexCommandRouter::Success(Data);
 }
 
@@ -322,6 +400,7 @@ FCortexCommandResult FCortexEditorViewportOps::SetViewportMode(const TSharedPtr<
 	}
 
 	EViewModeIndex ViewMode = VMI_Lit;
+	bool bMeshEdges = false;
 	if (Mode == TEXT("lit"))
 	{
 		ViewMode = VMI_Lit;
@@ -334,12 +413,12 @@ FCortexCommandResult FCortexEditorViewportOps::SetViewportMode(const TSharedPtr<
 	{
 		ViewMode = VMI_BrushWireframe;
 	}
-#if !UE_VERSION_OLDER_THAN(5, 6, 0)
 	else if (Mode == TEXT("lit_wireframe"))
 	{
-		ViewMode = VMI_Lit_Wireframe;
+		// UE 5.8 deprecated VMI_Lit_Wireframe; the mode is Lit plus mesh edges.
+		ViewMode = VMI_Lit;
+		bMeshEdges = true;
 	}
-#endif
 	else
 	{
 		return FCortexCommandRouter::Error(
@@ -354,6 +433,9 @@ FCortexCommandResult FCortexEditorViewportOps::SetViewportMode(const TSharedPtr<
 	}
 
 	FEditorViewportClient& Client = Viewport->GetAssetViewportClient();
+	// Set the mesh-edges show flag before the view mode so ApplyViewMode sees it
+	// (it disables TAA for mesh edges) and so switching modes resets the flag.
+	Client.EngineShowFlags.SetMeshEdges(bMeshEdges);
 	Client.SetViewMode(ViewMode);
 
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();

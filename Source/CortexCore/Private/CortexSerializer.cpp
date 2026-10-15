@@ -2,6 +2,7 @@
 #include "CortexSerializer.h"
 #include "CortexVersionCompat.h"
 #include "CortexCoreModule.h"
+#include "CortexEngineCompat.h"
 #include "UObject/UnrealType.h"
 #include "UObject/TextProperty.h"
 #include "UObject/EnumProperty.h"
@@ -799,6 +800,107 @@ FCortexPropertySerializationResult FCortexSerializer::PropertyToJsonDeep(const F
 	return Result;
 }
 
+FCortexPropertySerializationResult FCortexSerializer::PropertyDifferenceToJson(
+	const FProperty* Property,
+	const void* ValuePtr,
+	const void* BaselineValuePtr,
+	const FCortexSerializationPolicy& Policy,
+	const FString& FieldPath)
+{
+	check(IsInGameThread());
+
+	FCortexPropertySerializationResult Result;
+	if (Property == nullptr || ValuePtr == nullptr || BaselineValuePtr == nullptr)
+	{
+		AddIssue(
+			Result,
+			FieldPath,
+			TEXT("INVALID_PROPERTY"),
+			TEXT("Property or value pointer was null"),
+			ECortexSerializationSeverity::Error,
+			true,
+			true);
+		return Result;
+	}
+
+	// An identical value carries no delta at all: it is reported as an absent value rather than as an
+	// issue, so a caller can drop it and record the omission explicitly.
+	if (Property->Identical(ValuePtr, BaselineValuePtr))
+	{
+		return Result;
+	}
+
+	// A differing value that cannot be compared within the remaining depth budget is reported as a
+	// structured issue plus a partial result. It is never presented as a complete value and never as
+	// the historical <changed> sentinel.
+	if (Policy.MaxDepth < 0)
+	{
+		AddIssue(
+			Result,
+			FieldPath,
+			TEXT("MAX_DEPTH_EXCEEDED"),
+			TEXT("Maximum difference depth exceeded"),
+			ECortexSerializationSeverity::Error,
+			true,
+			true);
+		return Result;
+	}
+
+	// A struct value is compared member by member so an equal member is omitted while a differing
+	// member is reported recursively. Both pointers address the same struct type and layout, which the
+	// caller guarantees. Struct types that carry their own serialization contract stay atomic.
+	if (const FStructProperty* StructProp = CastField<FStructProperty>(Property))
+	{
+		if (StructProp->Struct != FInstancedStruct::StaticStruct()
+			&& StructProp->Struct != FGameplayTag::StaticStruct()
+			&& StructProp->Struct != FGameplayTagContainer::StaticStruct()
+			&& StructProp->Struct != TBaseStructure<FSoftObjectPath>::Get())
+		{
+			FCortexSerializationPolicy NestedPolicy = Policy;
+			--NestedPolicy.MaxDepth;
+
+			const TSharedPtr<FJsonObject> DifferenceObject = MakeShared<FJsonObject>();
+			for (TFieldIterator<FProperty> It(StructProp->Struct); It; ++It)
+			{
+				const FProperty* MemberProperty = *It;
+				if (!NestedPolicy.ShouldAdmitProperty(MemberProperty))
+				{
+					continue;
+				}
+
+				const void* MemberValuePtr = MemberProperty->ContainerPtrToValuePtr<void>(ValuePtr);
+				const void* MemberBaselinePtr = MemberProperty->ContainerPtrToValuePtr<void>(BaselineValuePtr);
+				const FCortexPropertySerializationResult Member = PropertyDifferenceToJson(
+					MemberProperty,
+					MemberValuePtr,
+					MemberBaselinePtr,
+					NestedPolicy,
+					JoinFieldPath(FieldPath, MemberProperty->GetName()));
+				if (Member.JsonValue.IsValid())
+				{
+					DifferenceObject->SetField(MemberProperty->GetName(), Member.JsonValue);
+				}
+				AppendSerializationIssues(Result, Member);
+			}
+
+			if (DifferenceObject->Values.Num() > 0)
+			{
+				Result.JsonValue = MakeShared<FJsonValueObject>(DifferenceObject);
+			}
+			return Result;
+		}
+	}
+
+	// Every other value - array, set, map, object identity or scalar - is compared whole and
+	// serialized atomically through the existing deep serialization, which keeps the issues and
+	// partial state of that serialization (for example an identity-only object reference, a set's
+	// iteration order or unsupported text metadata).
+	const FCortexPropertySerializationResult AtomicValue = PropertyToJsonDeep(Property, ValuePtr, Policy, FieldPath);
+	Result.JsonValue = AtomicValue.JsonValue;
+	AppendSerializationIssues(Result, AtomicValue);
+	return Result;
+}
+
 TArray<TSharedPtr<FJsonValue>> FCortexSerializer::SerializationIssuesToJson(const TArray<FCortexSerializationIssue>& Issues)
 {
 	TArray<TSharedPtr<FJsonValue>> JsonIssues;
@@ -1211,7 +1313,7 @@ bool FCortexSerializer::JsonToStruct(const TSharedPtr<FJsonObject>& JsonObject, 
 	bool bSuccess = true;
 	for (const auto& Pair : JsonObject->Values)
 	{
-		const FString FieldName(CortexJsonKeyToString(Pair.Key));
+		const FString FieldName = CortexEngineCompat::JsonKeyToString(Pair.Key);
 		const TSharedPtr<FJsonValue>& JsonValue = Pair.Value;
 
 		// Skip internal metadata fields
@@ -1456,7 +1558,19 @@ bool FCortexSerializer::JsonToProperty(const TSharedPtr<FJsonValue>& JsonValue, 
 		{
 			const FString TagString = JsonValue->AsString();
 			FGameplayTag* Tag = static_cast<FGameplayTag*>(ValuePtr);
+			if (TagString.IsEmpty())
+			{
+				*Tag = FGameplayTag();
+				return true;
+			}
 			*Tag = FGameplayTag::RequestGameplayTag(FName(*TagString), false);
+			if (!Tag->IsValid())
+			{
+				OutWarnings.Add(FString::Printf(
+					TEXT("INVALID_GAMEPLAY_TAG: Unresolved GameplayTag '%s' for field '%s'"),
+					*TagString, *Property->GetName()));
+				return false;
+			}
 			return true;
 		}
 
@@ -1471,15 +1585,26 @@ bool FCortexSerializer::JsonToProperty(const TSharedPtr<FJsonValue>& JsonValue, 
 			}
 			FGameplayTagContainer* Container = static_cast<FGameplayTagContainer*>(ValuePtr);
 			Container->Reset();
+			bool bAllTagsValid = true;
 			for (const TSharedPtr<FJsonValue>& Element : *JsonArray)
 			{
-				if (Element.IsValid())
+				if (!Element.IsValid())
 				{
-					FGameplayTag Tag = FGameplayTag::RequestGameplayTag(FName(*Element->AsString()), false);
-					Container->AddTag(Tag);
+					continue;
 				}
+				const FString TagString = Element->AsString();
+				FGameplayTag Tag = FGameplayTag::RequestGameplayTag(FName(*TagString), false);
+				if (!Tag.IsValid())
+				{
+					OutWarnings.Add(FString::Printf(
+						TEXT("INVALID_GAMEPLAY_TAG: Unresolved GameplayTag '%s' for field '%s' (container)"),
+						*TagString, *Property->GetName()));
+					bAllTagsValid = false;
+					continue;
+				}
+				Container->AddTag(Tag);
 			}
-			return true;
+			return bAllTagsValid;
 		}
 
 		// FInstancedStruct - deserialize with _struct_type discriminator
@@ -1619,7 +1744,8 @@ bool FCortexSerializer::JsonToProperty(const TSharedPtr<FJsonValue>& JsonValue, 
 
 			// Import key from string
 			void* KeyPtr = MapHelper.GetKeyPtr(NewIndex);
-			MapProp->KeyProp->ImportText_Direct(*MapPair.Key, KeyPtr, nullptr, PPF_None);
+			const FString KeyString = CortexEngineCompat::JsonKeyToString(MapPair.Key);
+			MapProp->KeyProp->ImportText_Direct(*KeyString, KeyPtr, nullptr, PPF_None);
 
 			// Import value
 			void* MapValuePtr = MapHelper.GetValuePtr(NewIndex);

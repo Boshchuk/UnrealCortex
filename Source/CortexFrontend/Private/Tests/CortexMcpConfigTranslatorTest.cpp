@@ -1,5 +1,6 @@
 #include "Misc/AutomationTest.h"
 #include "CortexVersionCompat.h"
+#include "CortexEngineCompat.h"
 #include "HAL/FileManager.h"
 #include "Dom/JsonObject.h"
 #include "Misc/FileHelper.h"
@@ -16,23 +17,38 @@ bool FCortexMcpConfigTranslatorCodexTest::RunTest(const FString& Parameters)
     (void)Parameters;
 
     const FString ConfigPath = FPaths::Combine(FPaths::ProjectDir(), TEXT(".mcp.json"));
-    TestTrue(TEXT("Real project .mcp.json should exist"), IFileManager::Get().FileExists(*ConfigPath));
+    if (!TestTrue(TEXT("Real project .mcp.json should exist"), IFileManager::Get().FileExists(*ConfigPath)))
+    {
+        return false;
+    }
 
     FString JsonText;
-    TestTrue(TEXT("Real project .mcp.json should load"), FFileHelper::LoadFileToString(JsonText, *ConfigPath));
+    if (!TestTrue(TEXT("Real project .mcp.json should load"), FFileHelper::LoadFileToString(JsonText, *ConfigPath)))
+    {
+        return false;
+    }
 
     TSharedPtr<FJsonObject> RootObject;
     const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonText);
-    TestTrue(TEXT("Real project .mcp.json should parse"), FJsonSerializer::Deserialize(Reader, RootObject) && RootObject.IsValid());
+    if (!TestTrue(TEXT("Real project .mcp.json should parse"), FJsonSerializer::Deserialize(Reader, RootObject) && RootObject.IsValid()))
+    {
+        return false;
+    }
 
     const TArray<FString> ClaudeArgs = FCortexMcpConfigTranslator::BuildClaudeArgs(ConfigPath);
-    TestEqual(TEXT("Claude args should be split into flag and path"), ClaudeArgs.Num(), 2);
+    if (!TestEqual(TEXT("Claude args should be split into flag and path"), ClaudeArgs.Num(), 2))
+    {
+        return false;
+    }
     TestEqual(TEXT("Claude args should include mcp config flag"), ClaudeArgs[0], FString(TEXT("--mcp-config")));
     TestTrue(TEXT("Claude args should include quoted config path"), ClaudeArgs[1].Contains(TEXT(".mcp.json")));
 
     const TArray<FString> Overrides = FCortexMcpConfigTranslator::BuildCodexConfigOverrides(ConfigPath);
     TestTrue(TEXT("Should include at least one override"), Overrides.Num() > 0);
-    TestEqual(TEXT("Codex overrides should be flag/value pairs"), Overrides.Num() % 2, 0);
+    if (!TestEqual(TEXT("Codex overrides should be flag/value pairs"), Overrides.Num() % 2, 0))
+    {
+        return false;
+    }
     for (int32 Index = 0; Index < Overrides.Num(); Index += 2)
     {
         TestEqual(TEXT("Codex override flag should be a separate argv token"), Overrides[Index], FString(TEXT("-c")));
@@ -41,12 +57,16 @@ bool FCortexMcpConfigTranslatorCodexTest::RunTest(const FString& Parameters)
 
     const TSharedPtr<FJsonObject>* ServersObject = nullptr;
     TestTrue(TEXT("Real project .mcp.json should contain mcpServers"), RootObject->TryGetObjectField(TEXT("mcpServers"), ServersObject) || RootObject->TryGetObjectField(TEXT("mcp_servers"), ServersObject));
-    TestTrue(TEXT("MCP servers object should be valid"), ServersObject != nullptr && ServersObject->IsValid());
+    if (!TestTrue(TEXT("MCP servers object should be valid"), ServersObject != nullptr && ServersObject->IsValid()))
+    {
+        return false;
+    }
 
     TArray<FString> ServerNames;
-    for (const auto& Entry : (*ServersObject)->Values)
+    ServerNames.Reserve((*ServersObject)->Values.Num());
+    for (const auto& Pair : (*ServersObject)->Values)
     {
-        ServerNames.Emplace(CortexJsonKeyToString(Entry.Key));
+        ServerNames.Add(CortexEngineCompat::JsonKeyToString(Pair.Key));
     }
     ServerNames.Sort();
     TestTrue(TEXT("Project should define at least one MCP server"), ServerNames.Num() > 0);
@@ -54,7 +74,7 @@ bool FCortexMcpConfigTranslatorCodexTest::RunTest(const FString& Parameters)
     for (const FString& ServerName : ServerNames)
     {
         const TSharedPtr<FJsonObject>* ServerObject = nullptr;
-        if (!(*ServersObject)->TryGetObjectField(ServerName, ServerObject) || ServerObject == nullptr)
+        if (!(*ServersObject)->TryGetObjectField(ServerName, ServerObject) || ServerObject == nullptr || !ServerObject->IsValid())
         {
             continue;
         }
@@ -92,9 +112,9 @@ bool FCortexMcpConfigTranslatorCodexTest::RunTest(const FString& Parameters)
         }
 
         const TSharedPtr<FJsonObject>* EnvObject = nullptr;
-        if ((*ServerObject)->TryGetObjectField(TEXT("env"), EnvObject) && EnvObject != nullptr && (*EnvObject)->Values.Num() > 0)
+        if ((*ServerObject)->TryGetObjectField(TEXT("env"), EnvObject) && EnvObject != nullptr && EnvObject->IsValid() && (*EnvObject)->Values.Num() > 0)
         {
-            for (const TPair<FString, TSharedPtr<FJsonValue>>& EnvPair : (*EnvObject)->Values)
+            for (const auto& EnvPair : (*EnvObject)->Values)
             {
                 FString EnvValue;
                 if (!EnvPair.Value.IsValid() || !EnvPair.Value->TryGetString(EnvValue))
@@ -102,12 +122,13 @@ bool FCortexMcpConfigTranslatorCodexTest::RunTest(const FString& Parameters)
                     continue;
                 }
 
+                const FString EnvKey = CortexEngineCompat::JsonKeyToString(EnvPair.Key);
                 const FString ExpectedOverride = FString::Printf(
                     TEXT("\"%senv.%s=\\\"%s\\\"\""),
                     *Prefix,
-                    *EnvPair.Key,
+                    *EnvKey,
                     *EnvValue);
-                TestTrue(FString::Printf(TEXT("Should translate env %s for %s"), *EnvPair.Key, *ServerName), Overrides.Contains(ExpectedOverride));
+                TestTrue(FString::Printf(TEXT("Should translate env %s for %s"), *EnvKey, *ServerName), Overrides.Contains(ExpectedOverride));
             }
         }
     }
@@ -177,5 +198,53 @@ bool FCortexMcpConfigTranslatorCodexTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("Apostrophe command should preserve the apostrophe"), ApostropheOverrides.Contains(TEXT("\"mcp_servers.apostrophe_server.command=\\\"C:\\\\Users\\\\O'Connor\\\\AppData\\\\Local\\\\Programs\\\\OpenAI\\\\codex.cmd\\\"\"")));
     TestTrue(TEXT("Apostrophe args should preserve the apostrophe"), ApostropheOverrides.Contains(TEXT("\"mcp_servers.apostrophe_server.args=[\\\"run\\\",\\\"--directory\\\",\\\"C:\\\\Users\\\\O'Connor\\\\Unreal Projects\\\\Cortex Sandbox\\\"]\"")));
     TestTrue(TEXT("Apostrophe env should preserve the apostrophe"), ApostropheOverrides.Contains(TEXT("\"mcp_servers.apostrophe_server.env.CORTEX_PROJECT_DIR=\\\"C:\\\\Users\\\\O'Connor\\\\Unreal Projects\\\\Cortex Sandbox\\\"\"")));
+
+    const FString OrderingFixtureDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexFrontend"), TEXT("CodexTranslatorOrdering"));
+    TestTrue(TEXT("Ordering fixture directory should be created"), IFileManager::Get().MakeDirectory(*OrderingFixtureDir, true));
+
+    const FString OrderingFixturePath = FPaths::Combine(OrderingFixtureDir, TEXT("ordering.mcp.json"));
+    const FString OrderingFixtureJson = TEXT(R"({
+  "mcpServers": {
+    "zeta_server": {
+      "command": "cmd.exe",
+      "env": {
+        "ZETA": "1",
+        "ALPHA": "2"
+      }
+    },
+    "alpha_server": {
+      "command": "cmd.exe",
+      "env": {
+        "ZETA": "1",
+        "ALPHA": "2"
+      }
+    }
+  }
+})");
+
+    TestTrue(TEXT("Ordering fixture should save"), FFileHelper::SaveStringToFile(OrderingFixtureJson, *OrderingFixturePath));
+    ON_SCOPE_EXIT
+    {
+        IFileManager::Get().Delete(*OrderingFixturePath, false, true);
+        IFileManager::Get().DeleteDirectory(*OrderingFixtureDir, false, true);
+    };
+
+    const TArray<FString> OrderingOverrides = FCortexMcpConfigTranslator::BuildCodexConfigOverrides(OrderingFixturePath);
+    TArray<FString> OverrideValuesOnly;
+    for (int32 Index = 1; Index < OrderingOverrides.Num(); Index += 2)
+    {
+        OverrideValuesOnly.Add(OrderingOverrides[Index]);
+    }
+    TestTrue(TEXT("Ordering overrides produced"), OverrideValuesOnly.Num() == 6);
+    if (OverrideValuesOnly.Num() == 6)
+    {
+        TestEqual(TEXT("Alpha server command first"), OverrideValuesOnly[0], FString(TEXT("\"mcp_servers.alpha_server.command=\\\"cmd.exe\\\"\"")));
+        TestEqual(TEXT("Alpha server env ALPHA second"), OverrideValuesOnly[1], FString(TEXT("\"mcp_servers.alpha_server.env.ALPHA=\\\"2\\\"\"")));
+        TestEqual(TEXT("Alpha server env ZETA third"), OverrideValuesOnly[2], FString(TEXT("\"mcp_servers.alpha_server.env.ZETA=\\\"1\\\"\"")));
+        TestEqual(TEXT("Zeta server command fourth"), OverrideValuesOnly[3], FString(TEXT("\"mcp_servers.zeta_server.command=\\\"cmd.exe\\\"\"")));
+        TestEqual(TEXT("Zeta server env ALPHA fifth"), OverrideValuesOnly[4], FString(TEXT("\"mcp_servers.zeta_server.env.ALPHA=\\\"2\\\"\"")));
+        TestEqual(TEXT("Zeta server env ZETA sixth"), OverrideValuesOnly[5], FString(TEXT("\"mcp_servers.zeta_server.env.ZETA=\\\"1\\\"\"")));
+    }
+
     return true;
 }

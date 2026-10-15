@@ -64,7 +64,8 @@
         "remove_variables",
         "remove_functions",
         "migrated_overrides",
-        "compile"
+        "compile",
+        "save"
       ]
     },
     "compare_blueprints": {
@@ -163,7 +164,11 @@
       "params": [
         "asset_path",
         "properties",
-        "blueprint_path"
+        "blueprint_path",
+        "include_values",
+        "include_members",
+        "discovery_offset",
+        "discovery_limit"
       ]
     },
     "get_level_blueprint": {
@@ -298,7 +303,9 @@
         "asset_path",
         "subgraph_path",
         "graph_kind",
-        "owning_interface"
+        "owning_interface",
+        "expected_fingerprint",
+        "patch"
       ]
     },
     "level_compose": {
@@ -712,6 +719,9 @@
         "severity",
         "since_seconds",
         "since_cursor",
+        "until_cursor",
+        "limit",
+        "count_only",
         "category"
       ]
     },
@@ -1747,6 +1757,16 @@
     }
   },
   "umg": {
+    "add_widget": {
+      "file": "tools/umg/widget_tree.py",
+      "params": [
+        "asset_path",
+        "widget_class",
+        "name",
+        "parent_name",
+        "slot_index"
+      ]
+    },
     "create_widget_screen": {
       "file": "tools/umg/composites.py",
       "params": [

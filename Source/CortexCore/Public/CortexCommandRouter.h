@@ -90,6 +90,9 @@ private:
 		int32 Depth = 0
 	);
 
+	/** Whether a registered domain command explicitly opts into rollback-enabled batches. */
+	bool IsRollbackSafeCommand(const FString& Command) const;
+
 	/** Parse a $ref string and extract the resolved FJsonValue. */
 	static bool ParseAndResolveRef(
 		const FString& RefString,

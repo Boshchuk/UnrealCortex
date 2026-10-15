@@ -13,26 +13,50 @@
 #include "EdGraphSchema_K2.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "Misc/Guid.h"
+
+static FCortexCommandResult ExecuteRemoveGraphWithPreview(
+	FCortexBPCommandHandler& Handler,
+	const TSharedPtr<FJsonObject>& RequestedApply)
+{
+	TSharedPtr<FJsonObject> Preview = MakeShared<FJsonObject>(*RequestedApply);
+	Preview->SetBoolField(TEXT("dry_run"), true);
+	Preview->SetBoolField(TEXT("save"), false);
+	const FCortexCommandResult PreviewResult = Handler.Execute(TEXT("remove_graph"), Preview);
+	if (!PreviewResult.bSuccess || !PreviewResult.Data.IsValid()) return PreviewResult;
+	TSharedPtr<FJsonObject> Apply = MakeShared<FJsonObject>(*RequestedApply);
+	Apply->SetBoolField(TEXT("dry_run"), false);
+	Apply->SetObjectField(TEXT("expected_fingerprint"),
+		PreviewResult.Data->GetObjectField(TEXT("fingerprint_before")));
+	Apply->SetStringField(TEXT("expected_validation_hash"),
+		PreviewResult.Data->GetStringField(TEXT("validation_hash")));
+	return Handler.Execute(TEXT("remove_graph"), Apply);
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexBPRemoveGraphTest,
-	"Cortex.Blueprint.RemoveGraph",
+	"Cortex.Blueprint.RemoveGraph.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
 bool FCortexBPRemoveGraphTest::RunTest(const FString& Parameters)
 {
 	FCortexBPCommandHandler Handler;
-	const FString TestBPPath = TEXT("/Game/Temp/CortexBPTest_RemoveGraph/BP_RemoveGraphTest");
+	const FString FixtureName = TEXT("BP_RemoveGraphTest_") + FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	const FString TestDirectory = TEXT("/Game/Temp/CortexBPTest_RemoveGraph_") + FixtureName;
+	const FString TestBPPath = TestDirectory / FixtureName;
 
 	// Setup: create a Blueprint
 	{
 		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
-		Params->SetStringField(TEXT("name"), TEXT("BP_RemoveGraphTest"));
-		Params->SetStringField(TEXT("path"), TEXT("/Game/Temp/CortexBPTest_RemoveGraph"));
+		Params->SetStringField(TEXT("name"), FixtureName);
+		Params->SetStringField(TEXT("path"), TestDirectory);
 		Params->SetStringField(TEXT("type"), TEXT("Actor"));
 		FCortexCommandResult R = Handler.Execute(TEXT("create"), Params);
-		TestTrue(TEXT("Setup: create BP"), R.bSuccess);
+		if (!TestTrue(TEXT("Setup: create BP"), R.bSuccess))
+		{
+			return false;
+		}
 	}
 
 	// Setup: add a function graph
@@ -50,8 +74,10 @@ bool FCortexBPRemoveGraphTest::RunTest(const FString& Parameters)
 		Params->SetStringField(TEXT("asset_path"), TestBPPath);
 		Params->SetStringField(TEXT("name"), TEXT("TestFunction"));
 		Params->SetBoolField(TEXT("compile"), false);
+		Params->SetBoolField(TEXT("dry_run"), false);
+		Params->SetBoolField(TEXT("save"), false);
 
-		FCortexCommandResult Result = Handler.Execute(TEXT("remove_graph"), Params);
+		FCortexCommandResult Result = ExecuteRemoveGraphWithPreview(Handler, Params);
 		TestTrue(TEXT("remove_graph should succeed"), Result.bSuccess);
 
 		if (Result.Data.IsValid())
@@ -111,6 +137,9 @@ bool FCortexBPRemoveGraphTest::RunTest(const FString& Parameters)
 		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("asset_path"), TestBPPath);
 		Params->SetStringField(TEXT("name"), TEXT("NonExistentGraph"));
+		Params->SetBoolField(TEXT("dry_run"), true);
+		Params->SetBoolField(TEXT("compile"), false);
+		Params->SetBoolField(TEXT("save"), false);
 
 		FCortexCommandResult Result = Handler.Execute(TEXT("remove_graph"), Params);
 		TestFalse(TEXT("remove non-existent should fail"), Result.bSuccess);
@@ -123,6 +152,9 @@ bool FCortexBPRemoveGraphTest::RunTest(const FString& Parameters)
 		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("asset_path"), TestBPPath);
 		Params->SetStringField(TEXT("name"), TEXT("EventGraph"));
+		Params->SetBoolField(TEXT("dry_run"), true);
+		Params->SetBoolField(TEXT("compile"), false);
+		Params->SetBoolField(TEXT("save"), false);
 
 		FCortexCommandResult Result = Handler.Execute(TEXT("remove_graph"), Params);
 		TestFalse(TEXT("remove EventGraph should fail"), Result.bSuccess);
@@ -135,6 +167,9 @@ bool FCortexBPRemoveGraphTest::RunTest(const FString& Parameters)
 		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("asset_path"), TestBPPath);
 		Params->SetStringField(TEXT("name"), TEXT("ConstructionScript"));
+		Params->SetBoolField(TEXT("dry_run"), true);
+		Params->SetBoolField(TEXT("compile"), false);
+		Params->SetBoolField(TEXT("save"), false);
 
 		FCortexCommandResult Result = Handler.Execute(TEXT("remove_graph"), Params);
 		TestFalse(TEXT("remove ConstructionScript should fail"), Result.bSuccess);
@@ -157,6 +192,8 @@ bool FCortexBPRemoveGraphTest::RunTest(const FString& Parameters)
 		Params->SetStringField(TEXT("asset_path"), TestBPPath);
 		Params->SetStringField(TEXT("name"), TEXT("DryRunFunc"));
 		Params->SetBoolField(TEXT("dry_run"), true);
+		Params->SetBoolField(TEXT("compile"), false);
+		Params->SetBoolField(TEXT("save"), false);
 
 		FCortexCommandResult Result = Handler.Execute(TEXT("remove_graph"), Params);
 		TestTrue(TEXT("dry_run should succeed"), Result.bSuccess);
@@ -200,7 +237,9 @@ bool FCortexBPRemoveGraphTest::RunTest(const FString& Parameters)
 			RemoveParams->SetStringField(TEXT("asset_path"), TestBPPath);
 			RemoveParams->SetStringField(TEXT("name"), TEXT("DryRunFunc"));
 			RemoveParams->SetBoolField(TEXT("compile"), false);
-			Handler.Execute(TEXT("remove_graph"), RemoveParams);
+			RemoveParams->SetBoolField(TEXT("dry_run"), false);
+			RemoveParams->SetBoolField(TEXT("save"), false);
+			ExecuteRemoveGraphWithPreview(Handler, RemoveParams);
 		}
 	}
 
@@ -224,8 +263,10 @@ bool FCortexBPRemoveGraphTest::RunTest(const FString& Parameters)
 			Params->SetStringField(TEXT("asset_path"), TestBPPath);
 			Params->SetStringField(TEXT("name"), TEXT("TestMacro"));
 			Params->SetBoolField(TEXT("compile"), false);
+			Params->SetBoolField(TEXT("dry_run"), false);
+			Params->SetBoolField(TEXT("save"), false);
 
-			FCortexCommandResult Result = Handler.Execute(TEXT("remove_graph"), Params);
+			FCortexCommandResult Result = ExecuteRemoveGraphWithPreview(Handler, Params);
 			TestTrue(TEXT("remove macro should succeed"), Result.bSuccess);
 
 			if (Result.Data.IsValid())
@@ -272,8 +313,10 @@ bool FCortexBPRemoveGraphTest::RunTest(const FString& Parameters)
 			Params->SetStringField(TEXT("asset_path"), TestBPPath);
 			Params->SetStringField(TEXT("name"), TEXT("SecondaryEventGraph"));
 			Params->SetBoolField(TEXT("compile"), false);
+			Params->SetBoolField(TEXT("dry_run"), false);
+			Params->SetBoolField(TEXT("save"), false);
 
-			FCortexCommandResult Result = Handler.Execute(TEXT("remove_graph"), Params);
+			FCortexCommandResult Result = ExecuteRemoveGraphWithPreview(Handler, Params);
 			TestTrue(TEXT("remove extra event graph should succeed"), Result.bSuccess);
 
 			if (Result.Data.IsValid())
@@ -301,18 +344,11 @@ bool FCortexBPRemoveGraphTest::RunTest(const FString& Parameters)
 		}
 	}
 
-	// Cleanup
-	{
-		FString PkgName = FPackageName::ObjectPathToPackageName(TestBPPath);
-		if (FindPackage(nullptr, *PkgName) || FPackageName::DoesPackageExist(PkgName))
-		{
-			UBlueprint* CreatedBP = LoadObject<UBlueprint>(nullptr, *TestBPPath);
-			if (CreatedBP)
-			{
-				CreatedBP->GetOutermost()->MarkAsGarbage();
-			}
-		}
-	}
+	// Use the asset owner to retire the Blueprint, generated classes and saved file together.
+	TSharedPtr<FJsonObject> DeleteParams = MakeShared<FJsonObject>();
+	DeleteParams->SetStringField(TEXT("asset_path"), TestBPPath);
+	DeleteParams->SetBoolField(TEXT("force"), true);
+	TestTrue(TEXT("Cleanup: delete owned Blueprint"), Handler.Execute(TEXT("delete"), DeleteParams).bSuccess);
 
 	return true;
 }
@@ -409,8 +445,10 @@ bool FCortexBPRemoveGraphCascadeTest::RunTest(const FString& Parameters)
 		Params->SetStringField(TEXT("name"), TEXT("TestCascadeEvent"));
 		Params->SetBoolField(TEXT("cascade_exec_chain"), true);
 		Params->SetBoolField(TEXT("compile"), false);
+		Params->SetBoolField(TEXT("dry_run"), false);
+		Params->SetBoolField(TEXT("save"), false);
 
-		FCortexCommandResult Result = Handler.Execute(TEXT("remove_graph"), Params);
+		FCortexCommandResult Result = ExecuteRemoveGraphWithPreview(Handler, Params);
 		TestTrue(TEXT("remove custom event with cascade should succeed"), Result.bSuccess);
 
 		if (Result.Data.IsValid())
@@ -544,8 +582,10 @@ bool FCortexBPRemoveGraphSharedNodeTest::RunTest(const FString& Parameters)
 		Params->SetStringField(TEXT("name"), TEXT("EventA"));
 		Params->SetBoolField(TEXT("cascade_exec_chain"), true);
 		Params->SetBoolField(TEXT("compile"), false);
+		Params->SetBoolField(TEXT("dry_run"), false);
+		Params->SetBoolField(TEXT("save"), false);
 
-		FCortexCommandResult Result = Handler.Execute(TEXT("remove_graph"), Params);
+		FCortexCommandResult Result = ExecuteRemoveGraphWithPreview(Handler, Params);
 		TestTrue(TEXT("remove EventA should succeed"), Result.bSuccess);
 
 		if (Result.Data.IsValid())
@@ -572,8 +612,10 @@ bool FCortexBPRemoveGraphSharedNodeTest::RunTest(const FString& Parameters)
 		Params->SetStringField(TEXT("name"), TEXT("EventB"));
 		Params->SetBoolField(TEXT("cascade_exec_chain"), false);
 		Params->SetBoolField(TEXT("compile"), false);
+		Params->SetBoolField(TEXT("dry_run"), false);
+		Params->SetBoolField(TEXT("save"), false);
 
-		FCortexCommandResult Result = Handler.Execute(TEXT("remove_graph"), Params);
+		FCortexCommandResult Result = ExecuteRemoveGraphWithPreview(Handler, Params);
 		TestTrue(TEXT("remove EventB (no cascade) should succeed"), Result.bSuccess);
 
 		if (Result.Data.IsValid())
@@ -691,8 +733,10 @@ bool FCortexBPRemoveGraphRerouteTest::RunTest(const FString& Parameters)
 		Params->SetStringField(TEXT("name"), TEXT("RerouteTestEvent"));
 		Params->SetBoolField(TEXT("cascade_exec_chain"), true);
 		Params->SetBoolField(TEXT("compile"), false);
+		Params->SetBoolField(TEXT("dry_run"), false);
+		Params->SetBoolField(TEXT("save"), false);
 
-		FCortexCommandResult Result = Handler.Execute(TEXT("remove_graph"), Params);
+		FCortexCommandResult Result = ExecuteRemoveGraphWithPreview(Handler, Params);
 		TestTrue(TEXT("remove with reroute should succeed"), Result.bSuccess);
 
 		if (Result.Data.IsValid())

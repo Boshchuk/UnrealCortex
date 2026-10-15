@@ -16,6 +16,7 @@ bool FCortexReconnectRejectsNonIdleTest::RunTest(const FString& Parameters)
     (void)Parameters;
     FCortexSessionConfig Config;
     Config.SessionId = TEXT("test-reconnect-reject");
+    Config.ProviderId = FName(TEXT("claude_code"));
     TSharedPtr<FCortexCliSession> Session = MakeShared<FCortexCliSession>(Config);
 
     TestFalse(TEXT("Rejects from Inactive"), Session->Reconnect());
@@ -41,6 +42,7 @@ bool FCortexReconnectFromIdleTransitionsTest::RunTest(const FString& Parameters)
     (void)Parameters;
     FCortexSessionConfig Config;
     Config.SessionId = TEXT("test-reconnect-idle");
+    Config.ProviderId = FName(TEXT("claude_code"));
     TSharedPtr<FCortexCliSession> Session = MakeShared<FCortexCliSession>(Config);
 
     Session->SetStateForTest(ECortexSessionState::Idle);
@@ -85,6 +87,7 @@ bool FCortexReconnectDirtyStatePreservedOnFailureTest::RunTest(const FString& Pa
 
     FCortexSessionConfig Config;
     Config.SessionId = TEXT("test-reconnect-dirty");
+    Config.ProviderId = FName(TEXT("claude_code"));
     TSharedPtr<FCortexCliSession> Session = MakeShared<FCortexCliSession>(Config);
     Session->SetStateForTest(ECortexSessionState::Idle);
     const bool bResult = Session->Reconnect();

@@ -1,13 +1,15 @@
 """Unit tests for consolidated domain routers."""
 
+import asyncio
 import json
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from cortex_mcp.capabilities import CORE_DOMAINS
-from cortex_mcp.tools.routers import make_router, register_router_tools
+from cortex_mcp.tools.routers import make_router, register_router_tools, strict_router_tool
 from cortex_mcp.tcp_client import EditorConnection, UECommandError
 from cortex_mcp import server
 
@@ -35,6 +37,15 @@ def _editor(port: int, pid: int, started_at: str) -> EditorConnection:
     )
 
 
+def _call_tool_payload(mcp, name: str, arguments: dict) -> dict:
+    content = asyncio.run(mcp.call_tool(name, arguments))
+    if isinstance(content, tuple):
+        content = content[0]
+    if isinstance(content, list):
+        content = content[0]
+    return json.loads(content.text)
+
+
 def test_make_router_dispatches_domain_command():
     connection = MagicMock()
     connection.send_command.return_value = {"success": True, "data": {"ok": True}}
@@ -47,6 +58,362 @@ def test_make_router_dispatches_domain_command():
         "data.query_datatable",
         {"table_path": "/Game/Data/DT_Test"},
     )
+
+
+
+def test_blueprint_remove_graph_forwards_guarded_envelope_unchanged():
+    connection = MagicMock()
+    connection.send_command.return_value = {
+        "data": {
+            "changed": True,
+            "apply_status": "applied",
+            "compile_status": "not_requested",
+            "readback_status": "matched",
+            "rollback_status": "not_requested",
+            "save_status": "not_requested",
+            "post_save_status": "not_requested",
+        }
+    }
+    router = make_router("blueprint", connection, "blueprint docs")
+    params = {
+        "asset_path": "/Game/BP_Test.BP_Test",
+        "name": "DeleteMe",
+        "dry_run": False,
+        "compile": False,
+        "save": False,
+        "cascade_exec_chain": False,
+        "expected_fingerprint": {
+            "package_saved_hash": "abc",
+            "is_dirty": True,
+            "dirty_epoch": "0",
+            "not_ready": False,
+            "graph_authoring_version": 1,
+            "graph_authoring_hash": "def",
+        },
+        "expected_validation_hash": "token",
+    }
+
+    expected_params = deepcopy(params)
+    payload = json.loads(router("remove_graph", params))
+    assert payload["readback_status"] == "matched"
+    connection.send_command.assert_called_once_with("blueprint.remove_graph", expected_params)
+    assert params == expected_params
+
+
+def test_blueprint_remove_graph_preserves_structured_phase_errors():
+    connection = MagicMock()
+    connection.send_command.side_effect = UECommandError(
+        "blueprint.remove_graph",
+        "VERIFICATION_FAILED",
+        "remove_graph readback failed",
+        {
+            "apply_status": "failed",
+            "readback_status": "mismatched",
+            "rollback_status": "restored",
+            "save_status": "not_requested",
+        },
+    )
+    router = make_router("blueprint", connection, "blueprint docs")
+
+    payload = json.loads(
+        router(
+            "remove_graph",
+            {
+                "asset_path": "/Game/BP_Test.BP_Test",
+                "name": "DeleteMe",
+                "dry_run": False,
+                "compile": False,
+                "save": False,
+            },
+        )
+    )
+
+    assert payload["success"] is False
+    assert payload["_error"] == "VERIFICATION_FAILED"
+    assert payload["_message"] == "remove_graph readback failed"
+    assert payload["_command"] == "blueprint.remove_graph"
+    assert payload["apply_status"] == "failed"
+    assert payload["readback_status"] == "mismatched"
+    assert payload["rollback_status"] == "restored"
+    assert payload["save_status"] == "not_requested"
+def _graph_prune_request(**changes):
+    request = {
+        "asset_path": "/Game/Temp/BP_Test.BP_Test",
+        "patch_id": "prune-patch",
+        "expected_fingerprint": {"graph_authoring_hash": "fingerprint"},
+        "migration": {
+            "op": "prune_island",
+            "source": {
+                "graph_ref": {"graph_guid": "00000000-0000-0000-0000-000000000001"},
+                "entry_node_guid": "00000000-0000-0000-0000-000000000002",
+            },
+            "approved_node_guids": [],
+        },
+        "dry_run": True,
+        "compile": True,
+        "save": False,
+    }
+    request.update(changes)
+    return request
+
+
+def _graph_prune_preview(approved, token="approved-token"):
+    return {
+        "complete": True,
+        "validation_hash": token,
+        "removable": approved,
+        "approved_guids": approved,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("limit", 10), ("cursor", "opaque"), ("offset", 0)],
+)
+def test_graph_prune_apply_patch_rejects_pagination_before_dispatch(field, value):
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {}}
+    router = make_router("graph", connection, "graph docs")
+    params = _graph_prune_request()
+    params[field] = value
+
+    payload = json.loads(router("apply_patch", params))
+
+    assert payload.get("_error") == "INVALID_FIELD"
+    connection.send_command.assert_not_called()
+    connection.send_command_once.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("limit", 10), ("cursor", "opaque"), ("offset", 0)],
+)
+def test_registered_graph_cmd_rejects_non_prune_apply_pagination_before_dispatch(field, value):
+    from mcp.server.fastmcp import FastMCP
+
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {}}
+    mcp = FastMCP("graph-apply-pagination-test")
+    register_router_tools(mcp, connection, {"graph": "graph docs"}, domains=("graph",))
+    params = {
+        "asset_path": "/Game/Temp/BP_Test.BP_Test",
+        "patch_id": "update-patch",
+        "nodes": [],
+    }
+    params[field] = value
+
+    payload = _call_tool_payload(
+        mcp, "graph_cmd", {"command": "apply_patch", "params": params},
+    )
+
+    assert payload.get("_error") == "INVALID_FIELD"
+    connection.send_command.assert_not_called()
+    connection.send_command_once.assert_not_called()
+
+
+def test_graph_prune_preview_uses_one_native_call_through_router():
+    connection = MagicMock()
+    params = _graph_prune_request()
+    preview = _graph_prune_preview([])
+    connection.send_command.return_value = {"success": True, "data": preview}
+    router = make_router("graph", connection, "graph docs")
+
+    payload = json.loads(router("apply_patch", params))
+
+    assert payload == preview
+    connection.send_command.assert_called_once_with("graph.apply_patch", params)
+    connection.send_command_once.assert_not_called()
+
+
+def test_graph_prune_accepted_apply_routes_preview_then_one_shot_apply():
+    connection = MagicMock()
+    approved = ["00000000-0000-0000-0000-000000000003"]
+    params = _graph_prune_request(
+        migration={
+            "op": "prune_island",
+            "source": {
+                "graph_ref": {"graph_guid": "00000000-0000-0000-0000-000000000001"},
+                "entry_node_guid": "00000000-0000-0000-0000-000000000002",
+            },
+            "approved_node_guids": approved,
+        },
+        dry_run=False,
+        expected_validation_hash="approved-token",
+        save=True,
+    )
+    connection.send_command.return_value = {
+        "success": True,
+        "data": _graph_prune_preview(approved),
+    }
+    connection.send_command_once.return_value = {
+        "success": True,
+        "data": {"patch_id": params["patch_id"], "changed": True},
+    }
+    router = make_router("graph", connection, "graph docs")
+    expected_preview = dict(params)
+    expected_preview.pop("expected_validation_hash")
+    expected_preview["dry_run"] = True
+    expected_preview["save"] = False
+
+    payload = json.loads(router("apply_patch", params))
+
+    assert payload.get("changed") is True
+    connection.send_command.assert_called_once_with("graph.apply_patch", expected_preview)
+    connection.send_command_once.assert_called_once_with("graph.apply_patch", params)
+
+
+def test_graph_prune_stale_apply_routes_preview_without_apply():
+    connection = MagicMock()
+    approved = ["00000000-0000-0000-0000-000000000003"]
+    params = _graph_prune_request(
+        migration={
+            "op": "prune_island",
+            "source": {
+                "graph_ref": {"graph_guid": "00000000-0000-0000-0000-000000000001"},
+                "entry_node_guid": "00000000-0000-0000-0000-000000000002",
+            },
+            "approved_node_guids": approved,
+        },
+        dry_run=False,
+        expected_validation_hash="old-token",
+        save=True,
+    )
+    connection.send_command.return_value = {
+        "success": True,
+        "data": _graph_prune_preview(approved, token="new-token"),
+    }
+    router = make_router("graph", connection, "graph docs")
+
+    payload = json.loads(router("apply_patch", params))
+
+    assert payload.get("_error") == "STALE_PRECONDITION"
+    connection.send_command.assert_called_once()
+    connection.send_command_once.assert_not_called()
+
+
+def test_graph_prune_oversized_apply_routes_preview_without_apply():
+    connection = MagicMock()
+    approved = ["00000000-0000-0000-0000-000000000003"]
+    params = _graph_prune_request(
+        patch_id="p" * 50_000,
+        migration={
+            "op": "prune_island",
+            "source": {
+                "graph_ref": {"graph_guid": "00000000-0000-0000-0000-000000000001"},
+                "entry_node_guid": "00000000-0000-0000-0000-000000000002",
+            },
+            "approved_node_guids": approved,
+        },
+        dry_run=False,
+        expected_validation_hash="approved-token",
+        save=True,
+    )
+    connection.send_command.return_value = {
+        "success": True,
+        "data": _graph_prune_preview(approved),
+    }
+    router = make_router("graph", connection, "graph docs")
+
+    payload = json.loads(router("apply_patch", params))
+
+    assert payload.get("_error") == "LIMIT_EXCEEDED"
+    assert payload.get("prospective_apply_size_chars", 0) > 40_000
+    connection.send_command.assert_called_once()
+    connection.send_command_once.assert_not_called()
+
+def test_core_router_handles_batch_query_without_controls():
+    """batch_query must still work with commands only."""
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {"ok": True}}
+
+    router = make_router("core", connection, "core docs")
+    commands = [{"command": "data.list_datatables", "params": {}}]
+    payload = json.loads(router("batch_query", {"commands": commands}))
+
+    assert payload["ok"] is True
+    connection.send_command.assert_called_once_with("batch", {"commands": commands})
+
+
+def test_core_router_batch_query_forwards_rollback_controls():
+    """The failure-atomic batch contract must survive the Python facade: stop_on_error,
+    rollback_on_error, and verify_rollback are forwarded to the editor unchanged."""
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {"ok": True}}
+
+    router = make_router("core", connection, "core docs")
+    commands = [{"command": "graph.add_node", "params": {"asset_path": "/Game/Test"}}]
+    payload = json.loads(router("batch_query", {
+        "commands": commands,
+        "stop_on_error": True,
+        "rollback_on_error": True,
+        "verify_rollback": True,
+    }))
+
+    assert payload["ok"] is True
+    connection.send_command.assert_called_once_with(
+        "batch",
+        {
+            "commands": commands,
+            "stop_on_error": True,
+            "rollback_on_error": True,
+            "verify_rollback": True,
+        },
+    )
+
+
+def test_core_router_batch_query_accepts_steps_alias_and_json_string():
+    """steps is a first-class alias for commands, and string commands are parsed."""
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {"ok": True}}
+
+    router = make_router("core", connection, "core docs")
+    commands = [{"command": "data.list_datatables", "params": {}}]
+    commands_json = json.dumps(commands)
+    router("batch_query", {"steps": commands_json, "rollback_on_error": True})
+
+    connection.send_command.assert_called_once_with(
+        "batch",
+        {"commands": commands, "rollback_on_error": True},
+    )
+
+
+_BATCH_WITH_GRAPH_PATCH = [
+    {"command": "data.list_datatables", "params": {}},
+    {"command": "graph.apply_patch", "params": {"asset_path": "/Game/Test/BP_Test"}},
+]
+
+
+@pytest.mark.parametrize("batch_options", [{}, {"rollback_on_error": True}])
+def test_batch_query_rejects_graph_apply_patch_before_batch_dispatch(batch_options):
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {"count": 2}}
+    router = make_router("core", connection, "core docs")
+
+    payload = json.loads(router("batch_query", {
+        "commands": _BATCH_WITH_GRAPH_PATCH,
+        **batch_options,
+    }))
+
+    assert payload.get("_error") == "INVALID_OPERATION"
+    connection.send_command.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("field", "commands"),
+    [
+        ("steps", _BATCH_WITH_GRAPH_PATCH),
+        ("commands", json.dumps(_BATCH_WITH_GRAPH_PATCH)),
+    ],
+)
+def test_batch_query_rejects_graph_apply_patch_from_steps_alias_and_json_string(field, commands):
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {"count": 2}}
+    router = make_router("core", connection, "core docs")
+
+    payload = json.loads(router("batch_query", {field: commands}))
+
+    assert payload.get("_error") == "INVALID_OPERATION"
+    connection.send_command.assert_not_called()
 
 
 def test_core_router_handles_switch_editor_locally():
@@ -71,22 +438,83 @@ def test_core_router_handles_switch_editor_locally():
 
 
 def test_core_router_handles_schema_status_locally(tmp_path):
+    from cortex_mcp.schema_generator import _render_meta
+
     schema_dir = tmp_path / ".cortex" / "schema"
-    schema_dir.mkdir(parents=True)
+    data_dir = schema_dir / "data"
+    data_dir.mkdir(parents=True)
     (schema_dir / "_catalog.md").write_text(
-        "---\ngenerated: 2026-03-14T12:00:00Z\nschema_version: 1\n---\n",
+        f"# Catalog\n\n{_render_meta('catalog')}\n",
+        encoding="utf-8",
+    )
+    (schema_dir / "blueprints.md").write_text(
+        f"# Blueprints\n\n{_render_meta('blueprints')}\n",
+        encoding="utf-8",
+    )
+    (data_dir / "_index.md").write_text(
+        f"# Data\n\n{_render_meta('data-index')}\n",
+        encoding="utf-8",
+    )
+    (data_dir / "structs.md").write_text(
+        f"# Structs\n\n{_render_meta('data-structs')}\n",
+        encoding="utf-8",
+    )
+    (schema_dir / ".meta.json").write_text(
+        json.dumps({
+            "files": {
+                "_catalog.md": "2026-03-14T12:00:00Z",
+                "blueprints.md": "2026-03-14T12:01:00Z",
+                "data/_index.md": "2026-03-14T12:02:00Z",
+                "data/structs.md": "2026-03-14T12:03:00Z",
+            }
+        }),
         encoding="utf-8",
     )
 
     router = make_router("core", MagicMock(), "core docs")
-    with patch("cortex_mcp.tools.routers.get_schema_dir", return_value=schema_dir), patch(
-        "cortex_mcp.tools.routers.read_meta_from_file",
-        return_value={"generated": "2026-03-14T12:00:00Z", "schema_version": "1"},
-    ):
+    with patch("cortex_mcp.tools.routers.get_schema_dir", return_value=schema_dir):
         payload = json.loads(router("schema_status"))
 
     assert payload["exists"] is True
     assert payload["schema_dir"] == str(schema_dir)
+    assert payload["catalog"]["generated"] == "2026-03-14T12:00:00Z"
+    assert payload["current_schema_version"] == 3
+    assert payload["domains"]["blueprints"] == {
+        "file": "blueprints.md",
+        "generated": "2026-03-14T12:01:00Z",
+        "schema_version": 3,
+        "version_current": True,
+    }
+    assert payload["domains"]["data"]["files"] == {
+        "_index.md": "2026-03-14T12:02:00Z",
+        "structs.md": "2026-03-14T12:03:00Z",
+    }
+
+
+@pytest.mark.parametrize("sidecar_content", [None, "{not valid json"])
+def test_schema_status_reports_unknown_for_missing_or_corrupt_sidecar(tmp_path, sidecar_content):
+    from cortex_mcp.schema_generator import _render_meta
+
+    schema_dir = tmp_path / ".cortex" / "schema"
+    schema_dir.mkdir(parents=True)
+    data_dir = schema_dir / "data"
+    data_dir.mkdir()
+    (schema_dir / "_catalog.md").write_text(_render_meta("catalog"), encoding="utf-8")
+    (schema_dir / "blueprints.md").write_text(_render_meta("blueprints"), encoding="utf-8")
+    (data_dir / "_index.md").write_text(_render_meta("data-index"), encoding="utf-8")
+    if sidecar_content is not None:
+        (schema_dir / ".meta.json").write_text(sidecar_content, encoding="utf-8")
+
+    router = make_router("core", MagicMock(), "core docs")
+    with patch("cortex_mcp.tools.routers.get_schema_dir", return_value=schema_dir):
+        payload = json.loads(router("schema_status"))
+
+    assert payload["catalog"]["generated"] == "unknown"
+    assert payload["domains"]["blueprints"]["generated"] == "unknown"
+    assert payload["domains"]["blueprints"]["schema_version"] == 3
+    assert payload["domains"]["blueprints"]["version_current"] is True
+    assert payload["domains"]["data"]["generated"] == "unknown"
+    assert payload["domains"]["data"]["files"] == {"_index.md": "unknown"}
 
 
 def test_core_router_enriches_get_status_with_editor_discovery():
@@ -153,6 +581,163 @@ def test_core_router_uses_cached_send_for_get_data_catalog():
         ttl=600,
     )
     connection.send_command.assert_not_called()
+
+
+# --- agent-facing capability inventory and catalog selections (Task 8) ---
+
+CAPABILITIES_FIXTURE = Path(__file__).parent / "fixtures" / "capabilities_cache_full.json"
+
+
+def _capability_document() -> dict:
+    """Fixture-derived capability document that fits the MCP response budget.
+
+    The complete live document (~118k compact characters) exceeds MAX_RESPONSE_CHARS, so the
+    facade regressions use the fixture's real records for two domains: that exercises the names
+    projection and the full inventory instead of the size refusal.
+    """
+    full = json.loads(CAPABILITIES_FIXTURE.read_text(encoding="utf-8"))
+    return {
+        "plugin_version": full["plugin_version"],
+        "domains": {name: full["domains"][name] for name in ("core", "data")},
+    }
+
+
+def _command_names(document: dict) -> dict:
+    return {
+        domain: [command["name"] for command in body["commands"]]
+        for domain, body in document["domains"].items()
+    }
+
+
+def _dispatched_commands(connection) -> list:
+    """Every recorded dispatch, whichever send path the facade uses."""
+    return list(connection.send_command.call_args_list) + list(
+        connection.send_command_cached.call_args_list
+    )
+
+
+def _command_call(connection, command: str):
+    """The single recorded dispatch of one native command."""
+    calls = [call for call in _dispatched_commands(connection) if call.args[0] == command]
+    assert len(calls) == 1, calls
+    return calls[0]
+
+
+def _native_params(call) -> dict:
+    return call.args[1] if len(call.args) > 1 and call.args[1] is not None else {}
+
+
+def test_core_router_names_detail_projects_command_names_only():
+    """core_cmd(get_capabilities, detail=names) is a Python-owned names-only projection."""
+    capabilities = _capability_document()
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": capabilities}
+    connection.send_command_cached.return_value = {"success": True, "data": capabilities}
+
+    router = make_router("core", connection, "core docs")
+    payload = json.loads(router("get_capabilities", {"detail": "names"}))
+
+    assert payload.get("_error") is None, payload
+    assert sorted(payload["domains"]) == sorted(capabilities["domains"])
+    assert _command_names(payload) == _command_names(capabilities)
+    assert all(
+        "params" not in command
+        for domain in payload["domains"].values()
+        for command in domain["commands"]
+    )
+
+    # The Python-owned selector never reaches the editor: native get_capabilities has no detail
+    # parameter, and the facade makes exactly one native call.
+    calls = _dispatched_commands(connection)
+    assert len(calls) == 1, calls
+    assert calls[0].args[0].endswith("get_capabilities"), calls[0].args
+    assert "detail" not in _native_params(calls[0])
+
+
+def test_core_router_capabilities_default_view_is_names_only():
+    """The agent-facing default is detail=names (design §3.4)."""
+    capabilities = _capability_document()
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": capabilities}
+    connection.send_command_cached.return_value = {"success": True, "data": capabilities}
+
+    router = make_router("core", connection, "core docs")
+    payload = json.loads(router("get_capabilities"))
+
+    assert payload.get("_error") is None, payload
+    assert sorted(payload["domains"]) == sorted(capabilities["domains"])
+    assert all(
+        "params" not in command
+        for domain in payload["domains"].values()
+        for command in domain["commands"]
+    )
+
+
+def test_core_router_names_view_keeps_full_signatures_available():
+    """A projected read never truncates the authoritative capabilities.
+
+    detail=full still exposes the complete signature inventory, and a subsequent live
+    operation-schema read still carries its params.
+    """
+    capabilities = _capability_document()
+
+    def _dispatch(command, params=None, **_kwargs):
+        if command.endswith("get_capabilities"):
+            return {"success": True, "data": capabilities}
+        if command == "core.get_operation_schema":
+            return {
+                "success": True,
+                "data": {
+                    "source": "live_editor",
+                    "domain": params.get("domain"),
+                    "command": params.get("command"),
+                    "params": [{"name": "items", "type": "array", "required": True}],
+                },
+            }
+        raise AssertionError(f"unexpected native command: {command}")
+
+    connection = MagicMock()
+    connection.send_command.side_effect = _dispatch
+    connection.send_command_cached.side_effect = _dispatch
+    router = make_router("core", connection, "core docs")
+
+    names_view = json.loads(router("get_capabilities", {"detail": "names"}))
+    assert names_view.get("_error") is None, names_view
+    assert all(
+        "params" not in command
+        for domain in names_view["domains"].values()
+        for command in domain["commands"]
+    )
+
+    full_view = json.loads(router("get_capabilities", {"detail": "full"}))
+    assert full_view.get("_error") is None, full_view
+    core_commands = {
+        command["name"]: command for command in full_view["domains"]["core"]["commands"]
+    }
+    assert core_commands["save_asset"]["params"], "detail=full must keep the signature inventory"
+
+    schema = json.loads(router("get_operation_schema", {"domain": "core", "command": "save_asset"}))
+    assert schema["source"] == "live_editor"
+    assert schema["params"] == [{"name": "items", "type": "array", "required": True}]
+
+
+def test_catalog_selection_params_are_forwarded_by_data_and_core_facades():
+    """Both facades forward sections/include_asset_paths so the cache key includes them."""
+    selection = {"sections": ["datatables"], "include_asset_paths": True}
+
+    data_connection = MagicMock()
+    data_connection.send_command.return_value = {"success": True, "data": {"datatables": []}}
+    data_router = make_router("data", data_connection, "data docs")
+    assert json.loads(data_router("get_data_catalog", dict(selection)))["datatables"] == []
+    data_call = _command_call(data_connection, "data.get_data_catalog")
+    assert data_call.args[1] == selection
+
+    core_connection = MagicMock()
+    core_connection.send_command_cached.return_value = {"success": True, "data": {"datatables": []}}
+    core_router = make_router("core", core_connection, "core docs")
+    assert json.loads(core_router("get_data_catalog", dict(selection)))["datatables"] == []
+    core_call = _command_call(core_connection, "data.get_data_catalog")
+    assert core_call.args[1] == selection
 
 
 def test_core_router_dispatches_normal_commands_via_tcp():
@@ -545,4 +1130,142 @@ def test_data_router_forwards_export_schema_json_payload():
     connection.send_command.assert_called_once_with(
         "data.export_schema_json",
         {"out_path": "Saved/CortexExports/schema.json"},
+    )
+
+
+def test_router_rejects_top_level_operation_fields():
+    connection = MagicMock()
+    router = make_router("graph", connection, "graph docs")
+    strict = strict_router_tool(router, "graph")
+    payload = json.loads(strict("add_node", None, node_class="UK2Node_VariableGet", asset_path="/Game/BP_X"))
+    assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    assert payload["canonical_shape"] == {"command": "string", "params": "object"}
+    connection.send_command.assert_not_called()
+
+
+def test_registered_router_rejects_top_level_operation_fields_locally():
+    from mcp.server.fastmcp import FastMCP
+
+    connection = MagicMock()
+    mcp = FastMCP("router-contract-test")
+    register_router_tools(mcp, connection, {"graph": "graph docs"}, domains=("graph",))
+
+    payload = _call_tool_payload(mcp, "graph_cmd", {
+        "command": "add_node",
+        "node_class": "UK2Node_VariableGet",
+        "asset_path": "/Game/BP_X",
+    })
+
+    assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    assert payload["canonical_shape"] == {"command": "string", "params": "object"}
+    connection.send_command.assert_not_called()
+
+
+def test_registered_router_rejects_non_object_params_locally():
+    from mcp.server.fastmcp import FastMCP
+
+    connection = MagicMock()
+    mcp = FastMCP("router-contract-test")
+    register_router_tools(mcp, connection, {"graph": "graph docs"}, domains=("graph",))
+
+    payload = _call_tool_payload(mcp, "graph_cmd", {
+        "command": "add_node",
+        "params": ["not", "an", "object"],
+    })
+
+    assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    assert payload["canonical_shape"] == {"command": "string", "params": "object"}
+    connection.send_command.assert_not_called()
+
+
+def test_batch_query_rejects_empty_commands_locally():
+    connection = MagicMock()
+    router = make_router("core", connection, "core docs")
+    strict = strict_router_tool(router, "core")
+    payload = json.loads(strict("batch_query", {"commands": []}))
+    assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    connection.send_command.assert_not_called()
+
+
+def test_batch_query_rejects_missing_commands_locally():
+    connection = MagicMock()
+    router = make_router("core", connection, "core docs")
+    strict = strict_router_tool(router, "core")
+    payload = json.loads(strict("batch_query", {}))
+    assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    connection.send_command.assert_not_called()
+
+
+def test_registered_batch_query_rejects_missing_commands_locally():
+    from mcp.server.fastmcp import FastMCP
+
+    connection = MagicMock()
+    mcp = FastMCP("router-contract-test")
+    register_router_tools(mcp, connection, {"core": "core docs"}, domains=("core",))
+
+    payload = _call_tool_payload(mcp, "core_cmd", {"command": "batch_query", "params": {}})
+
+    assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    assert payload["canonical_shape"] == {"command": "string", "params": "object"}
+    connection.send_command.assert_not_called()
+
+
+def test_batch_query_rejects_empty_steps_alias_locally():
+    connection = MagicMock()
+    router = make_router("core", connection, "core docs")
+    strict = strict_router_tool(router, "core")
+    payload = json.loads(strict("batch_query", {"steps": []}))
+    assert payload["_error"] == "INVALID_INVOCATION_SHAPE"
+    connection.send_command.assert_not_called()
+
+
+def test_batch_query_forwards_steps_alias_as_commands():
+    connection = MagicMock()
+    connection.send_command.return_value = {
+        "success": True,
+        "data": {"results": [{"index": 0, "success": True}], "count": 1},
+    }
+    router = make_router("core", connection, "core docs")
+    strict = strict_router_tool(router, "core")
+    payload = json.loads(strict("batch_query", {
+        "steps": [{"command": "graph.add_node", "params": {"asset_path": "/Game/BP_X"}}],
+        "stop_on_error": True,
+        "rollback_on_error": True,
+        "verify_rollback": True,
+    }))
+    assert payload["count"] == 1
+    connection.send_command.assert_called_once_with(
+        "batch",
+        {
+            "commands": [{"command": "graph.add_node", "params": {"asset_path": "/Game/BP_X"}}],
+            "stop_on_error": True,
+            "rollback_on_error": True,
+            "verify_rollback": True,
+        },
+    )
+
+
+def test_batch_query_forwards_rollback_params():
+    connection = MagicMock()
+    connection.send_command.return_value = {
+        "success": True,
+        "data": {"results": [{"index": 0, "success": True}], "count": 1},
+    }
+    router = make_router("core", connection, "core docs")
+    strict = strict_router_tool(router, "core")
+    payload = json.loads(strict("batch_query", {
+        "commands": [{"command": "graph.add_node", "params": {"asset_path": "/Game/BP_X"}}],
+        "stop_on_error": True,
+        "rollback_on_error": True,
+        "verify_rollback": True,
+    }))
+    assert payload["count"] == 1
+    connection.send_command.assert_called_once_with(
+        "batch",
+        {
+            "commands": [{"command": "graph.add_node", "params": {"asset_path": "/Game/BP_X"}}],
+            "stop_on_error": True,
+            "rollback_on_error": True,
+            "verify_rollback": True,
+        },
     )

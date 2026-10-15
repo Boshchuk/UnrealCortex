@@ -2,6 +2,20 @@
 #include "CortexEditorModule.h"
 #include "Containers/Ticker.h"
 #include "Editor.h"
+#include "EnhancedInputSubsystems.h"
+#include "InputAction.h"
+
+namespace
+{
+FCortexCommandResult MakeContinuousInputCancellationResult()
+{
+	FCortexCommandResult Result;
+	Result.bSuccess = false;
+	Result.ErrorCode = TEXT("OperationCancelled");
+	Result.ErrorMessage = TEXT("Continuous input injection cancelled");
+	return Result;
+}
+}
 
 FCortexEditorPIEState::FCortexEditorPIEState()
 {
@@ -46,6 +60,16 @@ void FCortexEditorPIEState::UnbindDelegates()
 
 void FCortexEditorPIEState::SetState(ECortexPIEState NewState)
 {
+	// Starting from any other state is a new play request: either this tracker's own
+	// start_pie/restart_pie, or an engine-initiated PreBeginPIE.  Repeated Starting notifications for
+	// the same request (PreBeginPIE arriving after start_pie already moved us to Starting) must not
+	// advance the generation, otherwise a legitimate CancelPIE cleanup armed for the request just
+	// begun would be discarded as superseded.
+	if (NewState == ECortexPIEState::Starting && State != ECortexPIEState::Starting)
+	{
+		++PlayRequestGeneration;
+	}
+
 	UE_LOG(LogCortexEditor, Log, TEXT("PIE state: %s -> %s"),
 		*StateToString(State), *StateToString(NewState));
 	State = NewState;
@@ -140,11 +164,27 @@ void FCortexEditorPIEState::RegisterInputTickerHandle(FTSTicker::FDelegateHandle
 
 void FCortexEditorPIEState::CancelAllInputTickers()
 {
+	// A cancellation callback must not be able to install a successor run that this cleanup would
+	// not own; block all new input admission for the duration of the teardown.
+	TGuardValue<bool> AdmissionBlock(bInputAdmissionBlocked, true);
+
 	*InputCancelToken = true;
 	InputCancelToken = MakeShared<FThreadSafeBool>(false);
-	const bool bHadInputTickers = InputTickerHandles.Num() > 0;
 
-	for (FTSTicker::FDelegateHandle& Handle : InputTickerHandles)
+	// Move owned state out before anything can invoke a deferred response: completing a callback
+	// may re-enter the session and mutate the containers we would otherwise be iterating.
+	TMap<TWeakObjectPtr<const UInputAction>, FContinuousInputRun> RunsToStop = MoveTemp(ContinuousInputRuns);
+	TArray<FTSTicker::FDelegateHandle> TickersToRemove = MoveTemp(InputTickerHandles);
+	const bool bHadInputTickers = TickersToRemove.Num() > 0;
+
+	// Owned native injections must be stopped synchronously before their tickers are removed,
+	// otherwise a timed or indefinite Cortex injection would outlive its owner.
+	for (TPair<TWeakObjectPtr<const UInputAction>, FContinuousInputRun>& Pair : RunsToStop)
+	{
+		StopNativeContinuousInjection(Pair.Value);
+	}
+
+	for (FTSTicker::FDelegateHandle& Handle : TickersToRemove)
 	{
 		if (Handle.IsValid())
 		{
@@ -153,15 +193,162 @@ void FCortexEditorPIEState::CancelAllInputTickers()
 		}
 	}
 
-	InputTickerHandles.Empty();
-
-	if (bHadInputTickers)
+	// Complete each owned timed run's pending caller exactly once with a single shared cancellation.
+	const FCortexCommandResult Cancellation = MakeContinuousInputCancellationResult();
+	for (TPair<TWeakObjectPtr<const UInputAction>, FContinuousInputRun>& Pair : RunsToStop)
 	{
-		FCortexCommandResult CancelResult;
-		CancelResult.bSuccess = false;
-		CancelResult.ErrorCode = TEXT("OperationCancelled");
-		CancelResult.ErrorMessage = TEXT("Input sequence cancelled");
-		CompletePendingInputCallbacks(CancelResult);
+		if (Pair.Value.bHasCallback)
+		{
+			CompletePendingInputCallback(Pair.Value.CallbackId, Cancellation);
+		}
+	}
+
+	if (bHadInputTickers || RunsToStop.Num() > 0)
+	{
+		CompletePendingInputCallbacks(Cancellation);
+	}
+}
+
+void FCortexEditorPIEState::StopNativeContinuousInjection(const FContinuousInputRun& Run)
+{
+	UEnhancedInputLocalPlayerSubsystem* Subsystem = Run.Subsystem.Get();
+	const UInputAction* Action = Run.Action.Get();
+	if (Subsystem != nullptr && Action != nullptr)
+	{
+		Subsystem->StopContinuousInputInjectionForAction(Action);
+	}
+}
+
+bool FCortexEditorPIEState::InvalidateContinuousInputRun(const UInputAction* Action, bool& bCancelledDuringCallback)
+{
+	bCancelledDuringCallback = false;
+
+	// The predecessor's cancellation callback runs inside this function; block new admission so it
+	// cannot install an intervening run before the caller's successor is tracked.
+	TGuardValue<bool> AdmissionBlock(bInputAdmissionBlocked, true);
+
+	if (Action == nullptr)
+	{
+		return false;
+	}
+
+	const TWeakObjectPtr<const UInputAction> Key(Action);
+	FContinuousInputRun* Existing = ContinuousInputRuns.Find(Key);
+	if (Existing == nullptr)
+	{
+		return false;
+	}
+
+	FContinuousInputRun Run = MoveTemp(*Existing);
+	ContinuousInputRuns.Remove(Key);
+
+	// Native resources are released before their stop timer, matching CancelAllInputTickers.
+	StopNativeContinuousInjection(Run);
+
+	if (Run.TimerHandle.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(Run.TimerHandle);
+		InputTickerHandles.Remove(Run.TimerHandle);
+	}
+
+	if (!Run.bHasCallback)
+	{
+		return false;
+	}
+
+	// The callback may synchronously disconnect or end PIE, which cancels the session by flipping
+	// the token this shared ref still points at; the caller revalidates before mutating.
+	const TSharedRef<FThreadSafeBool> TokenBeforeCallback = InputCancelToken;
+	CompletePendingInputCallback(Run.CallbackId, MakeContinuousInputCancellationResult());
+	bCancelledDuringCallback = *TokenBeforeCallback;
+	return true;
+}
+
+bool FCortexEditorPIEState::OwnsContinuousInputRunForSubsystem(
+	const UInputAction* Action,
+	const UEnhancedInputLocalPlayerSubsystem* Subsystem) const
+{
+	if (Action == nullptr || Subsystem == nullptr)
+	{
+		return false;
+	}
+
+	const FContinuousInputRun* Run = ContinuousInputRuns.Find(TWeakObjectPtr<const UInputAction>(Action));
+	return Run != nullptr && Run->Subsystem.Get() == Subsystem;
+}
+
+bool FCortexEditorPIEState::StopOwnedContinuousInputRun(const UInputAction* Action)
+{
+	if (Action == nullptr || !ContinuousInputRuns.Contains(TWeakObjectPtr<const UInputAction>(Action)))
+	{
+		return false;
+	}
+
+	bool bCancelledDuringCallback = false;
+	InvalidateContinuousInputRun(Action, bCancelledDuringCallback);
+	return true;
+}
+
+uint32 FCortexEditorPIEState::TrackContinuousInputRun(
+	UEnhancedInputLocalPlayerSubsystem* Subsystem,
+	const UInputAction* Action,
+	bool bTimed,
+	float DelaySeconds,
+	bool bHasCallback,
+	uint32 CallbackId)
+{
+	const TWeakObjectPtr<const UInputAction> Key(Action);
+	FContinuousInputRun& Run = ContinuousInputRuns.FindOrAdd(Key);
+	Run.Subsystem = Subsystem;
+	Run.Action = Action;
+	Run.Generation = ++ContinuousInputRunGeneration;
+	Run.bHasCallback = bHasCallback && bTimed;
+	Run.CallbackId = CallbackId;
+	Run.TimerHandle.Reset();
+
+	if (bTimed)
+	{
+		const uint32 Generation = Run.Generation;
+		const FTSTicker::FDelegateHandle Handle = FTSTicker::GetCoreTicker().AddTicker(
+			FTickerDelegate::CreateLambda([this, Key, Generation](float) -> bool
+			{
+				HandleContinuousInputTimerElapsed(Key, Generation);
+				return false;
+			}),
+			DelaySeconds);
+		Run.TimerHandle = Handle;
+		RegisterInputTickerHandle(Handle);
+	}
+
+	return Run.Generation;
+}
+
+void FCortexEditorPIEState::HandleContinuousInputTimerElapsed(
+	const TWeakObjectPtr<const UInputAction>& ActionKey,
+	uint32 Generation)
+{
+	FContinuousInputRun* Existing = ContinuousInputRuns.Find(ActionKey);
+	if (Existing == nullptr || Existing->Generation != Generation)
+	{
+		// A stale stop timer must never touch the run that succeeded it.
+		return;
+	}
+
+	FContinuousInputRun Run = MoveTemp(*Existing);
+	ContinuousInputRuns.Remove(ActionKey);
+
+	// One-shot ticker is being removed by the ticker system as we run; drop our bookkeeping
+	// handle and stop the injection the timer was guarding.
+	InputTickerHandles.Remove(Run.TimerHandle);
+	StopNativeContinuousInjection(Run);
+
+	if (Run.bHasCallback)
+	{
+		FCortexCommandResult Result;
+		Result.bSuccess = true;
+		Result.Data = MakeShared<FJsonObject>();
+		Result.Data->SetBoolField(TEXT("injecting"), false);
+		CompletePendingInputCallback(Run.CallbackId, Result);
 	}
 }
 
@@ -239,17 +426,41 @@ void FCortexEditorPIEState::HandleEndPIE(bool bIsSimulating)
 
 void FCortexEditorPIEState::HandleCancelPIE()
 {
-	UE_LOG(LogCortexEditor, Log, TEXT("PIE cancelled"));
+	// Nothing may be logged or mutated synchronously here.  CancelPIE can be broadcast from inside
+	// RequestPlaySession()/CancelRequestPlaySession() while the engine holds internal locks, and a
+	// UE_LOG from this stack (SetState logs) can deadlock against them.
+	//
+	// EndPlayMap() broadcasts CancelPIE unconditionally after EndPIE, so most cancellations are
+	// follow-ups to a session that HandleEndPIE() already finished.  A start request issued in the
+	// meantime must not be terminated by such a stale cancellation, so the cleanup is armed for the
+	// generation of the request that was current when the cancel arrived and is dropped if a newer
+	// request has begun by the time it runs.  A cancellation of the request still in flight keeps
+	// the same generation and is applied (PIE_TERMINATED), matching engine PIE-start rejections.
+	const uint32 CancelledGeneration = PlayRequestGeneration;
 
-	// Do not call OnPIEEnded() synchronously here.
-	// CancelPIE can fire from inside RequestPlaySession() or CancelRequestPlaySession()
-	// while the engine holds internal locks.  Calling UE_LOG from within that call
-	// stack (via SetState -> UE_LOG inside OnPIEEnded) deadlocks against those locks.
-	// Defer to the next tick so we are safely outside the engine call.
+	// Coalesce duplicate cancellations onto a single ticker.  Keeping the earliest armed cleanup
+	// when a later cancellation belongs to a newer request would drop the later one, and simply
+	// overwriting the handle would leak the previous raw-this ticker.
+	if (CancelDeferHandle.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(CancelDeferHandle);
+		CancelDeferHandle.Reset();
+	}
+
 	CancelDeferHandle = FTSTicker::GetCoreTicker().AddTicker(
-		FTickerDelegate::CreateLambda([this](float) mutable
+		FTickerDelegate::CreateLambda([this, CancelledGeneration](float) mutable
 		{
 			CancelDeferHandle.Reset();
+
+			if (PlayRequestGeneration != CancelledGeneration)
+			{
+				UE_LOG(LogCortexEditor, Log,
+					TEXT("PIE cancel ignored: superseded by a newer play request (generation %u -> %u)"),
+					CancelledGeneration, PlayRequestGeneration);
+				return false;
+			}
+
+			UE_LOG(LogCortexEditor, Log, TEXT("PIE cancelled"));
 			OnPIEEnded();
 			return false;
 		}));

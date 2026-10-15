@@ -77,7 +77,7 @@ class TestLevelActorLifecycle:
 
     def test_spawn_actor_basic(self, tcp_connection, cleanup_actors):
         resp = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
         })
         data = resp["data"]
         assert "name" in data
@@ -88,7 +88,7 @@ class TestLevelActorLifecycle:
     def test_spawn_actor_with_label_and_folder(self, tcp_connection, cleanup_actors):
         label = _uniq("CortexE2E_labeled")
         resp = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": label,
             "folder": "CortexTest",
         })
@@ -99,7 +99,7 @@ class TestLevelActorLifecycle:
 
     def test_spawn_actor_with_transform(self, tcp_connection, cleanup_actors):
         resp = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "location": [100.0, 200.0, 300.0],
             "rotation": [0.0, 45.0, 0.0],
             "scale": [2.0, 2.0, 2.0],
@@ -111,7 +111,7 @@ class TestLevelActorLifecycle:
     def test_duplicate_actor(self, tcp_connection, cleanup_actors):
         src_label = _uniq("CortexE2E_dup_src")
         resp = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": src_label,
         })
         cleanup_actors.append(src_label)
@@ -126,7 +126,7 @@ class TestLevelActorLifecycle:
 
     def test_rename_actor(self, tcp_connection, cleanup_actors):
         resp = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": _uniq("CortexE2E_rename_old"),
         })
         name = resp["data"]["name"]
@@ -142,7 +142,7 @@ class TestLevelActorLifecycle:
     def test_delete_actor(self, tcp_connection):
         label = _uniq("CortexE2E_delete")
         resp = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": label,
         })
 
@@ -154,7 +154,7 @@ class TestLevelActorLifecycle:
     def test_delete_actor_with_confirm_class(self, tcp_connection):
         label = _uniq("CortexE2E_confirm_del")
         resp = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": label,
         })
 
@@ -401,7 +401,7 @@ class TestLevelOrganization:
 
     def test_set_tags(self, tcp_connection, cleanup_actors):
         resp = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": _uniq("CortexE2E_tags"),
         })
         name = resp["data"]["name"]
@@ -415,7 +415,7 @@ class TestLevelOrganization:
 
     def test_set_folder(self, tcp_connection, cleanup_actors):
         resp = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": _uniq("CortexE2E_folder"),
         })
         name = resp["data"]["name"]
@@ -429,7 +429,7 @@ class TestLevelOrganization:
 
     def test_set_folder_empty_clears(self, tcp_connection, cleanup_actors):
         resp = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": _uniq("CortexE2E_folder_clear"),
         })
         name = resp["data"]["name"]
@@ -445,11 +445,11 @@ class TestLevelOrganization:
 
     def test_attach_detach_actor(self, tcp_connection, cleanup_actors):
         child = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": _uniq("CortexE2E_child"),
         })
         parent = tcp_connection.send_command("level.spawn_actor", {
-            "class": "StaticMeshActor",
+            "class_name": "StaticMeshActor",
             "label": _uniq("CortexE2E_parent"),
         })
         child_name = child["data"]["name"]
@@ -466,11 +466,11 @@ class TestLevelOrganization:
 
     def test_attach_verify_via_get_actor(self, tcp_connection, cleanup_actors):
         child = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": _uniq("CortexE2E_att_child"),
         })
         parent = tcp_connection.send_command("level.spawn_actor", {
-            "class": "StaticMeshActor",
+            "class_name": "StaticMeshActor",
             "label": _uniq("CortexE2E_att_parent"),
         })
         child_name = child["data"]["name"]
@@ -496,11 +496,11 @@ class TestLevelOrganization:
             pytest.skip("Grouping not supported on World Partition levels")
 
         a1 = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": _uniq("CortexE2E_grp1"),
         })
         a2 = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": _uniq("CortexE2E_grp2"),
         })
         n1 = a1["data"]["name"]
@@ -521,11 +521,11 @@ class TestLevelOrganization:
             pytest.skip("Grouping not supported on World Partition levels")
 
         a1 = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": _uniq("CortexE2E_ugrp1"),
         })
         a2 = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": _uniq("CortexE2E_ugrp2"),
         })
         n1 = a1["data"]["name"]
@@ -624,7 +624,7 @@ class TestLevelErrors:
     def test_spawn_invalid_class(self, tcp_connection):
         with pytest.raises(RuntimeError):
             tcp_connection.send_command("level.spawn_actor", {
-                "class": "NonExistentClass_12345",
+                "class_name": "NonExistentClass_12345",
             })
 
     def test_delete_nonexistent_actor(self, tcp_connection):
@@ -635,7 +635,7 @@ class TestLevelErrors:
 
     def test_delete_wrong_confirm_class(self, tcp_connection):
         resp = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": _uniq("CortexE2E_wrong_confirm"),
         })
         name = resp["data"]["name"]
@@ -665,7 +665,7 @@ class TestLevelErrors:
 
     def test_set_actor_property_invalid(self, tcp_connection):
         resp = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": _uniq("CortexE2E_bad_prop"),
         })
         name = resp["data"]["name"]
@@ -684,7 +684,7 @@ class TestLevelErrors:
 
     def test_add_component_invalid_class(self, tcp_connection):
         resp = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": _uniq("CortexE2E_bad_comp"),
         })
         name = resp["data"]["name"]
@@ -702,7 +702,7 @@ class TestLevelErrors:
 
     def test_attach_nonexistent_parent(self, tcp_connection):
         resp = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": _uniq("CortexE2E_orphan"),
         })
         name = resp["data"]["name"]
@@ -720,7 +720,7 @@ class TestLevelErrors:
 
     def test_get_component_property_invalid(self, tcp_connection):
         resp = tcp_connection.send_command("level.spawn_actor", {
-            "class": "PointLight",
+            "class_name": "PointLight",
             "label": _uniq("CortexE2E_bad_comp_prop"),
         })
         name = resp["data"]["name"]

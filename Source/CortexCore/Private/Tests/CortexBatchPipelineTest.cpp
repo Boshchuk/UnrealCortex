@@ -619,7 +619,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCortexBatchEmptyTest::RunTest(const FString& Parameters)
 {
 	// 0 commands
-	// Expected: success, count=0
+	// Expected: rejected — a zero-command batch is never successful
 	FCortexCommandRouter Router;
 
 	TArray<TSharedPtr<FJsonValue>> Commands;
@@ -628,21 +628,9 @@ bool FCortexBatchEmptyTest::RunTest(const FString& Parameters)
 	Params->SetArrayField(TEXT("commands"), Commands);
 
 	FCortexCommandResult Result = Router.Execute(TEXT("batch"), Params);
-	TestTrue(TEXT("Empty batch should succeed"), Result.bSuccess);
-
-	// Verify 0 results
-	const TArray<TSharedPtr<FJsonValue>>* ResultsArray = nullptr;
-	if (Result.Data.IsValid() && Result.Data->TryGetArrayField(TEXT("results"), ResultsArray))
-	{
-		TestEqual(TEXT("Should have 0 results"), ResultsArray->Num(), 0);
-	}
-
-	// Verify count field
-	int32 Count = -1;
-	if (Result.Data.IsValid() && Result.Data->TryGetNumberField(TEXT("count"), Count))
-	{
-		TestEqual(TEXT("Count should be 0"), Count, 0);
-	}
+	TestFalse(TEXT("Empty batch should be rejected"), Result.bSuccess);
+	TestEqual(TEXT("Empty batch code should be INVALID_INVOCATION_SHAPE"),
+		Result.ErrorCode, CortexErrorCodes::InvalidInvocationShape);
 
 	return true;
 }

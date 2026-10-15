@@ -2,6 +2,7 @@
 #include "CortexVersionCompat.h"
 #include "CortexCommandRouter.h"
 #include "CortexDataCommandHandler.h"
+#include "CortexEngineCompat.h"
 #include "CortexTypes.h"
 #include "Tests/CortexDataLocalizationTestTypes.h"
 #include "Tests/CortexTestDataAsset.h"
@@ -211,10 +212,14 @@ namespace
 			}
 
 			Table->GetMutableStringTable()->SetNamespace(TEXT("CortexExportTests"));
-			CortexSetSourceString(*Table->GetMutableStringTable(), TEXT("zeta.key"), TEXT("Zeta text"));
-			CortexSetSourceString(*Table->GetMutableStringTable(), TEXT("alpha.key"), TEXT("Alpha text"));
-			CortexSetSourceString(*Table->GetMutableStringTable(), TEXT("middle.key"), TEXT("Middle text"));
-			CortexSetSourceString(*Table->GetMutableStringTable(), TEXT("ignored.other"), TEXT("Ignored text"));
+			CortexEngineCompat::SetStringTableSourceString(
+				*Table->GetMutableStringTable(), TEXT("zeta.key"), TEXT("Zeta text"));
+			CortexEngineCompat::SetStringTableSourceString(
+				*Table->GetMutableStringTable(), TEXT("alpha.key"), TEXT("Alpha text"));
+			CortexEngineCompat::SetStringTableSourceString(
+				*Table->GetMutableStringTable(), TEXT("middle.key"), TEXT("Middle text"));
+			CortexEngineCompat::SetStringTableSourceString(
+				*Table->GetMutableStringTable(), TEXT("ignored.other"), TEXT("Ignored text"));
 			return Table;
 		}
 
@@ -353,7 +358,8 @@ namespace
 	private:
 		FString GetSavedRunDir() const
 		{
-			return FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexExportTests"), RunId);
+			return FPaths::ConvertRelativePathToFull(
+				FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexExportTests"), RunId));
 		}
 
 		template <typename AssetType>
@@ -807,6 +813,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCortexDataExportFixtureSmokeTest::RunTest(const FString& Parameters)
 {
 	FCortexDataExportTestFixture Fixture;
+	TestFalse(
+		TEXT("Export run directory is absolute"),
+		FPaths::IsRelative(Fixture.MakeSavedOutputPath(TEXT("probe.json"))));
 
 	UDataTable* RegularTable = Fixture.CreateRegularDataTable();
 	TestNotNull(TEXT("regular DataTable fixture is created"), RegularTable);
@@ -896,7 +905,8 @@ bool FCortexDataExportCommandsRegisteredTest::RunTest(const FString& Parameters)
 	FCortexCommandRouter Router = CreateDataExportTestRouter();
 	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 	Params->SetStringField(TEXT("table_path"), TEXT("/Game/CortexExportTests/Missing.Missing"));
-	Params->SetStringField(TEXT("out_path"), FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexExportTests"), TEXT("registered.json")));
+	Params->SetStringField(TEXT("out_path"), FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CortexExportTests"), TEXT("registered.json"))));
 
 	const FCortexCommandResult Result = Router.Execute(TEXT("data.export_datatable_json"), Params);
 	TestFalse(TEXT("export_datatable_json is registered and validates the missing table"), Result.bSuccess);
@@ -1319,7 +1329,7 @@ bool FCortexDataSchemaExportDeterministicRepeatedRunsTest::RunTest(const FString
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCortexDataExportPathSafetyTest,
-	"Cortex.Data.Export.PathSafety",
+	"Cortex.Data.Export.PathSafety.Basic",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
 )
 
@@ -1392,14 +1402,15 @@ bool FCortexDataExportPathSafetyTest::RunTest(const FString& Parameters)
 		AddInfo(FString::Printf(TEXT("Skipping symlink/junction escape test; mklink /J failed with code %d: %s %s"), MklinkExitCode, *StdOut, *StdErr));
 		return true;
 	}
-#else
-	AddInfo(TEXT("Skipping symlink/junction escape test on this platform"));
-	return true;
-#endif
 
+	// Assertions live INSIDE the Windows branch: the #else returns, so anything after the
+	// #endif is unreachable on every other platform (-Wunreachable-code -Werror on clang).
 	const FCortexCommandResult SymlinkResult = ExecuteDatatableExport(FPaths::Combine(LinkDir, TEXT("NewDir"), TEXT("out.json")));
 	TestFalse(TEXT("Symlink/junction parent escapes are rejected"), SymlinkResult.bSuccess);
 	TestEqual(TEXT("Symlink/junction rejection uses InvalidField"), SymlinkResult.ErrorCode, CortexErrorCodes::InvalidField);
+#else
+	AddInfo(TEXT("Skipping symlink/junction escape test on this platform"));
+#endif
 
 	return true;
 }

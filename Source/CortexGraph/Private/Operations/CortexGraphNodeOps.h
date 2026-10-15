@@ -35,6 +35,8 @@ public:
 	static FCortexCommandResult RemoveNode(const TSharedPtr<FJsonObject>& Params);
 	static FCortexCommandResult SetPinValue(const TSharedPtr<FJsonObject>& Params);
 	static FCortexCommandResult AutoLayout(const TSharedPtr<FJsonObject>& Params);
+	static FCortexCommandResult DescribeNode(const TSharedPtr<FJsonObject>& Params);
+	static UClass* ResolveNodeClass(const FString& NodeClassName);
 
 	// Shared helpers for reuse across CortexGraph operations
 	static UBlueprint* LoadBlueprint(const FString& AssetPath, FCortexCommandResult& OutError);
@@ -52,7 +54,11 @@ public:
 	 *   Default is false to preserve existing call sites (e.g. AddNode, pin text tests).
 	 *   MCP commands (GetNode) pass bCompact explicitly based on the user-supplied compact param (default true).
 	 */
-	static TSharedRef<FJsonObject> SerializePin(const UEdGraphPin* Pin, bool bDetailed = true, bool bCompact = false);
+	static TSharedRef<FJsonObject> SerializePin(
+		const UEdGraphPin* Pin,
+		bool bDetailed = true,
+		bool bCompact = false,
+		const UBlueprint* ContextBlueprint = nullptr);
 	static TSharedRef<FJsonObject> SerializeNode(const UEdGraphNode* Node, bool bIncludePins, bool bCompact);
 
 	/**

@@ -3,6 +3,8 @@
 #include "CortexVersionCompat.h"
 #include "CortexBatchScope.h"
 #include "CortexCoreModule.h"
+#include "CortexPluginIdentity.h"
+#include "CortexEngineCompat.h"
 #include "CortexFileUtils.h"
 #include "ICortexDomainHandler.h"
 #include "Misc/EngineVersion.h"
@@ -19,15 +21,92 @@
 #include "Materials/Material.h"
 #include "MaterialGraph/MaterialGraph.h"
 #include "ScopedTransaction.h"
+#include "UObject/UObjectIterator.h"
 
 int32 FCortexCommandRouter::BatchDepth = 0;
 
 namespace
 {
+/** Recursively validate a JSON value tree, rejecting null shared pointers that would crash the serializer. */
+bool IsValidJsonValue(const TSharedPtr<FJsonValue>& Value)
+{
+	if (!Value.IsValid())
+	{
+		return false;
+	}
+
+	switch (Value->Type)
+	{
+	case EJson::Object:
+	{
+		const TSharedPtr<FJsonObject> Object = Value->AsObject();
+		if (!Object.IsValid())
+		{
+			return false;
+		}
+		for (const auto& Pair : Object->Values)
+		{
+			if (!IsValidJsonValue(Pair.Value))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+	case EJson::Array:
+	{
+		for (const TSharedPtr<FJsonValue>& Element : Value->AsArray())
+		{
+			if (!IsValidJsonValue(Element))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+	default:
+		return true;
+	}
+}
+
+/** Validate the assembled response envelope before serialization. */
+bool IsValidJsonTree(const TSharedPtr<FJsonObject>& Root)
+{
+	if (!Root.IsValid())
+	{
+		return false;
+	}
+	return IsValidJsonValue(MakeShared<FJsonValueObject>(Root));
+}
+
+/** Build the safe SERIALIZATION_ERROR fallback envelope when a response cannot be serialized. */
+FString BuildSerializationErrorResponse(const FString& RequestId)
+{
+	TSharedRef<FJsonObject> Fallback = MakeShared<FJsonObject>();
+	if (!RequestId.IsEmpty())
+	{
+		Fallback->SetStringField(TEXT("id"), RequestId);
+	}
+	Fallback->SetBoolField(TEXT("success"), false);
+
+	TSharedRef<FJsonObject> ErrorObj = MakeShared<FJsonObject>();
+	ErrorObj->SetStringField(TEXT("code"), CortexErrorCodes::SerializationError);
+	ErrorObj->SetStringField(TEXT("message"), TEXT("Failed to serialize command response"));
+	Fallback->SetObjectField(TEXT("error"), ErrorObj);
+
+	Fallback->SetNumberField(TEXT("timing_ms"), 0.0);
+
+	FString OutputString;
+	TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+		TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&OutputString);
+	FJsonSerializer::Serialize(Fallback, Writer);
+	return OutputString;
+}
+
 TSharedPtr<FJsonObject> BuildCapabilitiesData(const TArray<FCortexRegisteredDomain>& RegisteredDomains)
 {
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
-	Data->SetStringField(TEXT("plugin_version"), TEXT("0.1.13"));
+	Data->SetStringField(TEXT("plugin_version"), CortexPluginIdentity::GetVersionName());
 
 	TSharedPtr<FJsonObject> Domains = MakeShared<FJsonObject>();
 
@@ -85,18 +164,31 @@ FCortexCommandRouter::~FCortexCommandRouter()
 // FCortexBatchScope implementation
 TSet<TWeakObjectPtr<UMaterial>> FCortexBatchScope::DirtyMaterials;
 TMap<FString, FCortexBatchScope::FBatchCleanupCallback> FCortexBatchScope::CleanupActions;
+TArray<FCortexBatchRollbackEntry> FCortexBatchScope::RollbackEntries;
+bool FCortexBatchScope::bRollbackExecuted = false;
+TSet<UPackage*> FCortexBatchScope::PackagesDirtyBeforeBatch;
+bool FCortexBatchScope::bRollbackEnabled = false;
 
 FCortexBatchScope::FCortexBatchScope()
 {
 	FCortexCommandRouter::BatchDepth++;
+	bRollbackEnabledBeforeBatch = bRollbackEnabled;
 }
 
 FCortexBatchScope::~FCortexBatchScope()
 {
+	bRollbackEnabled = bRollbackEnabledBeforeBatch;
 	FCortexCommandRouter::BatchDepth--;
 
 	if (FCortexCommandRouter::BatchDepth == 0)
 	{
+		if (!bRollbackExecuted)
+		{
+			RollbackEntries.Empty();
+		}
+		bRollbackExecuted = false;
+		PackagesDirtyBeforeBatch.Reset();
+
 		// Invoke generic cleanup actions (MoveTemp for re-entrancy safety:
 		// callbacks like NotifyGraphChanged may trigger delegates that call AddCleanupAction)
 		TMap<FString, FBatchCleanupCallback> PendingActions = MoveTemp(CleanupActions);
@@ -142,6 +234,115 @@ void FCortexBatchScope::AddCleanupAction(const FString& Key, FBatchCleanupCallba
 	{
 		CleanupActions.Add(Key, MoveTemp(Callback));
 	}
+}
+
+void FCortexBatchScope::RegisterRollbackEntry(
+	const FString& Kind,
+	const FString& NodeId,
+	const FString& Description,
+	TFunction<bool()> Rollback,
+	TFunction<bool()> Verify,
+	TWeakObjectPtr<UPackage> Package)
+{
+	if (!FCortexCommandRouter::IsInBatch() || bRollbackExecuted)
+	{
+		return;
+	}
+	RollbackEntries.Add({ Kind, NodeId, Description, MoveTemp(Rollback), MoveTemp(Verify), Package });
+}
+
+FCortexBatchRollbackResult FCortexBatchScope::ExecuteRollback()
+{
+	bRollbackExecuted = true;
+	FCortexBatchRollbackResult Result;
+	TSet<UPackage*> VerifiedPackages;
+	for (int32 Index = RollbackEntries.Num() - 1; Index >= 0; --Index)
+	{
+		FCortexBatchRollbackEntry& Entry = RollbackEntries[Index];
+		const bool bRollbackSucceeded = Entry.Rollback();
+		const bool bVerified = bRollbackSucceeded && Entry.Verify();
+		if (Entry.Kind == TEXT("add_node") && bRollbackSucceeded)
+		{
+			Result.CreatedNodeIds.Add(Entry.NodeId);
+		}
+		if (!bVerified)
+		{
+			Result.bVerified = false;
+			Result.ResidualChanges.Add(Entry.Description);
+		}
+		else if (Entry.Package.IsValid())
+		{
+			VerifiedPackages.Add(Entry.Package.Get());
+		}
+	}
+	// Rollback-enabled batches execute only explicitly rollback-safe reads and journaled mutations,
+	// so a verified rollback can restore the original clean state without hiding unrelated writes.
+	if (Result.bVerified)
+	{
+		for (UPackage* Package : VerifiedPackages)
+		{
+			if (!PackagesDirtyBeforeBatch.Contains(Package))
+			{
+				Package->SetDirtyFlag(false);
+			}
+		}
+	}
+	RollbackEntries.Empty();
+	return Result;
+}
+
+void FCortexBatchScope::DiscardRollbackEntries()
+{
+	RollbackEntries.Empty();
+}
+
+bool FCortexBatchScope::IsRollbackEnabled()
+{
+	return bRollbackEnabled;
+}
+
+void FCortexBatchScope::CaptureDirtyBaseline()
+{
+	PackagesDirtyBeforeBatch.Reset();
+	for (TObjectIterator<UPackage> It; It; ++It)
+	{
+		if (It->IsDirty())
+		{
+			PackagesDirtyBeforeBatch.Add(*It);
+		}
+	}
+}
+
+bool FCortexCommandRouter::IsRollbackSafeCommand(const FString& Command) const
+{
+	FString Namespace;
+	FString DomainCommand;
+	if (!Command.Split(TEXT("."), &Namespace, &DomainCommand) || Namespace.IsEmpty() || DomainCommand.IsEmpty())
+	{
+		return false;
+	}
+
+	for (const FCortexRegisteredDomain& Domain : RegisteredDomains)
+	{
+		if (Domain.Namespace != Namespace || !Domain.Handler.IsValid())
+		{
+			continue;
+		}
+		for (const FCortexCommandInfo& Info : Domain.Handler->GetSupportedCommands())
+		{
+			if (Info.Name == DomainCommand)
+			{
+				return Info.bRollbackSafe;
+			}
+		}
+		return false;
+	}
+	return false;
+}
+
+void FCortexBatchScope::SetRollbackEnabled(bool bEnabled)
+{
+	bRollbackEnabled = bEnabled;
 }
 
 FCortexCommandResult FCortexCommandRouter::Execute(
@@ -231,6 +432,14 @@ FString FCortexCommandRouter::ResultToJson(const FCortexCommandResult& Result, d
 	}
 
 	ResponseJson->SetNumberField(TEXT("timing_ms"), TimingMs);
+
+	if (!IsValidJsonTree(ResponseJson))
+	{
+		UE_LOG(LogCortex, Verbose,
+			TEXT("ResultToJson: response envelope contains invalid JSON pointers (RequestId=%s); returning SERIALIZATION_ERROR fallback"),
+			*RequestId);
+		return BuildSerializationErrorResponse(RequestId);
+	}
 
 	FString OutputString;
 	TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
@@ -339,7 +548,7 @@ TSharedPtr<FJsonObject> FCortexCommandRouter::DeepCopyJsonObject(const TSharedPt
 	TSharedPtr<FJsonObject> Copy = MakeShared<FJsonObject>();
 	for (const auto& Pair : Source->Values)
 	{
-		Copy->SetField(Pair.Key, DeepCopyJsonValue(Pair.Value));
+		Copy->SetField(CortexEngineCompat::JsonKeyToString(Pair.Key), DeepCopyJsonValue(Pair.Value));
 	}
 	return Copy;
 }
@@ -415,9 +624,9 @@ bool FCortexCommandRouter::ResolveObjectRefs(
 	// Iterate over all fields and resolve refs
 	TArray<FString> Keys;
 	Keys.Reserve(Params->Values.Num());
-	for (const auto& Entry : Params->Values)
+	for (const auto& Pair : Params->Values)
 	{
-		Keys.Emplace(CortexJsonKeyToString(Entry.Key));
+		Keys.Add(CortexEngineCompat::JsonKeyToString(Pair.Key));
 	}
 
 	for (const FString& Key : Keys)
@@ -666,6 +875,13 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 		return Error(CortexErrorCodes::InvalidField, TEXT("Missing required param: commands or steps (array)"));
 	}
 
+	if (CommandsArray->Num() == 0)
+	{
+		return Error(
+			CortexErrorCodes::InvalidInvocationShape,
+			TEXT("batch_query requires at least one command; zero-command batches are never successful"));
+	}
+
 	if (CommandsArray->Num() > MaxBatchSize)
 	{
 		return Error(
@@ -677,6 +893,10 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 	// Read stop_on_error parameter (default false)
 	bool bStopOnError = false;
 	Params->TryGetBoolField(TEXT("stop_on_error"), bStopOnError);
+	bool bRollbackOnError = false;
+	Params->TryGetBoolField(TEXT("rollback_on_error"), bRollbackOnError);
+	bool bVerifyRollback = bRollbackOnError;
+	Params->TryGetBoolField(TEXT("verify_rollback"), bVerifyRollback);
 
 	const double BatchStartTime = FPlatformTime::Seconds();
 
@@ -687,8 +907,11 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 
 	// RAII: sets IsInBatch()=true, defers PostEditChange
 	FCortexBatchScope BatchScope;
+	FCortexBatchScope::CaptureDirtyBaseline();
+	FCortexBatchScope::SetRollbackEnabled(bRollbackOnError);
 
 	TArray<TSharedPtr<FJsonValue>> ResultsArray;
+	bool bSawFailure = false;
 
 	for (int32 Index = 0; Index < CommandsArray->Num(); ++Index)
 	{
@@ -706,6 +929,7 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 			EntryResult->SetStringField(TEXT("error_message"), TEXT("Invalid command entry (not an object)"));
 			EntryResult->SetNumberField(TEXT("timing_ms"), 0.0);
 			ResultsArray.Add(MakeShared<FJsonValueObject>(EntryResult));
+			bSawFailure = true;
 			if (bStopOnError)
 			{
 				break;
@@ -717,6 +941,25 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 		(*CmdObj)->TryGetStringField(TEXT("command"), SubCommand);
 		EntryResult->SetStringField(TEXT("command"), SubCommand);
 
+		// Rollback is intentionally graph-scoped. Only commands that explicitly opt into the
+		// contract may run: this prevents hidden compile/save defaults and unjournaled mutations
+		// from escaping an otherwise verified rollback.
+		if (bRollbackOnError && !IsRollbackSafeCommand(SubCommand))
+		{
+			EntryResult->SetBoolField(TEXT("success"), false);
+			EntryResult->SetStringField(TEXT("error_code"), CortexErrorCodes::InvalidOperation);
+			EntryResult->SetStringField(TEXT("error_message"),
+				FString::Printf(TEXT("Command is not safe inside rollback-enabled batches: %s"), *SubCommand));
+			EntryResult->SetNumberField(TEXT("timing_ms"), 0.0);
+			ResultsArray.Add(MakeShared<FJsonValueObject>(EntryResult));
+			bSawFailure = true;
+			if (bStopOnError)
+			{
+				break;
+			}
+			continue;
+		}
+
 		// Block nested batch
 		if (SubCommand == TEXT("batch") || SubCommand == TEXT("batch_query"))
 		{
@@ -725,6 +968,7 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 			EntryResult->SetStringField(TEXT("error_message"), TEXT("Nested batch commands are not allowed"));
 			EntryResult->SetNumberField(TEXT("timing_ms"), 0.0);
 			ResultsArray.Add(MakeShared<FJsonValueObject>(EntryResult));
+			bSawFailure = true;
 			if (bStopOnError)
 			{
 				break;
@@ -756,6 +1000,7 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 			EntryResult->SetStringField(TEXT("error_message"), RefError);
 			EntryResult->SetNumberField(TEXT("timing_ms"), 0.0);
 			ResultsArray.Add(MakeShared<FJsonValueObject>(EntryResult));
+			bSawFailure = true;
 			if (bStopOnError)
 			{
 				break;
@@ -789,6 +1034,7 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 		{
 			EntryResult->SetStringField(TEXT("error_code"), SubResult.ErrorCode);
 			EntryResult->SetStringField(TEXT("error_message"), SubResult.ErrorMessage);
+			bSawFailure = true;
 		}
 
 		ResultsArray.Add(MakeShared<FJsonValueObject>(EntryResult));
@@ -796,11 +1042,92 @@ FCortexCommandResult FCortexCommandRouter::HandleBatch(const TSharedPtr<FJsonObj
 		// Stop on error if requested and step failed
 		if (bStopOnError && !SubResult.bSuccess)
 		{
+			if (bRollbackOnError)
+			{
+				const FCortexBatchRollbackResult RollbackResult = FCortexBatchScope::ExecuteRollback();
+				const bool bVerified = bVerifyRollback ? RollbackResult.bVerified : false;
+				Transaction.Cancel();
+
+				TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+				TSharedPtr<FJsonObject> RollbackObj = MakeShared<FJsonObject>();
+				RollbackObj->SetBoolField(TEXT("attempted"), true);
+				RollbackObj->SetBoolField(TEXT("verified"), bVerified);
+				Details->SetObjectField(TEXT("rollback"), RollbackObj);
+				TArray<TSharedPtr<FJsonValue>> CreatedIds;
+				for (const FString& NodeId : RollbackResult.CreatedNodeIds)
+				{
+					CreatedIds.Add(MakeShared<FJsonValueString>(NodeId));
+				}
+				Details->SetArrayField(TEXT("created_node_ids"), CreatedIds);
+				TArray<TSharedPtr<FJsonValue>> Residual;
+				for (const FString& Change : RollbackResult.ResidualChanges)
+				{
+					Residual.Add(MakeShared<FJsonValueString>(Change));
+				}
+				Details->SetArrayField(TEXT("residual_changes"), Residual);
+				Details->SetArrayField(TEXT("results"), ResultsArray);
+
+				return Error(
+					bVerified ? SubResult.ErrorCode : CortexErrorCodes::DirtyEditorState,
+					bVerified
+						? FString::Printf(TEXT("Batch failed at step %d; rollback completed and verified"), Index)
+						: TEXT("Batch failed and rollback could not be verified; the editor may be in a dirty state"),
+					Details);
+			}
 			break;
 		}
 	}
 
 	const double BatchElapsed = (FPlatformTime::Seconds() - BatchStartTime) * 1000.0;
+
+	FString FirstFailureCode;
+	bool bFoundFirstFailure = false;
+	for (const TSharedPtr<FJsonValue>& Value : ResultsArray)
+	{
+		const TSharedPtr<FJsonObject>* Entry = nullptr;
+		if (Value.IsValid() && Value->TryGetObject(Entry) && Entry != nullptr)
+		{
+			bool bOk = true;
+			if ((*Entry)->TryGetBoolField(TEXT("success"), bOk) && !bOk && !bFoundFirstFailure)
+			{
+				bFoundFirstFailure = true;
+				(*Entry)->TryGetStringField(TEXT("error_code"), FirstFailureCode);
+			}
+		}
+	}
+
+	if (bRollbackOnError && bSawFailure)
+	{
+		const FCortexBatchRollbackResult RollbackResult = FCortexBatchScope::ExecuteRollback();
+		const bool bVerified = bVerifyRollback ? RollbackResult.bVerified : false;
+		Transaction.Cancel();
+
+		TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+		TSharedPtr<FJsonObject> RollbackObj = MakeShared<FJsonObject>();
+		RollbackObj->SetBoolField(TEXT("attempted"), true);
+		RollbackObj->SetBoolField(TEXT("verified"), bVerified);
+		Details->SetObjectField(TEXT("rollback"), RollbackObj);
+		TArray<TSharedPtr<FJsonValue>> CreatedIds;
+		for (const FString& NodeId : RollbackResult.CreatedNodeIds)
+		{
+			CreatedIds.Add(MakeShared<FJsonValueString>(NodeId));
+		}
+		Details->SetArrayField(TEXT("created_node_ids"), CreatedIds);
+		TArray<TSharedPtr<FJsonValue>> Residual;
+		for (const FString& Change : RollbackResult.ResidualChanges)
+		{
+			Residual.Add(MakeShared<FJsonValueString>(Change));
+		}
+		Details->SetArrayField(TEXT("residual_changes"), Residual);
+		Details->SetArrayField(TEXT("results"), ResultsArray);
+
+		return Error(
+			bVerified ? FirstFailureCode : CortexErrorCodes::DirtyEditorState,
+			bVerified
+				? TEXT("Batch failed; rollback completed and verified")
+				: TEXT("Batch failed and rollback could not be verified; the editor may be in a dirty state"),
+			Details);
+	}
 
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetArrayField(TEXT("results"), ResultsArray);
@@ -814,7 +1141,7 @@ FCortexCommandResult FCortexCommandRouter::HandleGetStatus(const TSharedPtr<FJso
 {
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetBoolField(TEXT("connected"), true);
-	Data->SetStringField(TEXT("plugin_version"), TEXT("0.1.13"));
+	Data->SetStringField(TEXT("plugin_version"), CortexPluginIdentity::GetVersionName());
 
 	// Engine version
 	Data->SetStringField(TEXT("engine_version"), FEngineVersion::Current().ToString());

@@ -1366,6 +1366,22 @@ void SCortexInputArea::ResolveAndSend(const TArray<FCortexContextChip>& Chips, c
 {
     FString Preamble;
 
+    // Gather the editor snapshot at most once per send, and only when something needs it:
+    // auto-context injection or an explicit editorContext provider chip/@mention. An unused
+    // send must not allocate or copy a snapshot (GetEditorSnapshot is lazy).
+    FCortexEditorContextSnapshot EditorSnapshot;
+    bool bEditorSnapshotGathered = false;
+    bool bEditorContextInjected = false;
+    auto GetEditorSnapshot = [&EditorSnapshot, &bEditorSnapshotGathered]() -> const FCortexEditorContextSnapshot&
+    {
+        if (!bEditorSnapshotGathered)
+        {
+            EditorSnapshot = FCortexEditorContextGatherer::GatherAll();
+            bEditorSnapshotGathered = true;
+        }
+        return EditorSnapshot;
+    };
+
     // Resolve inline @mentions embedded in the message text (deduped)
     TArray<FString> ProcessedMentions;
     int32 ScanPos = 0;
@@ -1402,10 +1418,16 @@ void SCortexInputArea::ResolveAndSend(const TArray<FCortexContextChip>& Chips, c
 
                 if (bIsProvider)
                 {
-                    const FString Resolved = ResolveProviderChip(MentionName);
+                    const FCortexEditorContextSnapshot* MentionSnapshot =
+                        MentionName == TEXT("editorContext") ? &GetEditorSnapshot() : nullptr;
+                    const FString Resolved = ResolveProviderChip(MentionName, MentionSnapshot);
                     if (!Resolved.IsEmpty())
                     {
                         Preamble += FString::Printf(TEXT("## Context: %s\n%s\n\n"), *MentionName, *Resolved);
+                        if (MentionName == TEXT("editorContext"))
+                        {
+                            bEditorContextInjected = true;
+                        }
                     }
                     // Empty: silent drop
                 }
@@ -1443,10 +1465,16 @@ void SCortexInputArea::ResolveAndSend(const TArray<FCortexContextChip>& Chips, c
     {
         if (Chip.Kind == ECortexContextChipKind::Provider)
         {
-            const FString Resolved = ResolveProviderChip(Chip.Label);
+            const FCortexEditorContextSnapshot* ChipSnapshot =
+                Chip.Label == TEXT("editorContext") ? &GetEditorSnapshot() : nullptr;
+            const FString Resolved = ResolveProviderChip(Chip.Label, ChipSnapshot);
             if (!Resolved.IsEmpty())
             {
                 Preamble += FString::Printf(TEXT("## Context: %s\n%s\n\n"), *Chip.Label, *Resolved);
+                if (Chip.Label == TEXT("editorContext"))
+                {
+                    bEditorContextInjected = true;
+                }
             }
         }
         else if (Chip.Kind == ECortexContextChipKind::Asset)
@@ -1469,11 +1497,11 @@ void SCortexInputArea::ResolveAndSend(const TArray<FCortexContextChip>& Chips, c
         }
     }
 
-    // Auto-context injection: gather live editor state and prepend
-    if (FCortexFrontendSettings::Get().GetAutoContext())
+    // Auto-context injection: gather live editor state and prepend. An explicit editorContext
+    // chip/@mention already injected the same snapshot, so do not duplicate it here.
+    if (FCortexFrontendSettings::Get().GetAutoContext() && !bEditorContextInjected)
     {
-        const FCortexEditorContextSnapshot Snapshot = FCortexEditorContextGatherer::GatherAll();
-        const FString AutoContext = FCortexEditorContextGatherer::FormatAsContextPreamble(Snapshot);
+        const FString AutoContext = FCortexEditorContextGatherer::FormatAsContextPreamble(GetEditorSnapshot());
         if (!AutoContext.IsEmpty())
         {
             Preamble = AutoContext + TEXT("\n") + Preamble;
@@ -1483,7 +1511,7 @@ void SCortexInputArea::ResolveAndSend(const TArray<FCortexContextChip>& Chips, c
     OnSendMessage.ExecuteIfBound(Preamble + Message);
 }
 
-FString SCortexInputArea::ResolveProviderChip(const FString& Label)
+FString SCortexInputArea::ResolveProviderChip(const FString& Label, const FCortexEditorContextSnapshot* Snapshot)
 {
     if (Label == TEXT("thisAsset"))
     {
@@ -1549,8 +1577,11 @@ FString SCortexInputArea::ResolveProviderChip(const FString& Label)
     }
     else if (Label == TEXT("editorContext"))
     {
-        const FCortexEditorContextSnapshot Snapshot = FCortexEditorContextGatherer::GatherAll();
-        return FCortexEditorContextGatherer::FormatAsContextPreamble(Snapshot);
+        if (Snapshot != nullptr)
+        {
+            return FCortexEditorContextGatherer::FormatAsContextPreamble(*Snapshot);
+        }
+        return FCortexEditorContextGatherer::FormatAsContextPreamble(FCortexEditorContextGatherer::GatherAll());
     }
     else if (Label == TEXT("problems"))
     {

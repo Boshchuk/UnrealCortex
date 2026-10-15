@@ -26,6 +26,8 @@ void FCortexCoreModule::StartupModule()
         return;
     }
 
+    InstanceId = FGuid::NewGuid().ToString();
+
     CommandRouter = MakeUnique<FCortexCommandRouter>();
 
     TcpServer = MakeUnique<FCortexTcpServer>();
@@ -42,7 +44,7 @@ void FCortexCoreModule::StartupModule()
         TEXT("core"),
         TEXT("Cortex Core"),
         TEXT("1.0.1"),
-        MakeShared<FCortexCoreCommandHandler>()
+        MakeShared<FCortexCoreCommandHandler>(CommandRouter.Get())
     );
 
     // POC: optional MCP-over-HTTP transport alongside the TCP server.
