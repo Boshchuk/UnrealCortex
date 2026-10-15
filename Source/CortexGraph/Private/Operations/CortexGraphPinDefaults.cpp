@@ -1,5 +1,5 @@
-#include "CortexVersionCompat.h"
 #include "Operations/CortexGraphPinDefaults.h"
+#include "CortexVersionCompat.h"
 #include "Operations/CortexGraphSymbolResolver.h"
 #include "CortexSerializer.h"
 #include "EdGraph/EdGraphPin.h"
