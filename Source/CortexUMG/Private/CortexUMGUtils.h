@@ -103,21 +103,12 @@ namespace CortexUMGUtils
     }
 
     /**
-     * Seeds an empty identity map with the native compiler's deterministic identities for every
-     * pre-existing source widget and animation. Assets saved before the map existed start empty, and
-     * the compiler only seeds such a map while it is still empty, so the first mutation has to seed it
-     * before registering anything new. Populated maps are the authority and are never rewritten.
+     * Adds the native compiler's path-derived deterministic identity for every source widget and
+     * animation, exactly as the compiler seeds an empty map.
      */
-    inline void InitializeLegacyIdentityMap(UWidgetBlueprint* WidgetBlueprint)
+    template <typename GuidMapType>
+    inline void SeedDeterministicIdentities(UWidgetBlueprint* WidgetBlueprint, GuidMapType& Guids)
     {
-        if (!WidgetBlueprint)
-        {
-            return;
-        }
-
-        auto& Guids = CortexWidgetVariableGuids(*WidgetBlueprint);
-        if (!Guids.IsEmpty()) { return; }
-
         WidgetBlueprint->ForEachSourceWidget([&Guids](UWidget* Widget)
         {
             if (Widget)
@@ -135,6 +126,25 @@ namespace CortexUMGUtils
                     Existing->GetFName(), FGuid::NewDeterministicGuid(Existing->GetPathName()));
             }
         }
+    }
+
+    /**
+     * Seeds an empty identity map with the native compiler's deterministic identities for every
+     * pre-existing source widget and animation. Assets saved before the map existed start empty, and
+     * the compiler only seeds such a map while it is still empty, so the first mutation has to seed it
+     * before registering anything new. Populated maps are the authority and are never rewritten.
+     */
+    inline void InitializeLegacyIdentityMap(UWidgetBlueprint* WidgetBlueprint)
+    {
+        if (!WidgetBlueprint)
+        {
+            return;
+        }
+
+        auto& Guids = CortexWidgetVariableGuids(*WidgetBlueprint);
+        if (!Guids.IsEmpty()) { return; }
+
+        SeedDeterministicIdentities(WidgetBlueprint, Guids);
     }
 
     inline bool ResolvePropertyPath(UObject* Object, const FString& PropertyPath, FProperty*& OutProperty, void*& OutValuePtr)
