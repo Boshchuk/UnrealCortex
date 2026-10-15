@@ -1,3 +1,4 @@
+#include "CortexVersionCompat.h"
 #include "Misc/AutomationTest.h"
 #include "Operations/CortexGraphPatchOps.h"
 #include "Operations/CortexGraphNodeContract.h"
@@ -449,7 +450,7 @@ bool FCortexGraphPatchReadbackSymbolFamiliesTest::RunTest(const FString& Paramet
 					UK2Node_SwitchEnum* Switch = CortexGraphPatchReadbackTest::FindNode<UK2Node_SwitchEnum>(Mutated);
 					if (Switch && OtherEnum)
 					{
-						Switch->SetEnum(OtherEnum);
+						CortexSetSwitchEnum(*Switch, OtherEnum);
 					}
 				},
 				TEXT("symbol mismatch"));
@@ -553,13 +554,13 @@ bool FCortexGraphPatchReadbackTextEncodingTest::RunTest(const FString& Parameter
 
 	// Registered tables with ambiguous ids/keys: the identities must not collide.
 	FStringTableRef AmbiguousTable = FStringTable::NewStringTable();
-	AmbiguousTable->SetSourceString(FTextKey(TEXT("C")), FString(TEXT("value")), FString());
+	CortexSetSourceString(*AmbiguousTable, FTextKey(TEXT("C")), FString(TEXT("value")));
 	FStringTableRegistry::Get().RegisterStringTable(FName(TEXT("A#B")), AmbiguousTable);
 	FStringTableRef SplitTable = FStringTable::NewStringTable();
-	SplitTable->SetSourceString(FTextKey(TEXT("B#C")), FString(TEXT("value")), FString());
+	CortexSetSourceString(*SplitTable, FTextKey(TEXT("B#C")), FString(TEXT("value")));
 	FStringTableRegistry::Get().RegisterStringTable(FName(TEXT("A")), SplitTable);
 
-	Pin->DefaultTextValue = FText::FromStringTable(FName(TEXT("A#B")), FTextKey(TEXT("C")));
+	Pin->DefaultTextValue = FText::FromStringTable(FName(TEXT("A#B")), FString(TEXT("C")));
 
 	FString Expected;
 	FString Actual;

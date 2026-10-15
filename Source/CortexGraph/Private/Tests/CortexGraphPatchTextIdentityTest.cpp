@@ -1,3 +1,4 @@
+#include "CortexVersionCompat.h"
 #include "Misc/AutomationTest.h"
 #include "CortexCommandRouter.h"
 #include "CortexGraphCommandHandler.h"
@@ -82,7 +83,7 @@ struct FTable
 		Package = CreatePackage(*FString::Printf(TEXT("/Temp/%s"), PackageName));
 		Table = NewObject<UStringTable>(Package, FName(TableName), RF_Public | RF_Standalone | RF_Transactional);
 		if (!Table) return false;
-		Table->GetMutableStringTable()->SetSourceString(FTextKey(TEXT("Key")), FString(SourceString), FString());
+		CortexSetSourceString(*Table->GetMutableStringTable(), FTextKey(TEXT("Key")), FString(SourceString));
 		FStringTableRegistry::Get().RegisterStringTable(Table->GetStringTableId(), Table->GetMutableStringTable());
 		return true;
 	}

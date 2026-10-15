@@ -130,7 +130,7 @@ bool FCortexUMGAnimationAuthoringEnsureBindingCorrelationTest::RunTest(const FSt
         {
             ++MatchingRecords;
             TestFalse(TEXT("Correlated UMG record is not root"), Binding.bIsRootWidget);
-            TestEqual(TEXT("Correlated UMG record has no slot name"), Binding.SlotWidgetName, NAME_None);
+            TestEqual(TEXT("Correlated UMG record has no slot name"), Binding.SlotWidgetName, FName(NAME_None));
         }
     }
     TestEqual(TEXT("Exactly one correlated UMG binding record"), MatchingRecords, 1);

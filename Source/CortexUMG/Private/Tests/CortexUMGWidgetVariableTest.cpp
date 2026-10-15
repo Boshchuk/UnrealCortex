@@ -1,3 +1,4 @@
+#include "CortexVersionCompat.h"
 #include "Misc/AutomationTest.h"
 #include "CortexCommandRouter.h"
 #include "CortexAssetFingerprint.h"
@@ -554,12 +555,12 @@ bool FCortexUMGRenameWidgetSlotFirstAnimationBindingTest::RunTest(const FString&
     {
         return false;
     }
-    UObject* PreRenameSlotObj = Animation->AnimationBindings[0].FindRuntimeObject(
-        *WBP->WidgetTree, *PreviewWidget, Animation, nullptr);
+    UObject* PreRenameSlotObj = CortexFindAnimationRuntimeObject(Animation->AnimationBindings[0],
+        *WBP->WidgetTree, *PreviewWidget, Animation);
     TestEqual(TEXT("pre-rename slot binding resolves to slot"), PreRenameSlotObj, (UObject*)TargetSlot);
 
-    UObject* PreRenameDirectObj = Animation->AnimationBindings[1].FindRuntimeObject(
-        *WBP->WidgetTree, *PreviewWidget, Animation, nullptr);
+    UObject* PreRenameDirectObj = CortexFindAnimationRuntimeObject(Animation->AnimationBindings[1],
+        *WBP->WidgetTree, *PreviewWidget, Animation);
     TestEqual(TEXT("pre-rename direct binding resolves to widget"), PreRenameDirectObj, (UObject*)TargetWidget);
 
     TSharedPtr<FJsonObject> GetFingerprint = MakeShared<FJsonObject>();
@@ -608,8 +609,8 @@ bool FCortexUMGRenameWidgetSlotFirstAnimationBindingTest::RunTest(const FString&
     TestEqual(TEXT("slot binding animation GUID preserved"),
         Animation->AnimationBindings[0].AnimationGuid, SlotGuid);
 
-    UObject* PostRenameSlotObj = Animation->AnimationBindings[0].FindRuntimeObject(
-        *WBP->WidgetTree, *PreviewWidget, Animation, nullptr);
+    UObject* PostRenameSlotObj = CortexFindAnimationRuntimeObject(Animation->AnimationBindings[0],
+        *WBP->WidgetTree, *PreviewWidget, Animation);
     TestNotNull(TEXT("slot binding resolves runtime object after rename"), PostRenameSlotObj);
     TestEqual(TEXT("slot binding resolves to renamed widget slot"),
         PostRenameSlotObj, (UObject*)TargetSlot);
@@ -622,8 +623,8 @@ bool FCortexUMGRenameWidgetSlotFirstAnimationBindingTest::RunTest(const FString&
     TestEqual(TEXT("direct binding animation GUID preserved"),
         Animation->AnimationBindings[1].AnimationGuid, DirectGuid);
 
-    UObject* PostRenameDirectObj = Animation->AnimationBindings[1].FindRuntimeObject(
-        *WBP->WidgetTree, *PreviewWidget, Animation, nullptr);
+    UObject* PostRenameDirectObj = CortexFindAnimationRuntimeObject(Animation->AnimationBindings[1],
+        *WBP->WidgetTree, *PreviewWidget, Animation);
     TestNotNull(TEXT("direct binding resolves runtime object after rename"), PostRenameDirectObj);
     TestEqual(TEXT("direct binding resolves to renamed widget object"),
         PostRenameDirectObj, (UObject*)RenamedWidget);
@@ -705,14 +706,14 @@ bool FCortexUMGRenameWidgetSlotFirstAnimationBindingTest::RunTest(const FString&
         TestEqual(TEXT("direct binding target widget name restored after undo"),
             Animation->AnimationBindings[1].WidgetName, FName(TEXT("BodySizeBox")));
 
-        UObject* UndoSlotObj = Animation->AnimationBindings[0].FindRuntimeObject(
-            *WBP->WidgetTree, *PreviewWidget, Animation, nullptr);
+        UObject* UndoSlotObj = CortexFindAnimationRuntimeObject(Animation->AnimationBindings[0],
+            *WBP->WidgetTree, *PreviewWidget, Animation);
         TestNotNull(TEXT("slot binding resolves runtime object after undo"), UndoSlotObj);
         TestEqual(TEXT("slot binding resolves to restored widget slot after undo"),
             UndoSlotObj, (UObject*)TargetSlot);
 
-        UObject* UndoDirectObj = Animation->AnimationBindings[1].FindRuntimeObject(
-            *WBP->WidgetTree, *PreviewWidget, Animation, nullptr);
+        UObject* UndoDirectObj = CortexFindAnimationRuntimeObject(Animation->AnimationBindings[1],
+            *WBP->WidgetTree, *PreviewWidget, Animation);
         TestNotNull(TEXT("direct binding resolves runtime object after undo"), UndoDirectObj);
         TestEqual(TEXT("direct binding resolves to restored widget after undo"),
             UndoDirectObj, (UObject*)RestoredWidget);
@@ -746,14 +747,14 @@ bool FCortexUMGRenameWidgetSlotFirstAnimationBindingTest::RunTest(const FString&
         TestEqual(TEXT("direct binding target widget name updated after redo"),
             Animation->AnimationBindings[1].WidgetName, FName(TEXT("RenamedBodySizeBox")));
 
-        UObject* RedoSlotObj = Animation->AnimationBindings[0].FindRuntimeObject(
-            *WBP->WidgetTree, *PreviewWidget, Animation, nullptr);
+        UObject* RedoSlotObj = CortexFindAnimationRuntimeObject(Animation->AnimationBindings[0],
+            *WBP->WidgetTree, *PreviewWidget, Animation);
         TestNotNull(TEXT("slot binding resolves runtime object after redo"), RedoSlotObj);
         TestEqual(TEXT("slot binding resolves to renamed widget slot after redo"),
             RedoSlotObj, (UObject*)TargetSlot);
 
-        UObject* RedoDirectObj = Animation->AnimationBindings[1].FindRuntimeObject(
-            *WBP->WidgetTree, *PreviewWidget, Animation, nullptr);
+        UObject* RedoDirectObj = CortexFindAnimationRuntimeObject(Animation->AnimationBindings[1],
+            *WBP->WidgetTree, *PreviewWidget, Animation);
         TestNotNull(TEXT("direct binding resolves runtime object after redo"), RedoDirectObj);
         TestEqual(TEXT("direct binding resolves to renamed widget after redo"),
             RedoDirectObj, (UObject*)RedoRenamedWidget);

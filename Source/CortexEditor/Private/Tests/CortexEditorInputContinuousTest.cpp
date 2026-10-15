@@ -1,5 +1,5 @@
 #include "Misc/AutomationTest.h"
-#include "CortexVersionCompat.h"
+#include "CortexEditorInputTestCompat.h"
 #include "CortexEditorCommandHandler.h"
 #include "UObject/Object.h"
 #include "UObject/Package.h"
@@ -470,7 +470,7 @@ bool FCortexEditorInputContinuousStartUpdateStopTest::RunTest(const FString& Par
 			TestTrue(TEXT("PIE enhanced input player available for observation"), false);
 			return;
 		}
-		TestTrue(TEXT("owned continuous injection is registered"), CortexHasContinuousInputInjection(*Subsystem, Fixture->Action));
+		CortexTestContinuousInputInjection(*this, TEXT("owned continuous injection is registered"), *Subsystem, Fixture->Action, true);
 		TestTrue(TEXT("started value reads back as (0,1,0)"), Value.Equals(FVector(0.0, 1.0, 0.0), 1e-4));
 	};
 	AddContinuousInputRunThenObserve(RunStart, ObserveStart);
@@ -497,7 +497,7 @@ bool FCortexEditorInputContinuousStartUpdateStopTest::RunTest(const FString& Par
 			TestTrue(TEXT("PIE enhanced input player available for update observation"), false);
 			return;
 		}
-		TestTrue(TEXT("update keeps the owned injection registered"), CortexHasContinuousInputInjection(*Subsystem, Fixture->Action));
+		CortexTestContinuousInputInjection(*this, TEXT("update keeps the owned injection registered"), *Subsystem, Fixture->Action, true);
 		TestTrue(TEXT("updated value reads back as (0.25,0,0)"), Value.Equals(FVector(0.25, 0.0, 0.0), 1e-4));
 	};
 	AddContinuousInputRunThenObserve(RunUpdate, ObserveUpdate);
@@ -527,7 +527,7 @@ bool FCortexEditorInputContinuousStartUpdateStopTest::RunTest(const FString& Par
 			TestTrue(TEXT("PIE enhanced input player available for stop observation"), false);
 			return;
 		}
-		TestFalse(TEXT("stop removes the owned continuous injection"), CortexHasContinuousInputInjection(*Subsystem, Fixture->Action));
+		CortexTestContinuousInputInjection(*this, TEXT("stop removes the owned continuous injection"), *Subsystem, Fixture->Action, false);
 		TestTrue(TEXT("stopped value reads back as zero"), Value.Equals(FVector::ZeroVector, 1e-4));
 	};
 	AddContinuousInputRunThenObserve(RunStop, ObserveStop);
@@ -667,7 +667,7 @@ bool FCortexEditorInputContinuousRejectedRequestPreservesRunTest::RunTest(const 
 			TestTrue(TEXT("PIE enhanced input player available for baseline observation"), false);
 			return;
 		}
-		TestTrue(TEXT("baseline run is registered"), CortexHasContinuousInputInjection(*Subsystem, Fixture->Action));
+		CortexTestContinuousInputInjection(*this, TEXT("baseline run is registered"), *Subsystem, Fixture->Action, true);
 		TestTrue(TEXT("baseline value reads back as (1,0,0)"), Value.Equals(FVector(1.0, 0.0, 0.0), 1e-4));
 	};
 
@@ -721,7 +721,7 @@ bool FCortexEditorInputContinuousRejectedRequestPreservesRunTest::RunTest(const 
 			TestTrue(TEXT("PIE enhanced input player available for preservation observation"), false);
 			return;
 		}
-		TestTrue(TEXT("rejected requests did not unregister the existing run"), CortexHasContinuousInputInjection(*Subsystem, Fixture->Action));
+		CortexTestContinuousInputInjection(*this, TEXT("rejected requests did not unregister the existing run"), *Subsystem, Fixture->Action, true);
 		TestTrue(TEXT("existing run still reads back as (1,0,0)"), Value.Equals(FVector(1.0, 0.0, 0.0), 1e-4));
 	};
 
@@ -778,7 +778,7 @@ bool FCortexEditorInputContinuousUpdateAndStopRequireOwnedRunTest::RunTest(const
 			FInputActionValue(EInputActionValueType::Axis3D, FVector(0.0, 0.0, 1.0)),
 			NoModifiers,
 			NoTriggers);
-		TestTrue(TEXT("game-managed injection is installed directly on the subsystem"), CortexHasContinuousInputInjection(*Subsystem, Fixture->Action));
+		CortexTestContinuousInputInjection(*this, TEXT("game-managed injection is installed directly on the subsystem"), *Subsystem, Fixture->Action, true);
 	};
 
 	TFunction<void()> RunStop = [this, Handler, Fixture, StopResult]()
@@ -803,7 +803,7 @@ bool FCortexEditorInputContinuousUpdateAndStopRequireOwnedRunTest::RunTest(const
 			TestTrue(TEXT("PIE enhanced input player available for unowned observation"), false);
 			return;
 		}
-		TestTrue(TEXT("unowned stop does not tear down a game-managed injection"), CortexHasContinuousInputInjection(*Subsystem, Fixture->Action));
+		CortexTestContinuousInputInjection(*this, TEXT("unowned stop does not tear down a game-managed injection"), *Subsystem, Fixture->Action, true);
 		TestTrue(TEXT("game-managed injection value is untouched by unowned stop"), Value.Equals(FVector(0.0, 0.0, 1.0), 1e-4));
 	};
 
@@ -881,7 +881,7 @@ bool FCortexEditorInputContinuousReplacementDeadlineTest::RunTest(const FString&
 			TestTrue(TEXT("PIE enhanced input player available after deadline"), false);
 			return;
 		}
-		TestTrue(TEXT("old deadline did not unregister the successor run"), CortexHasContinuousInputInjection(*Subsystem, Fixture->Action));
+		CortexTestContinuousInputInjection(*this, TEXT("old deadline did not unregister the successor run"), *Subsystem, Fixture->Action, true);
 		TestTrue(TEXT("successor still injects its own value (0,1,0) after the old deadline"), Value.Equals(FVector(0.0, 1.0, 0.0), 1e-4));
 	};
 
@@ -959,7 +959,7 @@ bool FCortexEditorInputContinuousStopCompletesPendingOnceTest::RunTest(const FSt
 			TestTrue(TEXT("PIE enhanced input player available after stop deadline"), false);
 			return;
 		}
-		TestFalse(TEXT("stopped run is not left injecting"), CortexHasContinuousInputInjection(*Subsystem, Fixture->Action));
+		CortexTestContinuousInputInjection(*this, TEXT("stopped run is not left injecting"), *Subsystem, Fixture->Action, false);
 	};
 
 	ADD_LATENT_AUTOMATION_COMMAND(FStartPIECommand(false));
@@ -1012,7 +1012,7 @@ bool FCortexEditorInputContinuousTcpDisconnectTest::RunTest(const FString& Param
 			TestTrue(TEXT("PIE enhanced input player available before disconnect"), false);
 			return;
 		}
-		TestTrue(TEXT("run is injecting before disconnect"), CortexHasContinuousInputInjection(*Subsystem, Fixture->Action));
+		CortexTestContinuousInputInjection(*this, TEXT("run is injecting before disconnect"), *Subsystem, Fixture->Action, true);
 		TestTrue(TEXT("run value reads back before disconnect"), Value.Equals(FVector(1.0, 0.0, 0.0), 1e-4));
 	};
 
@@ -1031,7 +1031,7 @@ bool FCortexEditorInputContinuousTcpDisconnectTest::RunTest(const FString& Param
 			TestTrue(TEXT("PIE enhanced input player available after disconnect"), false);
 			return;
 		}
-		TestFalse(TEXT("disconnect unregisters the session-owned injection"), CortexHasContinuousInputInjection(*Subsystem, Fixture->Action));
+		CortexTestContinuousInputInjection(*this, TEXT("disconnect unregisters the session-owned injection"), *Subsystem, Fixture->Action, false);
 		TestTrue(TEXT("disconnect clears the injected value"), Value.Equals(FVector::ZeroVector, 1e-4));
 	};
 
@@ -1136,8 +1136,7 @@ bool FCortexEditorInputContinuousCancellationReentryTest::RunTest(const FString&
 		UEnhancedInputLocalPlayerSubsystem* Subsystem = GetContinuousInputPIESubsystem();
 		if (Subsystem != nullptr)
 		{
-			TestFalse(TEXT("disconnect leaves no native injection after callback reentry"),
-				CortexHasContinuousInputInjection(*Subsystem, Fixture->Action));
+			CortexTestContinuousInputInjection(*this, TEXT("disconnect leaves no native injection after callback reentry"), *Subsystem, Fixture->Action, false);
 		}
 		else
 		{
@@ -1191,8 +1190,7 @@ bool FCortexEditorInputContinuousReplacementDisconnectTest::RunTest(const FStrin
 		UEnhancedInputLocalPlayerSubsystem* Subsystem = GetContinuousInputPIESubsystem();
 		if (Subsystem != nullptr)
 		{
-			TestFalse(TEXT("disconnect during replacement leaves no native injection"),
-				CortexHasContinuousInputInjection(*Subsystem, Fixture->Action));
+			CortexTestContinuousInputInjection(*this, TEXT("disconnect during replacement leaves no native injection"), *Subsystem, Fixture->Action, false);
 		}
 		else
 		{
@@ -1300,15 +1298,13 @@ bool FCortexEditorInputContinuousChangedTargetTest::RunTest(const FString& Param
 			AddError(TEXT("Replacement player's enhanced input subsystem is unavailable"));
 			return;
 		}
-		TestFalse(TEXT("replacement player starts without the original player's injection"),
-			CortexHasContinuousInputInjection(*ReplacementSubsystem, Fixture->Action));
+		CortexTestContinuousInputInjection(*this, TEXT("replacement player starts without the original player's injection"), *ReplacementSubsystem, Fixture->Action, false);
 		TSharedPtr<FJsonObject> Update = MakeContinuousInputActionParams(Fixture->ActionPath);
 		Update->SetStringField(TEXT("mode"), TEXT("update"));
 		Update->SetNumberField(TEXT("value"), 0.5);
 		const FCortexCommandResult Result = Handler->Execute(CortexInputCommandContinuous, Update);
 		TestFalse(TEXT("ownership of another subsystem cannot authorize an update"), Result.bSuccess);
-		TestFalse(TEXT("update cannot create an unjournaled injection on replacement subsystem"),
-			CortexHasContinuousInputInjection(*ReplacementSubsystem, Fixture->Action));
+		CortexTestContinuousInputInjection(*this, TEXT("update cannot create an unjournaled injection on replacement subsystem"), *ReplacementSubsystem, Fixture->Action, false);
 		// Remove the unjournaled injection from the failing candidate before PIE teardown.
 		ReplacementSubsystem->StopContinuousInputInjectionForAction(Fixture->Action);
 	});

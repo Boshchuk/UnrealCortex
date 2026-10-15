@@ -1,3 +1,4 @@
+#include "CortexVersionCompat.h"
 #pragma once
 
 #include "CoreMinimal.h"
@@ -237,10 +238,9 @@ namespace CortexUMGAnimationBindingTestUtils
                     Ar << DefVal;
                     uint8 PreExtrap = (uint8)IntChan->PreInfinityExtrap.GetValue();
                     uint8 PostExtrap = (uint8)IntChan->PostInfinityExtrap.GetValue();
-                    bool bInterpLinear = IntChan->bInterpolateLinearKeys;
                     Ar << PreExtrap;
                     Ar << PostExtrap;
-                    Ar << bInterpLinear;
+                    CortexSerializeIntegerChannelInterpolation(Ar, *IntChan);
                 }
                 else if (TypeName == FMovieSceneByteChannel::StaticStruct()->GetFName())
                 {
@@ -261,12 +261,9 @@ namespace CortexUMGAnimationBindingTestUtils
                     uint8 DefVal = Def.Get(0);
                     Ar << bHasDef;
                     Ar << DefVal;
-                    uint8 PreExtrap = (uint8)ByteChan->PreInfinityExtrap.GetValue();
-                    uint8 PostExtrap = (uint8)ByteChan->PostInfinityExtrap.GetValue();
                     UEnum* EnumPtr = ByteChan->GetEnum();
                     FString EnumPath = EnumPtr ? EnumPtr->GetPathName() : FString();
-                    Ar << PreExtrap;
-                    Ar << PostExtrap;
+                    CortexSerializeByteChannelExtrapolation(Ar, *ByteChan);
                     Ar << EnumPath;
                 }
                 else if (TypeName == FMovieSceneEventChannel::StaticStruct()->GetFName())

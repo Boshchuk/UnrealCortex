@@ -127,24 +127,90 @@ FORCEINLINE bool CortexIsAssetRegistryGathering(const RegistryType& Registry)
 #endif
 }
 
-template <typename SubsystemType, typename ActionType, typename = void>
-struct TCortexHasInputInjectionQuery : std::false_type {};
-template <typename SubsystemType, typename ActionType>
-struct TCortexHasInputInjectionQuery<SubsystemType, ActionType,
-    std::void_t<decltype(std::declval<SubsystemType&>().HasContinuousInputInjectionForAction(std::declval<const ActionType*>()))>> : std::true_type {};
-
-// 5.4 exposes this map publicly on the concrete Enhanced Input subsystems.
+// The registration query is public on newer engines. The older map getter is
+// protected; tests of this query must explicitly skip that assertion on 5.4.
+#if ENGINE_MAJOR_VERSION > 5 || ENGINE_MINOR_VERSION >= 6
 template <typename SubsystemType, typename ActionType>
 FORCEINLINE bool CortexHasContinuousInputInjection(SubsystemType& Subsystem, const ActionType* Action)
 {
+    return Subsystem.HasContinuousInputInjectionForAction(Action);
+}
+#endif
+
+template <typename PropertyType>
+FORCEINLINE void CortexSetPropertyElementSize(PropertyType& Property, int32 Size)
+{
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 6
-    return Subsystem.GetContinuouslyInjectedInputs().Contains(Action);
+    Property.ElementSize = Size;
 #else
-    if constexpr (TCortexHasInputInjectionQuery<SubsystemType, ActionType>::value)
-    {
-        return Subsystem.HasContinuousInputInjectionForAction(Action);
-    }
-    else { return Subsystem.GetContinuouslyInjectedInputs().Contains(Action); }
+    Property.SetElementSize(Size);
+#endif
+}
+
+template <typename TextKeyType>
+FORCEINLINE FString CortexTextKeyToString(const TextKeyType& Key)
+{
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 6
+    return FString(Key.GetChars());
+#else
+    return Key.ToString();
+#endif
+}
+
+template <typename EditorDataType, typename StateType>
+FORCEINLINE auto& CortexAddStateTreeSubTree(EditorDataType& Data, FName Name, StateType Type)
+{
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 6
+    auto& State = Data.AddSubTree(Name);
+    State.Type = Type;
+    return State;
+#else
+    return Data.AddSubTree(Name, Type);
+#endif
+}
+
+// SetEnum is not exported by BlueprintGraph in 5.4. Its public virtual
+// ReloadEnum implementation forwards directly to SetEnum within that module.
+template <typename NodeType>
+FORCEINLINE void CortexSetSwitchEnum(NodeType& Node, UEnum* Enum)
+{
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 6
+    Node.ReloadEnum(Enum);
+#else
+    Node.SetEnum(Enum);
+#endif
+}
+
+template <typename BindingType, typename TreeType, typename WidgetType, typename AnimationType>
+FORCEINLINE UObject* CortexFindAnimationRuntimeObject(
+    const BindingType& Binding, const TreeType& Tree, WidgetType& Widget, AnimationType* Animation)
+{
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 6
+    return Binding.FindRuntimeObject(Tree, Widget);
+#else
+    return Binding.FindRuntimeObject(Tree, Widget, Animation, nullptr);
+#endif
+}
+
+// Hash only authoring fields that the current engine actually stores. UE 5.4
+// integer keys are stepped, and byte channels have constant extrapolation.
+template <typename ArchiveType, typename ChannelType>
+FORCEINLINE void CortexSerializeIntegerChannelInterpolation(ArchiveType& Ar, const ChannelType& Channel)
+{
+#if ENGINE_MAJOR_VERSION > 5 || ENGINE_MINOR_VERSION >= 6
+    bool bInterpLinear = Channel.bInterpolateLinearKeys;
+    Ar << bInterpLinear;
+#endif
+}
+
+template <typename ArchiveType, typename ChannelType>
+FORCEINLINE void CortexSerializeByteChannelExtrapolation(ArchiveType& Ar, const ChannelType& Channel)
+{
+#if ENGINE_MAJOR_VERSION > 5 || ENGINE_MINOR_VERSION >= 6
+    uint8 PreExtrap = (uint8)Channel.PreInfinityExtrap.GetValue();
+    uint8 PostExtrap = (uint8)Channel.PostInfinityExtrap.GetValue();
+    Ar << PreExtrap;
+    Ar << PostExtrap;
 #endif
 }
 

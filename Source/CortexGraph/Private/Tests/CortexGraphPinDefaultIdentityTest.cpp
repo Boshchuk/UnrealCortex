@@ -1,3 +1,4 @@
+#include "CortexVersionCompat.h"
 #include "Misc/AutomationTest.h"
 #include "Operations/CortexGraphPatchOps.h"
 #include "Operations/CortexGraphPatchState.h"
@@ -220,9 +221,9 @@ struct FStringTableFixture
 	{
 		Package = CreatePackage(*FString::Printf(TEXT("/Temp/%s"), PackageName));
 		Table = NewObject<UStringTable>(Package, FName(TableName), RF_Public | RF_Standalone | RF_Transactional);
-		Table->GetMutableStringTable()->SetSourceString(FTextKey(TEXT("Key")), FString(SourceString), FString());
+		CortexSetSourceString(*Table->GetMutableStringTable(), FTextKey(TEXT("Key")), FString(SourceString));
 		// A second key with the same display text keeps negative cases resolvable.
-		Table->GetMutableStringTable()->SetSourceString(FTextKey(TEXT("KeyAlt")), FString(SourceString), FString());
+		CortexSetSourceString(*Table->GetMutableStringTable(), FTextKey(TEXT("KeyAlt")), FString(SourceString));
 		FStringTableRegistry::Get().RegisterStringTable(Table->GetStringTableId(), Table->GetMutableStringTable());
 	}
 
@@ -434,7 +435,7 @@ bool FCortexGraphPinDefaultTextIdentityTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	Pin->DefaultTextValue = FText::FromStringTable(TableA.Table->GetStringTableId(), FTextKey(TEXT("Key")));
+	Pin->DefaultTextValue = FText::FromStringTable(TableA.Table->GetStringTableId(), FString(TEXT("Key")));
 	TestEqual(TEXT("fixture string table resolves the shared display text"),
 		Pin->DefaultTextValue.ToString(), FString(TEXT("Hello")));
 
@@ -529,7 +530,7 @@ bool FCortexGraphPinDefaultTextReadbackTest::RunTest(const FString& Parameters)
 				TestTrue(TEXT("persisted text keeps string-table identity"),
 					FTextInspector::GetTableIdAndKey(Pin->DefaultTextValue, NativeTableId, NativeKey));
 				TestEqual(TEXT("persisted string table id"), NativeTableId.ToString(), TableAId);
-				TestEqual(TEXT("persisted string table key"), NativeKey.ToString(), FString(TEXT("Key")));
+				TestEqual(TEXT("persisted string table key"), CortexTextKeyToString(NativeKey), FString(TEXT("Key")));
 			}
 			CortexGraphPinDefaultIdentityTest::Cleanup(Package, Blueprint);
 		}
@@ -560,7 +561,7 @@ bool FCortexGraphPinDefaultTextReadbackTest::RunTest(const FString& Parameters)
 					if (UEdGraphPin* Pin = Call ? Call->FindPin(TEXT("InText")) : nullptr)
 					{
 						// Same display text, different string table identity.
-						Pin->DefaultTextValue = FText::FromStringTable(TableBName, FTextKey(TEXT("Key")));
+						Pin->DefaultTextValue = FText::FromStringTable(TableBName, FString(TEXT("Key")));
 					}
 				});
 			FCortexGraphPatchOutcome Outcome;

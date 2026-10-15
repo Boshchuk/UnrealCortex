@@ -256,7 +256,7 @@ bool FCortexUMGPropertyBindingAuthoringTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	TestEqual(TEXT("Legacy source cleared"), Fixture.Blueprint->Bindings[0].SourceProperty, NAME_None);
+	TestEqual(TEXT("Legacy source cleared"), Fixture.Blueprint->Bindings[0].SourceProperty, FName(NAME_None));
 	TestEqual(TEXT("Function kind"), Fixture.Blueprint->Bindings[0].Kind, EBindingKind::Function);
 	FKismetEditorUtilities::CompileBlueprint(Fixture.Blueprint.Get());
 	TestEqual(TEXT("Requested function survives compile"), Fixture.Blueprint->Bindings[0].FunctionName,

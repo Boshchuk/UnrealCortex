@@ -1,3 +1,4 @@
+#include "CortexVersionCompat.h"
 #include "Operations/CortexGraphPinDefaults.h"
 #include "Operations/CortexGraphSymbolResolver.h"
 #include "CortexSerializer.h"
@@ -172,7 +173,7 @@ FString FCortexGraphPinDefaults::CanonicalTextIdentity(const FText& Text)
 		FTextKey TableKey;
 		FTextInspector::GetTableIdAndKey(Text, TableId, TableKey);
 		const FString TableIdText = TableId.ToString();
-		const FString TableKeyText = TableKey.ToString();
+		const FString TableKeyText = CortexTextKeyToString(TableKey);
 		return FString::Printf(TEXT("table:%d:%s|%d:%s"), TableIdText.Len(), *TableIdText,
 			TableKeyText.Len(), *TableKeyText);
 	}

@@ -30,7 +30,7 @@
 // namespaces across this module's test translation units.
 
 #include "Misc/AutomationTest.h"
-#include "CortexVersionCompat.h"
+#include "CortexEditorInputTestCompat.h"
 #include "CortexEditorCommandHandler.h"
 #include "CortexEditorPIEState.h"
 #include "CortexTypes.h"
@@ -863,8 +863,7 @@ bool FCortexEditorPIEGenerationStaleCancelTest::RunTest(const FString& Parameter
 			AddError(TEXT("the PIE Enhanced Input consumer is unavailable for the successor injection"));
 			return;
 		}
-		TestTrue(TEXT("the successor owns the registered continuous injection"),
-			CortexHasContinuousInputInjection(*Subsystem, Fixture->Action));
+		CortexTestContinuousInputInjection(*this, TEXT("the successor owns the registered continuous injection"), *Subsystem, Fixture->Action, true);
 		TestTrue(TEXT("the successor consumes its own value (0,1,0) after two world ticks"),
 			Value.Equals(FVector(0.0, 1.0, 0.0), 1e-4));
 		TestEqual(TEXT("the successor injection keeps the action's Axis3D value type"),

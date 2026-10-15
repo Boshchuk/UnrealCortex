@@ -1,4 +1,5 @@
 #include "Operations/CortexGraphNodeContract.h"
+#include "CortexVersionCompat.h"
 #include "Operations/CortexGraphSymbolResolver.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_IfThenElse.h"
@@ -888,7 +889,7 @@ bool FCortexGraphNodeContract::ApplyNodeConstructionParams(
 				OutError = FString::Printf(TEXT("Enum not found: %s"), *EnumName);
 				return false;
 			}
-			SwitchEnumNode->SetEnum(Enum);
+			CortexSetSwitchEnum(*SwitchEnumNode, Enum);
 		}
 	}
 

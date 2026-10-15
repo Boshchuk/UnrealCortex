@@ -1,3 +1,4 @@
+#include "CortexVersionCompat.h"
 
 #include "Misc/AutomationTest.h"
 #include "CortexSerializer.h"
@@ -380,7 +381,7 @@ namespace CortexSerializerTagGateTest
 			return nullptr;
 		}
 		Prop->Struct = StructType;
-		Prop->SetElementSize(StructType->GetStructureSize());
+		CortexSetPropertyElementSize(*Prop, StructType->GetStructureSize());
 		Prop->PropertyFlags = CPF_Edit;
 		return Prop;
 	}

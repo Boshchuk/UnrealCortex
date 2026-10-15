@@ -1,3 +1,4 @@
+#include "CortexVersionCompat.h"
 #include "Misc/AutomationTest.h"
 #include "CortexSTCompat.h"
 #include "CortexSTTypes.h"
@@ -59,7 +60,7 @@ struct FMultiRootFixture
 
 		FirstRoot = Context.EditorData->SubTrees[0];
 		FirstChild = &FirstRoot->AddChildState(TEXT("Child"));
-		LaterRoot = &Context.EditorData->AddSubTree(TEXT("Second"), EStateTreeStateType::Subtree);
+		LaterRoot = &CortexAddStateTreeSubTree(*Context.EditorData, TEXT("Second"), EStateTreeStateType::Subtree);
 		LaterChild = &LaterRoot->AddChildState(TEXT("Child"));
 		Context.StateTree->MarkPackageDirty();
 
