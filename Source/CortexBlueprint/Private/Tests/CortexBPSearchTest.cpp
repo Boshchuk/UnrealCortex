@@ -624,12 +624,21 @@ bool FCortexBPSearchPinTypedTextStringTableMatchTest::RunTest(const FString& Par
 	}
 	TestFalse(TEXT("Added node should have node_id"), TextNodeId.IsEmpty());
 
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 5
+	// UE 5.4 registers every UStringTable on construction, so the transient table of the old carrier is a
+	// registered table there; a /Game package that is never saved becomes an import of the saved Blueprint
+	// that the operation's verification reload cannot load, which logs LoadErrors.
+	UStringTable* TestTable = NewObject<UStringTable>(
+		GetTransientPackage(),
+		FName(TEXT("TestStringTable_BPSearchPinTypedText")));
+#else
 	const FString TablePackageName = FString::Printf(TEXT("/Game/Temp/TestTable_%s"), *Suffix);
 	UPackage* TablePackage = CreatePackage(*TablePackageName);
 	UStringTable* TestTable = NewObject<UStringTable>(
 		TablePackage,
 		FName(TEXT("TestStringTable_BPSearchPinTypedText")),
 		RF_Public | RF_Standalone);
+#endif
 	TestTable->GetMutableStringTable()->SetNamespace(TEXT("BPPinSearch"));
 	CortexEngineCompat::SetStringTableSourceString(
 		*TestTable->GetMutableStringTable(), TEXT("Mail.Button.Pay"), TEXT("Pay"));
@@ -701,7 +710,11 @@ bool FCortexBPSearchPinTypedTextStringTableMatchTest::RunTest(const FString& Par
 
 	TestTrue(TEXT("search should match typed text pin StringTable key"), bFoundPinMatch);
 
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 5
+	TestTable->MarkAsGarbage();
+#else
 	TablePackage->MarkAsGarbage();
+#endif
 	CleanupSearchTestBlueprint(AssetPath);
 	return true;
 }

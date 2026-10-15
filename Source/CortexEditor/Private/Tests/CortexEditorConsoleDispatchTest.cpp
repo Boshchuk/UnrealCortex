@@ -8,6 +8,7 @@
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
+#include "Misc/EngineVersionComparison.h"
 #include "Tests/AutomationCommon.h"
 #include "Tests/AutomationEditorCommon.h"
 
@@ -150,6 +151,13 @@ private:
 	{
 		Test->TestEqual(*FString::Printf(TEXT("%s invokes once"), Route), GConsoleDispatchObservation.Count, 1);
 		Test->TestEqual(*FString::Printf(TEXT("%s receives PIE world"), Route), GConsoleDispatchObservation.World.Get(), World);
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 5
+		// Both routes reach the engine's IConsoleManager::ProcessUserConsoleInput, which on UE 5.4 splits
+		// command arguments with ParseIntoArrayWS (whitespace only, quotes kept as characters); later
+		// engines tokenize with FParse::Token, which keeps a quoted argument whole.
+		Test->AddInfo(FString::Printf(TEXT("skipped on UE 5.4: %s quoted-argument tokenization (engine splits on whitespace, got %d arguments)"),
+			Route, GConsoleDispatchObservation.Args.Num()));
+#else
 		Test->TestEqual(*FString::Printf(TEXT("%s receives three arguments"), Route), GConsoleDispatchObservation.Args.Num(), 3);
 		if (GConsoleDispatchObservation.Args.Num() == 3)
 		{
@@ -158,6 +166,7 @@ private:
 				&& GConsoleDispatchObservation.Args[1].Equals(TEXT("two words"), ESearchCase::CaseSensitive)
 				&& GConsoleDispatchObservation.Args[2].Equals(TEXT("MiXeD"), ESearchCase::CaseSensitive));
 		}
+#endif
 	}
 
 	FAutomationTestBase* Test;

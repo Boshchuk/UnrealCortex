@@ -882,11 +882,19 @@ bool FCortexSTStoredInspectBindingIdentityTest::RunTest(const FString& Parameter
 	if (!Fixture.Initialize(*this)) { return false; }
 	const TArray<TSharedPtr<FJsonValue>> Bindings = Reconstruct(*this, Fixture, TEXT("bindings"), 2);
 	if (Bindings.Num() != 2) { return false; }
+	// Resolve the bound nodes by their fixture marker, not by position: engines without utility
+	// considerations (UE 5.4) store one node fewer ahead of the evaluator and global task.
+	auto NodeIdByMarker = [&Fixture](int32 Marker)
+	{
+		const FExpectedNode* Node = Fixture.Nodes.FindByPredicate(
+			[Marker](const FExpectedNode& Candidate) { return Candidate.Marker == Marker; });
+		return Node ? Node->Id : FGuid();
+	};
 	for (int32 Index = 0; Index < 2; ++Index)
 	{
 		TSharedPtr<FJsonObject> Binding = AsObject(*this, Bindings[Index]);
-		const FGuid SourceId = Fixture.Nodes[Index == 0 ? 6 : 7].Id;
-		const FGuid TargetId = Fixture.Nodes[Index == 0 ? 0 : 5].Id;
+		const FGuid SourceId = NodeIdByMarker(Index == 0 ? 201 : 202);
+		const FGuid TargetId = NodeIdByMarker(Index == 0 ? 101 : 106);
 		for (const TCHAR* PathName : {TEXT("SourcePropertyPath"), TEXT("TargetPropertyPath")})
 		{
 			TSharedPtr<FJsonObject> PathField = Field(*this, Binding, PathName);

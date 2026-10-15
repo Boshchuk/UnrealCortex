@@ -85,12 +85,21 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCortexGraphSetTextPinValueStringTableTest::RunTest(const FString& Parameters)
 {
 	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 5
+	// UE 5.4 registers every UStringTable on construction, so the transient table of the old carrier is a
+	// registered table there; a /Game package that is never saved becomes an import of the saved Blueprint
+	// that the operation's verification reload cannot load, which logs LoadErrors.
+	UStringTable* TestTable = NewObject<UStringTable>(
+		GetTransientPackage(),
+		FName(TEXT("TestStringTable_GraphTextMutation")));
+#else
 	const FString TablePackageName = FString::Printf(TEXT("/Game/Temp/TestGraphTable_%s"), *Suffix);
 	UPackage* TablePackage = CreatePackage(*TablePackageName);
 	UStringTable* TestTable = NewObject<UStringTable>(
 		TablePackage,
 		FName(TEXT("TestStringTable_GraphTextMutation")),
 		RF_Public | RF_Standalone);
+#endif
 	TestTable->GetMutableStringTable()->SetNamespace(TEXT("TestNS"));
 	CortexEngineCompat::SetStringTableSourceString(
 		*TestTable->GetMutableStringTable(), TEXT("Mail.Button.Pay"), TEXT("Pay"));
@@ -101,7 +110,11 @@ bool FCortexGraphSetTextPinValueStringTableTest::RunTest(const FString& Paramete
 	TestNotNull(TEXT("Blueprint created"), Blueprint);
 	if (Blueprint == nullptr)
 	{
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 5
+		TestTable->MarkAsGarbage();
+#else
 		TablePackage->MarkAsGarbage();
+#endif
 		return false;
 	}
 
@@ -137,7 +150,11 @@ bool FCortexGraphSetTextPinValueStringTableTest::RunTest(const FString& Paramete
 			TEXT("Mail.Button.Pay"));
 	}
 
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 5
+	TestTable->MarkAsGarbage();
+#else
 	TablePackage->MarkAsGarbage();
+#endif
 	DeleteTestBlueprintAsset(AssetPath);
 	return true;
 }

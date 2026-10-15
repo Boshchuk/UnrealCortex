@@ -1,4 +1,5 @@
 #include "CortexVersionCompat.h"
+#include "CortexEngineCompat.h"
 #include "Misc/AutomationTest.h"
 #include "CortexCommandRouter.h"
 #include "CortexGraphCommandHandler.h"
@@ -84,7 +85,7 @@ struct FTable
 		Table = NewObject<UStringTable>(Package, FName(TableName), RF_Public | RF_Standalone | RF_Transactional);
 		if (!Table) return false;
 		CortexSetSourceString(*Table->GetMutableStringTable(), FTextKey(TEXT("Key")), FString(SourceString));
-		FStringTableRegistry::Get().RegisterStringTable(Table->GetStringTableId(), Table->GetMutableStringTable());
+		CortexEngineCompat::RegisterStringTableAsset(Table);
 		return true;
 	}
 

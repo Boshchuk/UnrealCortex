@@ -2,6 +2,7 @@
 #include "Operations/CortexGraphMigrationOps.h"
 #include "Operations/CortexGraphPatchState.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/EngineVersionComparison.h"
 
 #include "CortexCommandRouter.h"
 #include "CortexGraphCommandHandler.h"
@@ -1007,6 +1008,16 @@ struct FExternalCallerFixture
 			GEditor->Trans->Reset(FText::FromString(TEXT("CortexGraphMigrationRetireReferencerUnload")));
 		}
 		Blueprint->ClearEditorReferences();
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 6
+		// UE 5.4 keeps package metadata in a UMetaData object flagged RF_Standalone, which keeps the
+		// package resident; later engines store the metadata inside the package itself.
+		TArray<UObject*> ObjectsInPackage;
+		GetObjectsWithPackage(Package, ObjectsInPackage);
+		for (UObject* Object : ObjectsInPackage)
+		{
+			if (Object && Object->HasAnyFlags(RF_Standalone)) Object->ClearFlags(RF_Standalone);
+		}
+#endif
 		Blueprint->ClearFlags(RF_Standalone);
 		Blueprint->MarkAsGarbage();
 		Package->ClearFlags(RF_Standalone);

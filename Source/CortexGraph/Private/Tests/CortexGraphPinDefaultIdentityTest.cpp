@@ -1,4 +1,5 @@
 #include "CortexVersionCompat.h"
+#include "CortexEngineCompat.h"
 #include "Misc/AutomationTest.h"
 #include "Operations/CortexGraphPatchOps.h"
 #include "Operations/CortexGraphPatchState.h"
@@ -224,7 +225,7 @@ struct FStringTableFixture
 		CortexSetSourceString(*Table->GetMutableStringTable(), FTextKey(TEXT("Key")), FString(SourceString));
 		// A second key with the same display text keeps negative cases resolvable.
 		CortexSetSourceString(*Table->GetMutableStringTable(), FTextKey(TEXT("KeyAlt")), FString(SourceString));
-		FStringTableRegistry::Get().RegisterStringTable(Table->GetStringTableId(), Table->GetMutableStringTable());
+		CortexEngineCompat::RegisterStringTableAsset(Table);
 	}
 
 	void Reset()

@@ -2034,6 +2034,8 @@ bool FCortexGraphMigrationTransferSaveReloadTest::RunTest(const FString& Paramet
 	const FString ExpectedClass = Head->GetClass()->GetPathName();
 	const FString ExpectedComment = Head->NodeComment;
 	const int32 ExpectedPosX = Head->NodePosX;
+	// The source node object is replaced too (UE 5.4 purges it during the reload), so keep its GUID.
+	const FGuid SourceHeadGuid = Head->NodeGuid;
 	UBlueprint* const BeforeReload = Fixture.Blueprint;
 
 	TArray<UPackage*> PackagesToReload;
@@ -2068,7 +2070,7 @@ bool FCortexGraphMigrationTransferSaveReloadTest::RunTest(const FString& Paramet
 			TestEqual(TEXT("the reloaded asset keeps each copied identity exactly once"),
 				CountNodesWithGuid(Reloaded, HeadCopy), 1);
 		}
-		TestNotNull(TEXT("the reloaded source node still resolves"), FindNodeByGuid(Reloaded, Head->NodeGuid));
+		TestNotNull(TEXT("the reloaded source node still resolves"), FindNodeByGuid(Reloaded, SourceHeadGuid));
 	}
 	// The reload replaced the fixture objects, so cleanup addresses the live package and detaches
 	// its mapped linker before the fixture file can be removed on Windows.

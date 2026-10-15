@@ -7,6 +7,7 @@
 #include "Engine/BlueprintGeneratedClass.h"
 #include "GameFramework/Actor.h"
 #include "GameplayTagsManager.h"
+#include "Misc/EngineVersionComparison.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "UObject/Class.h"
@@ -1731,6 +1732,12 @@ bool FCortexBPClassDefaultsEchoSpecialEncodedAtomicTest::RunTest(const FString&)
 
 	// A real registered tag so the container write is unambiguous. Registered at most once per process
 	// so a repeated run never duplicates the native tag registration.
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 5
+	// UE 5.4 cannot register this regression tag at runtime from an Editor module:
+	// AddNativeGameplayTag(FName) ensures once startup tag registration is done, and an
+	// FNativeGameplayTag ensures because the module type is Editor, not Runtime.
+	AddInfo(TEXT("skipped on UE 5.4: runtime registration of the regression gameplay tag (refused after startup)"));
+#else
 	static const FGameplayTag EchoTag = UGameplayTagsManager::Get().AddNativeGameplayTag(
 		FName(TEXT("Cortex.Echo.Tag")), TEXT("Cortex echo regression tag"));
 	TestTrue(TEXT("the regression gameplay tag is registered"), EchoTag.IsValid());
@@ -1849,6 +1856,7 @@ bool FCortexBPClassDefaultsEchoSpecialEncodedAtomicTest::RunTest(const FString&)
 			InstanceRecord->HasField(TEXT("changes")));
 	}
 
+#endif
 	return true;
 }
 

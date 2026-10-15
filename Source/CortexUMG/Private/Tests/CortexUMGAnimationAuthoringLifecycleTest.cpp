@@ -580,9 +580,16 @@ bool FCortexUMGAnimationAuthoringLifecycleExcludedEndpointTest::RunTest(const FS
     PlayFromStartTime(Widget, LiveAnimation, 0.0f);
     TestEqual(TEXT("frame 0: the first authored key applies"), Decoration->GetRenderOpacity(), 0.0f);
 
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 5
+    // UE 5.4 UUMGSequencePlayer::PlayInternal converts the float start time to ticks without
+    // rounding (2399/24000 s lands at tick 2398.9999), so a start time cannot address tick 2399;
+    // later engines round the start to the nearest tick.
+    AddInfo(TEXT("skipped on UE 5.4: last-valid-tick start sample (5.4 truncates the float start time to tick 2398)"));
+#else
     PlayFromStartTime(Widget, LiveAnimation, static_cast<float>(LifecycleLastValidFrame / LifecycleTickResolution));
     TestEqual(TEXT("last valid tick 2399: the key authored on that tick is the final played value"),
         Decoration->GetRenderOpacity(), 1.0f);
+#endif
 
     // A start time at the excluded upper bound is clamped by the engine to the last valid tick, so
     // the stored control point at frame 2400 is never sampled as a playback value.
