@@ -11,7 +11,7 @@ from cortex_mcp.operation_schema import (
     build_profile_operation_schema,
 )
 from cortex_mcp.pagination import encode_cursor
-from cortex_mcp.response import format_response, MAX_RESPONSE_CHARS
+from cortex_mcp.response import compact_json, format_response, MAX_RESPONSE_CHARS
 from cortex_mcp.tcp_client import UECommandError
 from cortex_mcp.tools.routers import make_router, strict_router_tool, _pagination_cache
 
@@ -508,7 +508,7 @@ def test_removal_result_above_40k_preserves_outcomes_and_truncates_remaining_bin
     """Results above 40,000 characters: essential outcome fields are never truncated; remaining_bindings carries truncation metadata."""
     # 201 bindings with moderate entry size clearly exceeds 40,000 chars
     data = _build_native_removal_result(num_remaining=201, entry_size=150)
-    raw_size = len(json.dumps(data, indent=2))
+    raw_size = len(compact_json(data))
     assert raw_size > MAX_RESPONSE_CHARS
 
     formatted = format_response(data, "umg_cmd")
@@ -541,7 +541,7 @@ def test_removal_result_fewer_than_ten_large_entries_truncates_without_error():
     """Fewer than 10 large entries (e.g. 3 entries) exceeding 40k must truncate remaining_bindings rather than failing with RESPONSE_TOO_LARGE."""
     # 3 entries, but each entry is huge (~15,000 chars)
     data = _build_native_removal_result(num_remaining=3, entry_size=15_000)
-    raw_size = len(json.dumps(data, indent=2))
+    raw_size = len(compact_json(data))
     assert raw_size > MAX_RESPONSE_CHARS
 
     formatted = format_response(data, "umg_cmd")
@@ -563,7 +563,7 @@ def test_removal_result_with_large_diagnostics_and_remaining_bindings():
     """When both large diagnostics and remaining_bindings are present, generic largest-list selection cannot hide canonical records."""
     # 15 diagnostics and 11 remaining bindings
     data = _build_native_removal_result(num_remaining=11, entry_size=3_500, num_diagnostics=15)
-    raw_size = len(json.dumps(data, indent=2))
+    raw_size = len(compact_json(data))
     assert raw_size > MAX_RESPONSE_CHARS
 
 
@@ -592,7 +592,7 @@ def test_removal_save_failure_retains_error_identity_and_outcomes():
         saved=False,
         save_error="Package save failed: disk read-only",
     )
-    raw_size = len(json.dumps(data, indent=2))
+    raw_size = len(compact_json(data))
     assert raw_size > MAX_RESPONSE_CHARS
 
     formatted = format_response(data, "umg_cmd")
@@ -640,7 +640,7 @@ def test_summary_read_keeps_established_shape_without_detail_envelope():
 def test_detailed_read_complete_page_retains_every_track():
     """A detailed read that fits returns the complete page with reader_complete=true and no silent track cutting."""
     payload = _detailed_read_payload(track_count=6, keys_per_track=2)
-    assert len(json.dumps(payload, indent=2)) <= MAX_RESPONSE_CHARS
+    assert len(compact_json(payload)) <= MAX_RESPONSE_CHARS
     result = _list_read_result(payload, include_track_content=True)
     assert "_error" not in result
     assert result["reader_complete"] is True
@@ -655,7 +655,7 @@ def test_detailed_read_complete_page_retains_every_track():
 def test_many_track_detailed_read_reports_explicit_incompleteness():
     """Six detailed tracks over 40k must not be silently cut into a page that still claims completion."""
     payload = _detailed_read_payload(track_count=6, keys_per_track=90)
-    assert len(json.dumps(payload, indent=2)) > MAX_RESPONSE_CHARS
+    assert len(compact_json(payload)) > MAX_RESPONSE_CHARS
     result = _list_read_result(payload, include_track_content=True)
     assert result.get("_error") == "RESPONSE_TOO_LARGE"
     assert result["reader_complete"] is False
@@ -675,7 +675,7 @@ def test_many_track_detailed_read_reports_explicit_incompleteness():
 def test_single_oversized_detailed_binding_reports_explicit_incompleteness():
     """A single binding whose details exceed 40k yields the bounded incomplete envelope with retained summary facts."""
     payload = _detailed_read_payload(track_count=1, keys_per_track=700)
-    assert len(json.dumps(payload, indent=2)) > MAX_RESPONSE_CHARS
+    assert len(compact_json(payload)) > MAX_RESPONSE_CHARS
     result = _list_read_result(payload, include_track_content=True)
     assert result.get("_error") == "RESPONSE_TOO_LARGE"
     assert result["reader_complete"] is False
@@ -717,7 +717,7 @@ def test_oversized_applied_authoring_result_preserves_outcome_and_fingerprint():
         "after": after,
         "authored_track": _oversized_authored_track(),
     }
-    assert len(json.dumps(native, indent=2)) > MAX_RESPONSE_CHARS
+    assert len(compact_json(native)) > MAX_RESPONSE_CHARS
 
     connection = MagicMock()
     connection.send_command.return_value = {"success": True, "data": native}

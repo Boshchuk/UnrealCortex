@@ -160,11 +160,12 @@ TArray<FCortexCommandInfo> FCortexEditorCommandHandler::GetSupportedCommands() c
 			.Required(TEXT("key"), TEXT("string"), TEXT("Key to inject"))
 			.Optional(TEXT("action"), TEXT("string"), TEXT("tap, press, or release"))
 			.Optional(TEXT("duration_ms"), TEXT("number"), TEXT("Press duration in milliseconds")),
-		FCortexCommandInfo{ TEXT("inject_mouse"), TEXT("Inject mouse input into PIE") }
-			.Required(TEXT("button"), TEXT("string"), TEXT("Mouse button to inject"))
-			.Optional(TEXT("action"), TEXT("string"), TEXT("tap, press, or release"))
-			.Optional(TEXT("duration_ms"), TEXT("number"), TEXT("Press duration in milliseconds"))
-			.Optional(TEXT("delta"), TEXT("object"), TEXT("Optional relative mouse delta")),
+		FCortexCommandInfo{ TEXT("inject_mouse"), TEXT("Inject Slate mouse input into PIE") }
+			.Required(TEXT("action"), TEXT("string"), TEXT("click, move, or scroll"))
+			.Optional(TEXT("button"), TEXT("string"), TEXT("left (default), right, or middle; used for click"))
+			.Optional(TEXT("x"), TEXT("number"), TEXT("Screen-space X coordinate; defaults to current cursor X"))
+			.Optional(TEXT("y"), TEXT("number"), TEXT("Screen-space Y coordinate; defaults to current cursor Y"))
+			.Optional(TEXT("delta"), TEXT("number"), TEXT("Scroll delta; required for scroll")),
 		FCortexCommandInfo{ TEXT("inject_input_action"), TEXT("Inject one frame of Enhanced Input into active PIE") }
 			.Required(TEXT("action_name"), TEXT("string"), TEXT("Input action asset path or loaded name"))
 			.Optional(TEXT("value"), TEXT("any"), TEXT("Number or x/y/z numeric object; action type determines axes; defaults to 1")),
@@ -203,8 +204,11 @@ TArray<FCortexCommandInfo> FCortexEditorCommandHandler::GetSupportedCommands() c
 			.Optional(TEXT("limit"), TEXT("number"), TEXT("Maximum results, clamped to 1..500")),
 		FCortexCommandInfo{ TEXT("get_recent_logs"), TEXT("Get recent log entries") }
 			.Optional(TEXT("severity"), TEXT("string"), TEXT("Minimum severity filter"))
-			.Optional(TEXT("since_seconds"), TEXT("number"), TEXT("Only include recent entries"))
-			.Optional(TEXT("since_cursor"), TEXT("string"), TEXT("Resume from a previous cursor"))
+			.Optional(TEXT("since_seconds"), TEXT("number"), TEXT("Only include entries newer than this many seconds; exactly -1 disables time filtering"))
+			.Optional(TEXT("since_cursor"), TEXT("number"), TEXT("Resume from a previous cursor"))
+			.Optional(TEXT("until_cursor"), TEXT("number"), TEXT("Inclusive end-of-window cursor pinning the window"))
+			.Optional(TEXT("limit"), TEXT("number"), TEXT("Maximum retained entries, 1..2000; omitted uses 200"))
+			.Optional(TEXT("count_only"), TEXT("boolean"), TEXT("Return window metadata and matched_count without entry rows"))
 			.Optional(TEXT("category"), TEXT("string"), TEXT("Optional log category filter")),
 		FCortexCommandInfo{ TEXT("set_time_dilation"), TEXT("Set game time scale") }
 			.Required(TEXT("factor"), TEXT("number"), TEXT("Global time dilation factor")),

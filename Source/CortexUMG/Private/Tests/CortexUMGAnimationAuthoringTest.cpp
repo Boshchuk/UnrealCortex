@@ -8,6 +8,7 @@
 #include "MovieScenePossessable.h"
 #include "Components/Image.h"
 #include "Components/Border.h"
+#include "Components/TextBlock.h"
 
 // -----------------------------------------------------------------------------
 // umg.ensure_animation_binding — ordinary Designer binding authoring
@@ -552,6 +553,41 @@ bool FCortexUMGAnimationPropertyTrackFloatLifecycleTest::RunTest(const FString& 
     }
     TestTrue(TEXT("Idempotent repeat rewrites nothing"), Fixture.CaptureAuthoredState() == AfterFirst);
 
+    const TSharedPtr<FJsonValue> Keep = Fixture.JsonValue(CortexUMGAnimationAuthoringTestUtils::FadeFloatTrackJson());
+    Keep->AsObject()->GetArrayField(TEXT("sections"))[0]->AsObject()->SetStringField(TEXT("completion_mode"), TEXT("KeepState"));
+    const FCortexCommandResult KeepPreview = Fixture.Set(Selector, TEXT("RenderOpacity"), Keep, true);
+    if (!TestTrue(TEXT("Explicit KeepState previews successfully"), KeepPreview.bSuccess))
+    {
+        AddError(KeepPreview.ErrorMessage);
+        return false;
+    }
+    TestTrue(TEXT("Completion-mode preview preserves authored state"), Fixture.CaptureAuthoredState() == AfterFirst);
+    const FCortexCommandResult Kept = Fixture.Set(Selector, TEXT("RenderOpacity"), Keep, false);
+    if (!TestTrue(TEXT("Explicit KeepState authors successfully"), Kept.bSuccess))
+    {
+        return false;
+    }
+    Section = Fixture.FloatSection(TEXT("Decoration"), TEXT("RenderOpacity"));
+    TestEqual(TEXT("Native section preserves explicit KeepState"),
+        static_cast<int32>(Section->GetCompletionMode()), static_cast<int32>(EMovieSceneCompletionMode::KeepState));
+    const FCortexCommandResult KeepRepeat = Fixture.Set(Selector, TEXT("RenderOpacity"), Keep, false);
+    if (TestTrue(TEXT("Repeat KeepState succeeds"), KeepRepeat.bSuccess))
+    {
+        TestFalse(TEXT("Repeat KeepState is not rewritten"), KeepRepeat.Data->GetBoolField(TEXT("changed")));
+    }
+    const FCortexCommandResult Restored = Fixture.Set(Selector, TEXT("RenderOpacity"), Fade, false);
+    if (TestTrue(TEXT("Omitting completion mode restores the default"), Restored.bSuccess))
+    {
+        TestTrue(TEXT("Completion-only change is not treated as identical keys"), Restored.Data->GetBoolField(TEXT("changed")));
+        Section = Fixture.FloatSection(TEXT("Decoration"), TEXT("RenderOpacity"));
+        TestEqual(TEXT("Omitted completion mode remains RestoreState"),
+            static_cast<int32>(Section->GetCompletionMode()), static_cast<int32>(EMovieSceneCompletionMode::RestoreState));
+    }
+    const TArray<uint8> BeforeInvalidMode = Fixture.CaptureAuthoredState();
+    Keep->AsObject()->GetArrayField(TEXT("sections"))[0]->AsObject()->SetNumberField(TEXT("completion_mode"), 1);
+    TestFalse(TEXT("Completion mode refuses numeric coercion"), Fixture.Set(Selector, TEXT("RenderOpacity"), Keep, false).bSuccess);
+    TestTrue(TEXT("Invalid completion mode preserves authored state"), Fixture.CaptureAuthoredState() == BeforeInvalidMode);
+
     return true;
 }
 
@@ -732,6 +768,38 @@ bool FCortexUMGAnimationPropertyTrackColorChannelsTest::RunTest(const FString& P
             FString::Printf(TEXT("Color channel %s reported"), ChannelName),
             FindChannelJson(SectionJson, ChannelName).Get());
     }
+
+    UTextBlock* Label = Fixture.Blueprint()->WidgetTree->ConstructWidget<UTextBlock>(
+        UTextBlock::StaticClass(), TEXT("PaletteLabel"));
+    CastChecked<UCanvasPanel>(Fixture.Blueprint()->WidgetTree->RootWidget)->AddChild(Label);
+    Fixture.Blueprint()->WidgetVariableNameToGuidMap.Add(Label->GetFName(), FGuid::NewGuid());
+    const FCortexCommandResult LabelBound = Fixture.Ensure(TEXT("PaletteLabel"), false);
+    if (!TestTrue(TEXT("Text label binding authored"), LabelBound.bSuccess))
+    {
+        return false;
+    }
+    const FCortexCommandResult LabelWritten = Fixture.Set(
+        FCortexUMGAnimationAuthoringFixture::SelectorFrom(LabelBound), TEXT("ColorAndOpacity"), Color, false);
+    if (!TestTrue(TEXT("Text SlateColor track authored"), LabelWritten.bSuccess))
+    {
+        AddError(LabelWritten.ErrorMessage);
+        return false;
+    }
+    UMovieSceneColorSection* LabelSection = Fixture.ColorSection(TEXT("PaletteLabel"), TEXT("ColorAndOpacity"));
+    if (!TestNotNull(TEXT("Text SlateColor uses native color section"), LabelSection))
+    {
+        return false;
+    }
+    LabelSection->GetRedChannel().Evaluate(Midpoint, Red);
+    LabelSection->GetGreenChannel().Evaluate(Midpoint, Green);
+    LabelSection->GetBlueChannel().Evaluate(Midpoint, Blue);
+    LabelSection->GetAlphaChannel().Evaluate(Midpoint, Alpha);
+    TestEqual(TEXT("Text color red midpoint"), Red, 0.5f);
+    TestEqual(TEXT("Text color green midpoint"), Green, 0.25f);
+    TestEqual(TEXT("Text color blue midpoint"), Blue, 0.125f);
+    TestEqual(TEXT("Text color alpha midpoint"), Alpha, 1.0f);
+    TestTrue(TEXT("Authoring text color preserves existing image track identity"),
+        Fixture.ColorSection(TEXT("Decoration"), TEXT("ColorAndOpacity")) == Section);
 
     return true;
 }

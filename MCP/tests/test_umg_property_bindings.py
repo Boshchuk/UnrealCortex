@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from cortex_mcp.pagination import PaginationCache, encode_cursor
-from cortex_mcp.response import MAX_RESPONSE_CHARS, format_response
+from cortex_mcp.response import compact_json, MAX_RESPONSE_CHARS, format_response
 from cortex_mcp.tools import routers
 from cortex_mcp.tools.routers import make_router
 
@@ -70,14 +70,14 @@ def test_oversized_tree_cannot_hide_small_complete_binding_state():
     fingerprint = {"domain_signature": {"scope": "umg.property_binding", "digest": "a" * 64}}
     data = {"root": {"name": "Root", "class": "CanvasPanel", "children": [
         {"name": f"Title_{index}", "class": "TextBlock", "is_variable": False, "children": []}
-        for index in range(400)
-    ]}, "total_widgets": 401, "property_binding_state": {
+        for index in range(700)
+    ]}, "total_widgets": 701, "property_binding_state": {
         "reader_complete": True, "scope": "asset", "total": 1, "fingerprint": fingerprint,
         "bindings": [{"widget_name": "Title_399", "property_name": "Text", "source_path": []}],
         "diagnostics": [],
     }}
     original = deepcopy(data)
-    assert len(json.dumps(data, indent=2)) > MAX_RESPONSE_CHARS
+    assert len(compact_json(data)) > MAX_RESPONSE_CHARS
     text = format_response(data, "umg_cmd")
     result = json.loads(text)
     assert result["_error"] == "RESPONSE_TOO_LARGE"
@@ -114,7 +114,7 @@ def test_oversized_replacement_counts_explanation_before_selecting_retained_iden
     }
     after_first_omission.update(reader_complete=False, _binding_identity_truncated=True,
                                _before_binding_omitted=True)
-    available = MAX_RESPONSE_CHARS - len(json.dumps(after_first_omission, indent=2)) - 1
+    available = MAX_RESPONSE_CHARS - len(compact_json(after_first_omission)) - 1
     data["binding"]["source_path"][0] = "y" * available
     original = deepcopy(data)
     text = format_response(data, "umg_cmd")

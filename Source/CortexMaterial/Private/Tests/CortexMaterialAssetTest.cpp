@@ -22,7 +22,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexMaterialCreateTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	const FString MatName = FString::Printf(TEXT("M_TestCreate_%s"), *Suffix);
 	const FString MatDir = FString::Printf(TEXT("/Game/Temp/CortexMatTest_%s"), *Suffix);
 	const FString MatPath = FString::Printf(TEXT("%s/%s"), *MatDir, *MatName);
@@ -88,7 +88,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexMaterialCreateDuplicateTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	const FString MatName = FString::Printf(TEXT("M_TestDup_%s"), *Suffix);
 	const FString MatDir = FString::Printf(TEXT("/Game/Temp/CortexMatTest_Dup_%s"), *Suffix);
 	const FString MatPath = FString::Printf(TEXT("%s/%s"), *MatDir, *MatName);
@@ -151,7 +151,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCortexMaterialGetTest::RunTest(const FString& Parameters)
 {
 	// Create a material first
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	const FString MatName = FString::Printf(TEXT("M_TestGet_%s"), *Suffix);
 	const FString MatDir = FString::Printf(TEXT("/Game/Temp/CortexMatTest_Get_%s"), *Suffix);
 	const FString MatPath = FString::Printf(TEXT("%s/%s"), *MatDir, *MatName);
@@ -206,7 +206,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexMaterialGetReferencedCollectionsTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	const FString MatName = FString::Printf(TEXT("M_TestRefCol_%s"), *Suffix);
 	const FString MatDir = FString::Printf(TEXT("/Game/Temp/CortexMatTest_RefCol_%s"), *Suffix);
 	const FString MatPath = FString::Printf(TEXT("%s/%s"), *MatDir, *MatName);
@@ -320,7 +320,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexMaterialGetInstanceReferencedCollectionsTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	const FString MatName = FString::Printf(TEXT("M_TestInstRefCol_%s"), *Suffix);
 	const FString MatDir = FString::Printf(TEXT("/Game/Temp/CortexMatTest_InstRefCol_%s"), *Suffix);
 	const FString MatPath = FString::Printf(TEXT("%s/%s"), *MatDir, *MatName);
@@ -587,7 +587,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexMaterialDeleteTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	const FString MatName = FString::Printf(TEXT("M_TestDel_%s"), *Suffix);
 	const FString MatDir = FString::Printf(TEXT("/Game/Temp/CortexMatTest_Del_%s"), *Suffix);
 	const FString MatPath = FString::Printf(TEXT("%s/%s"), *MatDir, *MatName);
@@ -625,7 +625,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexMaterialCreateInstanceTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	const FString MatName = FString::Printf(TEXT("M_TestInstParent_%s"), *Suffix);
 	const FString InstName = FString::Printf(TEXT("MI_TestInst_%s"), *Suffix);
 	const FString Dir = FString::Printf(TEXT("/Game/Temp/CortexMatTest_Inst_%s"), *Suffix);
@@ -677,7 +677,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexMaterialGetInstanceTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	const FString MatName = FString::Printf(TEXT("M_TestGetInst_%s"), *Suffix);
 	const FString InstName = FString::Printf(TEXT("MI_TestGetInst_%s"), *Suffix);
 	const FString Dir = FString::Printf(TEXT("/Game/Temp/CortexMatTest_GetInst_%s"), *Suffix);
@@ -761,7 +761,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexMaterialSetPropertyDomainTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	const FString MatName = FString::Printf(TEXT("M_TestSetDomain_%s"), *Suffix);
 	const FString MatDir = FString::Printf(TEXT("/Game/Temp/CortexMatTest_SetDomain_%s"), *Suffix);
 	const FString MatPath = FString::Printf(TEXT("%s/%s"), *MatDir, *MatName);
@@ -814,7 +814,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexMaterialSetPropertyBlendModeTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	const FString MatName = FString::Printf(TEXT("M_TestSetBlend_%s"), *Suffix);
 	const FString MatDir = FString::Printf(TEXT("/Game/Temp/CortexMatTest_SetBlend_%s"), *Suffix);
 	const FString MatPath = FString::Printf(TEXT("%s/%s"), *MatDir, *MatName);
@@ -855,7 +855,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCortexMaterialSetPropertyInvalidTest::RunTest(const FString& Parameters)
 {
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Right(8);
 	const FString MatName = FString::Printf(TEXT("M_TestSetInvalid_%s"), *Suffix);
 	const FString MatDir = FString::Printf(TEXT("/Game/Temp/CortexMatTest_SetInvalid_%s"), *Suffix);
 	const FString MatPath = FString::Printf(TEXT("%s/%s"), *MatDir, *MatName);

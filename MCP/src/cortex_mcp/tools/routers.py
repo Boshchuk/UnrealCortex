@@ -11,10 +11,12 @@ from pydantic import ConfigDict, WithJsonSchema, create_model
 
 from cortex_mcp.capabilities import CORE_DOMAINS
 from cortex_mcp.graph_patch_boundary import dispatch_graph_apply_patch
-from cortex_mcp.pagination import PaginationCache, decode_cursor
+from cortex_mcp.pagination import PaginationCache, decode_cursor, encode_cursor
 from cortex_mcp.response import (
     ANIMATION_AUTHORING_COMMANDS,
-    _find_largest_list,
+    MAX_RESPONSE_CHARS,
+    compact_json,
+    format_native_page,
     format_response,
 )
 from cortex_mcp.schema_generator import (
@@ -40,6 +42,56 @@ _CACHED_READ_COMMANDS = {
     ("level", "list_actor_classes"),
 }
 
+# Native-owned reads consume limit/offset themselves. Their window is authoritative: a native
+# limit above the Python cache maximum, or the native limit=0 "unlimited" sentinel, is forwarded
+# unchanged and never reinterpreted as a Python pagination request. No Python cursor is ever added
+# to a native page, and an oversized native page refuses instead of being shortened.
+NATIVE_LIMIT_COMMANDS = frozenset({
+    ("data", "query_datatable"),
+    ("data", "search_datatable_content"),
+    ("data", "search_assets"),
+    ("level", "list_actors"),
+    ("reflect", "find_overrides"),
+    ("reflect", "find_usages"),
+    ("reflect", "get_dependencies"),
+    ("reflect", "get_referencers"),
+    ("reflect", "search"),
+    ("statetree", "list_assets"),
+    ("editor", "list_cvars"),
+    ("editor", "get_recent_logs"),
+    ("anim", "list_assets"),
+    ("gen", "list_jobs"),
+    # umg.list_animation_bindings declares limit/offset, validates them in C++ and emits its own
+    # next_offset/is_complete continuation, so it owns its page like the other native readers.
+    ("umg", "list_animation_bindings"),
+})
+
+# Cache-owned unbounded reads: qualified read command -> the owner's primary array. Only simple
+# unbounded arrays appear here, with identities verified in the owner source. Native-owned
+# commands, mixed object/edge reads, hierarchical trees, catalogs and object reads never enter the
+# mapping, so no read is guessed into cached pagination.
+CACHED_PAGE_ARRAYS = {
+    "data.list_datatables": "datatables",
+    "data.list_data_assets": "data_assets",
+    "data.list_curve_tables": "curve_tables",
+    "data.list_string_tables": "string_tables",
+    "data.list_gameplay_tags": "tags",
+    "level.find_actors": "matches",
+    "level.list_actor_classes": "classes",
+    "level.list_component_classes": "classes",
+    "graph.list_graphs": "graphs",
+    "graph.search_nodes": "results",
+    "graph.list_event_handlers": "nodes",
+    "graph.find_event_handler": "nodes",
+    "graph.find_function_calls": "nodes",
+    "blueprint.list": "blueprints",
+    "blueprint.list_scs_components": "components",
+    "material.list_materials": "materials",
+    "material.list_instances": "instances",
+    "material.list_collections": "collections",
+    "material.list_nodes": "nodes",
+}
+
 _MAX_LIMIT = 200
 _UE_ERROR_RESERVED_FIELDS = {"success", "_error", "_message", "_command"}
 
@@ -55,62 +107,145 @@ def _validate_limit(limit) -> tuple[int | None, str | None]:
     return limit, None
 
 
-def _handle_cursor_request(cursor_token: str) -> str:
-    """Handle a request that carries a cursor (subsequent page)."""
+def _cursor_expired() -> str:
+    return json.dumps({
+        "_error": "CURSOR_EXPIRED",
+        "_message": "Cached results have expired. Re-send the original command with 'limit' to start a new pagination sequence.",
+    })
+
+
+def _invalid_cursor(message: str) -> str:
+    return json.dumps({"_error": "INVALID_CURSOR", "_message": message})
+
+
+def _cached_refusal(array_key: str) -> str:
+    return compact_json({
+        "_error": "RESPONSE_TOO_LARGE",
+        "_message": (
+            f"No entry of '{array_key}' fits the {MAX_RESPONSE_CHARS}-character response budget; "
+            "the page was refused."
+        ),
+        "reader_complete": False,
+        "_suggestion": "Reduce the per-entry fields, or query with a smaller scope.",
+    })
+
+
+def _format_cached_page(
+    qualified: str,
+    array_key: str,
+    cache_key: str,
+    offset: int,
+    limit: int,
+    page: list,
+    total: int,
+) -> str:
+    """Emit the largest prefix of a cached page that fits the budget *including* its metadata.
+
+    ``returned`` and the continuation are computed from the rows actually emitted, so a bounded
+    page can never skip the rows it omitted. An exhausted snapshot (the offset is past the end) is
+    a normal terminal empty page — zero rows, no continuation, verified against the real template
+    budget — and a zero-row page never reports ``has_more``. An empty slice that is *not* exhausted
+    (only reachable from a malformed cursor) refuses instead of claiming the read is complete, and
+    if not even one row of a non-empty page fits it refuses likewise.
+    """
+    if not page:
+        if offset >= total:
+            meta = {"returned": 0, "total": total, "has_more": False, "next_cursor": None}
+            text = compact_json(_pagination_cache.rebuild_response(cache_key, [], meta))
+            return text if len(text) <= MAX_RESPONSE_CHARS else _cached_refusal(array_key)
+        return _cached_refusal(array_key)
+
+    for count in range(len(page), 0, -1):
+        next_offset = offset + count
+        has_more = next_offset < total
+        meta = {
+            "returned": count,
+            "total": total,
+            "has_more": has_more,
+            "next_cursor": (
+                encode_cursor(cache_key, next_offset, limit, command=qualified, array=array_key)
+                if has_more
+                else None
+            ),
+        }
+        text = compact_json(_pagination_cache.rebuild_response(cache_key, page[:count], meta))
+        if len(text) <= MAX_RESPONSE_CHARS:
+            return text
+    return _cached_refusal(array_key)
+
+
+def _handle_cursor_request(cursor_token: str, qualified: str) -> str:
+    """Handle a subsequent page for the cache-owned read ``qualified``.
+
+    A cursor must agree with the route mapping **and** with the provenance stored for the snapshot
+    it addresses: a token re-tagged for another read (or another array) refuses before anything is
+    sliced, rebuilt or dispatched, so a foreign payload can never be returned through this read.
+    """
     try:
         decoded = decode_cursor(cursor_token)
     except ValueError:
-        return json.dumps({"_error": "INVALID_CURSOR", "_message": "Cursor is malformed. Pass a cursor value returned from a previous response."})
+        return _invalid_cursor(
+            "Cursor is malformed. Pass a cursor value returned from a previous response."
+        )
 
+    if decoded.get("command") != qualified or qualified not in CACHED_PAGE_ARRAYS:
+        return _invalid_cursor(
+            "Cursor does not belong to this read command. Start a new pagination sequence with 'limit'."
+        )
+
+    array_key = CACHED_PAGE_ARRAYS[qualified]
     key = decoded["key"]
+
+    provenance = _pagination_cache.entry_provenance(key)
+    if provenance is None:
+        return _cursor_expired()
+    stored_command, stored_array = provenance
+    if decoded.get("array") != array_key or stored_command != qualified or stored_array != array_key:
+        return _invalid_cursor(
+            "Cursor does not belong to this read command. Start a new pagination sequence with 'limit'."
+        )
+
     offset = decoded["offset"]
-    limit = decoded["limit"]  # embedded in cursor
+    limit = decoded["limit"]  # embedded in cursor; re-validated against the minted contract
+    if limit < 1 or limit > _MAX_LIMIT:
+        return _invalid_cursor(
+            "Cursor is malformed. Pass a cursor value returned from a previous response."
+        )
 
     try:
         page, meta = _pagination_cache.get_page(key, offset, limit)
-        response = _pagination_cache.rebuild_response(key, page, meta)
+        return _format_cached_page(qualified, array_key, key, offset, limit, page, meta["total"])
     except KeyError:
-        return json.dumps({"_error": "CURSOR_EXPIRED", "_message": "Cached results have expired. Re-send the original command with 'limit' to start a new pagination sequence."})
-
-    return format_response(response, "paginated")
+        return _cursor_expired()
 
 
-def _handle_limit_request(domain: str, command: str, params: dict, limit: int, connection) -> str:
-    """Handle a request with limit (first page or re-request)."""
+def _handle_limit_request(qualified: str, params: dict, limit: int, connection) -> str:
+    """Handle the first page of a cache-owned read (or a re-request)."""
     # Strip limit/cursor from params sent to C++
     clean_params = {k: v for k, v in params.items() if k not in ("limit", "cursor")}
-    qualified = _qualify_command(domain, command)
+    array_key = CACHED_PAGE_ARRAYS[qualified]
 
     response = connection.send_command(qualified, clean_params)
     data = response.get("data", {})
 
-    array_key = _find_largest_list(data)
-    if array_key is None:
-        # No qualifying array — return as-is, limit is a no-op
-        return format_response(data, f"{domain}_cmd")
+    full_list = data.get(array_key)
+    if not isinstance(full_list, list):
+        # The owner did not return its primary array: keep the read complete rather than guess.
+        return format_response(
+            data,
+            f"{qualified.partition('.')[0]}_cmd",
+            qualified_command=qualified,
+            request_params=params,
+        )
 
-    full_list = data[array_key]
     template = {k: v for k, v in data.items() if k != array_key}
-
     cache_key = _pagination_cache.store(qualified, clean_params, array_key, full_list, template)
 
     try:
         page, meta = _pagination_cache.get_page(cache_key, offset=0, limit=limit)
-        result = _pagination_cache.rebuild_response(cache_key, page, meta)
+        return _format_cached_page(qualified, array_key, cache_key, 0, limit, page, meta["total"])
     except KeyError:
-        return json.dumps({"_error": "CURSOR_EXPIRED", "_message": "Cached results have expired. Re-send the original command with 'limit' to start a new pagination sequence."})
-    return format_response(result, f"{domain}_cmd")
-
-
-def _should_forward_limit_to_cpp(domain: str, command: str, params: dict) -> bool:
-    """Some C++ commands implement domain-specific limit semantics and must receive it."""
-    if domain == "data" and command == "search_datatable_content":
-        return params.get("search_mode") == "string_table_refs"
-    if domain == "editor" and command == "list_cvars":
-        return True
-    if domain == "anim" and command == "list_assets":
-        return True
-    return False
+        return _cursor_expired()
 
 
 def _error_payload(code: str, message: str, details) -> dict:
@@ -145,10 +280,22 @@ def _native_failure_payload(response) -> dict | None:
     )
 
 
-def _format_ue_command_error(exc: UECommandError, command: str | None = None) -> str:
+def _format_ue_command_error(
+    exc: UECommandError,
+    command: str | None = None,
+    *,
+    qualified_command: str | None = None,
+    request_params: dict | None = None,
+) -> str:
     payload = _error_payload(exc.code, exc.message, exc.details)
     payload["_command"] = exc.command
-    return format_response(payload, "ue_command_error", command=command)
+    return format_response(
+        payload,
+        "ue_command_error",
+        command=command,
+        qualified_command=qualified_command or exc.command,
+        request_params=request_params,
+    )
 
 
 _CANONICAL_ROUTER_SHAPE = {"command": "string", "params": "object"}
@@ -235,7 +382,14 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
                         route_params,
                         ttl=_TTL_CATALOG,
                     )
-                    return format_response(response.get("data", {}), "get_data_catalog")
+                    return format_response(
+                        response.get("data", {}),
+                        "get_data_catalog",
+                        qualified_command="get_data_catalog",
+                        request_params=route_params,
+                    )
+                if command == "get_capabilities":
+                    return _get_capabilities(connection, route_params)
                 if command == "batch_query":
                     import json as _json
                     commands = route_params.get("commands")
@@ -317,22 +471,30 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
                             "_error": "INVALID_FIELD",
                             "_message": "Pagination parameters (limit, cursor, offset) are not supported on remove_animation_binding.",
                         })
-                elif (
-                    "include_track_content" in route_params
-                    and not isinstance(route_params["include_track_content"], bool)
-                ):
-                    return json.dumps({
-                        "_error": "INVALID_FIELD",
-                        "_message": "include_track_content must be boolean.",
-                    })
+                    detail = False
+                else:
+                    if (
+                        "include_track_content" in route_params
+                        and not isinstance(route_params["include_track_content"], bool)
+                    ):
+                        return json.dumps({
+                            "_error": "INVALID_FIELD",
+                            "_message": "include_track_content must be boolean.",
+                        })
+                    detail = route_params.get("include_track_content") is True
+                    if route_params.get("cursor") is not None:
+                        return _invalid_cursor(
+                            f"cursor is unsupported for native-owned {qualified}; "
+                            "pass native limit/offset instead."
+                        )
                 response = connection.send_command(qualified, route_params)
                 failure = _native_failure_payload(response)
                 if failure is not None:
                     return format_response(failure, "ue_command_error", command=command)
-                detail = (
-                    command == "list_animation_bindings"
-                    and route_params.get("include_track_content") is True
-                )
+                if command == "list_animation_bindings" and not detail:
+                    # A summary read is a native-owned page: its continuation was computed for the
+                    # whole page, so it is complete-or-refuse rather than shortened here.
+                    return format_native_page(response.get("data", {}), qualified, route_params)
                 return format_response(
                     response.get("data", {}),
                     f"{domain}_cmd",
@@ -340,11 +502,33 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
                     detail=detail,
                 )
 
-            # Check for cursor (subsequent page — no C++ call needed)
+            # Native-owned pagination: the native window/selector is authoritative. A Python
+            # cursor is unsupported for these reads and refuses before dispatch, and an oversized
+            # native page is complete-or-refuse instead of being shortened.
+            if (domain, command) in NATIVE_LIMIT_COMMANDS:
+                if "cursor" in route_params:
+                    return _invalid_cursor(
+                        f"cursor is unsupported for native-owned {qualified}; "
+                        "pass native limit/offset instead."
+                    )
+                response = connection.send_command(qualified, route_params)
+                failure = _native_failure_payload(response)
+                if failure is not None:
+                    return format_response(
+                        failure,
+                        "ue_command_error",
+                        command=command,
+                        qualified_command=qualified,
+                        request_params=route_params,
+                    )
+                return format_native_page(response.get("data", {}), qualified, route_params)
+
+            # Cache-owned pagination only: a cursor means the read's primary array is explicit, so
+            # any other read refuses before dispatch instead of returning an unrelated page.
             cursor_token = route_params.get("cursor")
 
             if cursor_token is not None:
-                return _handle_cursor_request(cursor_token)
+                return _handle_cursor_request(cursor_token, qualified)
 
             # Check for limit (first page)
             limit_param = route_params.get("limit")
@@ -352,10 +536,11 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
                 limit, error = _validate_limit(limit_param)
                 if error:
                     return error
-                if _should_forward_limit_to_cpp(domain, command, route_params):
-                    response = connection.send_command(qualified, route_params)
-                    return format_response(response.get("data", {}), f"{domain}_cmd")
-                return _handle_limit_request(domain, command, route_params, limit, connection)
+                if qualified in CACHED_PAGE_ARRAYS:
+                    return _handle_limit_request(qualified, route_params, limit, connection)
+                # Not a Python page owner: keep the parameter. Dropping it here would silently
+                # discard what the caller sent and hide an undeclared `limit` from the native
+                # declared-contract validator that exists to refuse it.
 
             # No pagination — normal dispatch
             if (domain, command) in _CACHED_READ_COMMANDS:
@@ -364,14 +549,29 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
                     route_params,
                     ttl=_CACHED_READ_TTL,
                 )
-                return format_response(response.get("data", {}), f"{domain}_cmd")
+                return format_response(
+                    response.get("data", {}),
+                    f"{domain}_cmd",
+                    qualified_command=qualified,
+                    request_params=route_params,
+                )
 
             response = connection.send_command(qualified, route_params)
-            return format_response(response.get("data", {}), f"{domain}_cmd")
+            return format_response(
+                response.get("data", {}),
+                f"{domain}_cmd",
+                qualified_command=qualified,
+                request_params=route_params,
+            )
         except ConnectionError as exc:
             return f"Error: {exc}"
         except UECommandError as exc:
-            return _format_ue_command_error(exc, command=command)
+            return _format_ue_command_error(
+                exc,
+                command=command,
+                qualified_command=qualified,
+                request_params=route_params,
+            )
         except (RuntimeError, ValueError, KeyError) as exc:
             return f"Error: {exc}"
 
@@ -420,6 +620,83 @@ def _qualify_command(domain: str, command: str) -> str:
     if domain == "core" and command in {"get_status", "get_capabilities"}:
         return command
     return f"{domain}.{command}"
+
+
+_CAPABILITIES_DETAIL_VALUES = ("names", "full")
+
+
+def _project_capability_names(document: dict) -> dict:
+    """Names-only projection of an authoritative capabilities document.
+
+    Domains, command names and every non-signature field are preserved; only the per-command
+    ``params`` signature inventory is dropped. A NEW document is built, so the authoritative
+    response — and the Saved cache it was read from — is never mutated in place.
+    """
+    if not isinstance(document, dict):
+        return document
+
+    domains = document.get("domains")
+    if not isinstance(domains, dict):
+        return document
+
+    projected_domains: dict[str, Any] = {}
+    for domain, body in domains.items():
+        if not isinstance(body, dict) or not isinstance(body.get("commands"), list):
+            projected_domains[domain] = body
+            continue
+        projected_body = {k: v for k, v in body.items() if k != "commands"}
+        projected_body["commands"] = [
+            {k: v for k, v in command.items() if k != "params"}
+            if isinstance(command, dict)
+            else command
+            for command in body["commands"]
+        ]
+        projected_domains[domain] = projected_body
+
+    projected = {k: v for k, v in document.items() if k != "domains"}
+    projected["domains"] = projected_domains
+    return projected
+
+
+def _get_capabilities(connection, params: dict) -> str:
+    """Agent-facing capability inventory: ``detail=names`` (default) or ``detail=full``.
+
+    ``detail`` is Python-owned presentation only. It is validated and removed before the native
+    call, and the native ``get_capabilities`` command never receives it. The projection runs after
+    the authoritative response arrives, so a projected view is never written back to the Saved
+    capabilities cache and a following ``detail=full`` read still carries the signatures.
+    """
+    detail = params.get("detail", "names")
+    if detail not in _CAPABILITIES_DETAIL_VALUES:
+        return json.dumps({
+            "_error": "INVALID_FIELD",
+            "_message": "detail must be 'names' (default) or 'full'.",
+        })
+
+    native_params = {k: v for k, v in params.items() if k != "detail"}
+    response = connection.send_command_cached(
+        "get_capabilities",
+        native_params,
+        ttl=_CACHED_READ_TTL,
+    )
+    failure = _native_failure_payload(response)
+    if failure is not None:
+        return format_response(failure, "ue_command_error", command="get_capabilities")
+
+    data = response.get("data", {})
+    if detail == "full":
+        return format_response(
+            data,
+            "get_capabilities",
+            qualified_command="get_capabilities",
+            request_params=native_params,
+        )
+    return format_response(
+        _project_capability_names(data),
+        "get_capabilities",
+        qualified_command="get_capabilities",
+        request_params=native_params,
+    )
 
 
 def _switch_editor(connection, params: dict) -> str:

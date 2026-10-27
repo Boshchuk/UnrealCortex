@@ -1561,6 +1561,14 @@ TSharedRef<FJsonObject> FCortexGraphNodeOps::SerializePin(
 				DefaultDesc->SetBoolField(TEXT("value"), Pin->DefaultValue.ToBool());
 			}
 		}
+		else if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Byte && Pin->PinType.PinSubCategoryObject.IsValid())
+		{
+			if (!Pin->DefaultValue.IsEmpty())
+			{
+				DefaultDesc->SetStringField(TEXT("kind"), TEXT("enum"));
+				DefaultDesc->SetStringField(TEXT("value"), Pin->DefaultValue);
+			}
+		}
 		else if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Int || Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Int64 || Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Byte)
 		{
 			if (!Pin->DefaultValue.IsEmpty())

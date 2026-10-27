@@ -5,6 +5,7 @@
 #include "CortexEngineCompat.h"
 #include "WidgetBlueprint.h"
 #include "Blueprint/WidgetTree.h"
+#include "Components/Widget.h"
 #include "Animation/WidgetAnimation.h"
 #include "MovieScene.h"
 #include "MovieSceneBinding.h"
@@ -35,10 +36,11 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::CreateAnimation(
     {
         return LoadError;
     }
+    const FName RequestedName(*AnimName);
 
     for (UWidgetAnimation* Existing : WBP->Animations)
     {
-        if (Existing && Existing->GetName() == AnimName)
+        if (Existing && Existing->GetFName() == RequestedName)
         {
             return FCortexCommandRouter::Error(
                 CortexErrorCodes::AnimationExists,
@@ -46,12 +48,29 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::CreateAnimation(
         }
     }
 
+    bool bNameConflict = WBP->WidgetVariableNameToGuidMap.Contains(RequestedName);
+    if (!bNameConflict)
+    {
+        WBP->ForEachSourceWidget([RequestedName, &bNameConflict](UWidget* Widget)
+        {
+            bNameConflict |= Widget->GetFName() == RequestedName;
+        });
+    }
+    if (bNameConflict)
+    {
+        return FCortexCommandRouter::Error(
+            CortexErrorCodes::InvalidOperation, TEXT("Animation name conflicts with an existing Designer variable identity"));
+    }
+
     FScopedTransaction Transaction(FText::FromString(
         FString::Printf(TEXT("Cortex: Create Animation %s"), *AnimName)));
     WBP->Modify();
 
-    UWidgetAnimation* NewAnim = NewObject<UWidgetAnimation>(WBP, FName(*AnimName), RF_Transactional);
-    UMovieScene* MovieScene = NewObject<UMovieScene>(NewAnim, FName(*AnimName));
+    // Preserve the compiler's empty-map initialization before adding the first tracked identity.
+    CortexUMGUtils::InitializeLegacyIdentityMap(WBP);
+
+    UWidgetAnimation* NewAnim = NewObject<UWidgetAnimation>(WBP, RequestedName, RF_Transactional);
+    UMovieScene* MovieScene = NewObject<UMovieScene>(NewAnim, RequestedName);
     NewAnim->MovieScene = MovieScene;
 
     const FFrameRate TickResolution = MovieScene->GetTickResolution();
@@ -59,6 +78,7 @@ FCortexCommandResult FCortexUMGWidgetAnimationOps::CreateAnimation(
     MovieScene->SetPlaybackRange(TRange<FFrameNumber>(FFrameNumber(0), EndFrame));
 
     WBP->Animations.Add(NewAnim);
+    WBP->WidgetVariableNameToGuidMap.Add(NewAnim->GetFName(), FGuid::NewGuid());
     FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
 
     TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();

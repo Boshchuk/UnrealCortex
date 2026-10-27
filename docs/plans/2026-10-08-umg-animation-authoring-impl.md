@@ -356,3 +356,9 @@ User approved subagent-driven execution with one native owner and one independen
 - [x] Simplicity first — two routed commands, one private native content helper, existing router/fingerprint/removal reused; one native edit owner avoids duplicate recovery systems.
 - [x] Surgical changes — file ownership and non-goals bound implementation; parent gitlinks and unrelated user processes/work remain outside edits.
 - [x] Goal-driven execution — task/checkpoint matrix covers every acceptance criterion, with runtime/cold-persistence gates and no passing claims before execution.
+
+## PR178 compatibility correction
+
+Retain @Boshchuk's three-loop correction and existing compatibility adapter. Independently compile all three baseline/candidate translation units with real UE 5.8 headers and Clang's range-loop diagnostic promoted to an error; build/link with supported MSVC, run the complete UMG suite, and exercise routed authoring plus exact nested detailed-track readback.
+
+Completed evidence and platform limits: [PR178 verification](../verification/2026-10-13-pr178.md). Public contracts are unchanged; no toolkit or generated-schema synchronization is needed.
