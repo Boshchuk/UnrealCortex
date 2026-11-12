@@ -117,19 +117,6 @@ class TestAutoDetectTruncation:
 
         assert result == data
 
-    def test_truncation_suggestion_mentions_limit(self):
-        """Truncation metadata suggests using 'limit' parameter."""
-        data = _make_large_list("results", _OVERSIZED_COUNT)
-        result = json.loads(format_response(data, "test"))
-
-        assert "limit" in result["_truncated"]["suggestion"].lower()
-
-    def test_no_truncatable_list_error_suggestion_mentions_limit(self):
-        """RESPONSE_TOO_LARGE error suggestion should also mention 'limit'."""
-        data = {"huge_string": "x" * 50_000}
-        result = json.loads(format_response(data, "test"))
-
-        assert "limit" in result["_suggestion"].lower()
 
 
 class TestCursorEncoding:
@@ -219,16 +206,16 @@ class TestPaginationCache:
         page2, _ = cache.get_page(key2, offset=0, limit=2)
         assert page2 == [4, 5]
 
-    def test_same_command_reuses_cache_key(self):
+    def test_identical_requests_get_distinct_snapshots(self):
         cache = PaginationCache(max_entries=5, ttl_seconds=60)
 
         key1 = cache.store("data.list", {"type": "Blueprint"}, "items", [1, 2], {})
         key2 = cache.store("data.list", {"type": "Blueprint"}, "items", [3, 4], {})
 
-        assert key1 == key2
-        # Second store overwrites — returns fresh data
-        page, _ = cache.get_page(key2, offset=0, limit=10)
-        assert page == [3, 4]
+        assert key1 != key2
+        assert cache.get_page(key1, offset=0, limit=10)[0] == [1, 2]
+        assert cache.get_page(key2, offset=0, limit=10)[0] == [3, 4]
+        assert cache.snapshot_id(key2) > cache.snapshot_id(key1)
 
     def test_cache_key_excludes_limit_and_cursor(self):
         cache = PaginationCache(max_entries=5, ttl_seconds=60)
@@ -236,7 +223,7 @@ class TestPaginationCache:
         key1 = cache.store("data.list", {"type": "BP"}, "items", [1], {})
         key2 = cache.store("data.list", {"type": "BP", "limit": 50, "cursor": "abc"}, "items", [2], {})
 
-        assert key1 == key2
+        assert key1.rsplit("-", 1)[0] == key2.rsplit("-", 1)[0]
 
     def test_rebuild_response(self):
         cache = PaginationCache(max_entries=5, ttl_seconds=60)
@@ -700,3 +687,138 @@ class TestMutationResponseBounds:
             assert p["next_offset"] > 0
 
 
+class TestMaterialInputStateResponsePolicy:
+    """Oversized material reads must refuse, not silently shorten state or topology."""
+
+    def test_material_get_material_oversized_property_read_refuses_without_shortening(self):
+        root_input = {
+            "input": "OpacityMask", "connected": False, "source_node": None,
+            "output_index": 0, "mask": 0, "mask_r": 0, "mask_g": 0, "mask_b": 0, "mask_a": 0,
+            "supports_constant": True, "inline_constant_allowed": True,
+            "use_constant": True, "constant": 1.0,
+        }
+        # EditorOnlyData.ParameterGroupData is a real reflected array leaf (one selected path,
+        # no array-index grammar): over budget as unique FParameterGroupData records.
+        group_records = [
+            {"GroupName": f"ParameterGroup_{index:04d}", "GroupSortPriority": index}
+            for index in range(1200)
+        ]
+        data = {
+            "asset_path": "/Game/Materials/M_InputState",
+            "properties": {"EditorOnlyData.ParameterGroupData": group_records},
+            "root_inputs": [root_input],
+        }
+        router, _ = _router_with_mock("material", data)
+        payload = json.loads(router("get_material", {
+            "asset_path": data["asset_path"], "include_input_state": True,
+            "properties": ["EditorOnlyData.ParameterGroupData"],
+        }))
+        assert payload["_error"] == "RESPONSE_TOO_LARGE"
+        assert payload["reader_complete"] is False
+        assert "root_inputs" not in payload
+        assert "properties" not in payload
+        assert "_truncated" not in payload
+        assert payload["asset_path"] == data["asset_path"]
+        assert "properties" in payload["_suggestion"]
+        assert "include_input_state" in payload["_suggestion"]
+        assert len(compact_json(payload)) <= MAX_RESPONSE_CHARS
+
+    def test_material_list_connections_oversized_topology_refuses(self):
+        connections = [
+            {
+                "source_node": f"MaterialExpressionMultiply_{index}",
+                "source_output": 0,
+                "target_node": f"MaterialExpressionAdd_{index + 1}",
+                "target_input": "A",
+            }
+            for index in range(400)
+        ]
+        router, _ = _router_with_mock("material", {"connections": connections, "count": 400})
+        payload = json.loads(router("list_connections", {
+            "asset_path": "/Game/Materials/M_InputState", "include_input_state": False,
+        }))
+        assert payload["_error"] == "RESPONSE_TOO_LARGE"
+        assert payload["reader_complete"] is False
+        assert "connections" not in payload
+        assert "_truncated" not in payload
+        assert payload["count"] == 400
+        assert payload["asset_path"] == "/Game/Materials/M_InputState"
+        assert "get_material" in payload["_suggestion"]
+        assert "paginate" not in payload["_suggestion"].lower()
+        assert "limit" not in payload["_suggestion"].lower()
+        assert len(compact_json(payload)) <= MAX_RESPONSE_CHARS
+
+
+class TestAnalyzeForMigrationResponsePolicy:
+    """Oversized migration analysis refuses naming 'sections'; unfiltered node search pages fully."""
+
+    def test_analyze_for_migration_oversized_refuses_with_sections_suggestion(self):
+        data = {
+            "name": "BP_Huge",
+            "asset_path": "/Game/BP_Huge",
+            "type": "Actor",
+            "variables": [{"name": f"Var_{i}", "type": "float", "default_value": "0"} for i in range(1500)],
+        }
+        router, _ = _router_with_mock("blueprint", data)
+        payload = json.loads(router("analyze_for_migration", {"asset_path": "/Game/BP_Huge"}))
+        assert payload["_error"] == "RESPONSE_TOO_LARGE"
+        assert payload["reader_complete"] is False
+        assert "variables" not in payload
+        assert "_truncated" not in payload
+        assert "'sections'" in payload["_suggestion"]
+        assert payload["asset_path"] == "/Game/BP_Huge"
+        assert len(compact_json(payload)) <= MAX_RESPONSE_CHARS
+
+    def test_analyze_for_migration_within_budget_is_untouched(self):
+        data = {"name": "BP_Small", "asset_path": "/Game/BP_Small", "variables": [{"name": "A"}]}
+        router, _ = _router_with_mock("blueprint", data)
+        payload = json.loads(router("analyze_for_migration", {
+            "asset_path": "/Game/BP_Small", "sections": ["variables"],
+        }))
+        assert payload["variables"] == [{"name": "A"}]
+        assert "_error" not in payload
+
+    def test_graph_metrics_oversized_refuses_with_summary_suggestion(self):
+        data = {
+            "asset_path": "/Game/BP_HugeLogic",
+            "has_tick": False,
+            "totals": {"functional_nodes": 1500, "unreachable_nodes": 0, "ghost_entries": 0, "entries": 1500},
+            "entries": [
+                {"graph": "EventGraph", "name": f"Entry_{i}", "kind": "custom_event", "node_id": f"N_{i}",
+                 "live": True, "functional_nodes": 1, "conditionals": 0, "variable_gets": 0, "max_getter_fanout": 0}
+                for i in range(1500)
+            ],
+        }
+        router, _ = _router_with_mock("blueprint", data)
+        payload = json.loads(router("graph_metrics", {"asset_path": "/Game/BP_HugeLogic"}))
+        assert payload["_error"] == "RESPONSE_TOO_LARGE"
+        assert payload["reader_complete"] is False
+        assert "entries" not in payload
+        assert "_truncated" not in payload
+        assert "complexity_metrics" in payload["_suggestion"]
+        assert payload["asset_path"] == "/Game/BP_HugeLogic"
+        assert len(compact_json(payload)) <= MAX_RESPONSE_CHARS
+
+    def test_unfiltered_search_nodes_pages_completely_via_limit_and_cursor(self):
+        results = [
+            {"node_id": f"node_{i}", "graph_name": "EventGraph", "title": "T" * 120}
+            for i in range(900)
+        ]
+        assert len(compact_json({"results": results})) > MAX_RESPONSE_CHARS
+        router, connection = _router_with_mock(
+            "graph", {"results": results, "count": len(results), "asset_path": "/Game/BP_Big"}
+        )
+
+        seen: list[str] = []
+        payload = json.loads(router("search_nodes", {"asset_path": "/Game/BP_Big", "limit": 100}))
+        while True:
+            assert "_error" not in payload
+            assert len(compact_json(payload)) <= MAX_RESPONSE_CHARS
+            seen.extend(item["node_id"] for item in payload["results"])
+            cursor = payload["_pagination"]["next_cursor"]
+            if cursor is None:
+                break
+            payload = json.loads(router("search_nodes", {"cursor": cursor}))
+
+        assert seen == [f"node_{i}" for i in range(900)]
+        assert connection.send_command.call_count == 1

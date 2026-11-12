@@ -39,6 +39,7 @@ public:
 	static FCortexCommandResult Search(const TSharedPtr<FJsonObject>& Params);
 	static FCortexCommandResult GetDependencies(const TSharedPtr<FJsonObject>& Params);
 	static FCortexCommandResult GetReferencers(const TSharedPtr<FJsonObject>& Params);
+	static FCortexCommandResult FindBrokenConfigPaths(const TSharedPtr<FJsonObject>& Params);
 	static bool WriteReflectCache(
 		const TSharedPtr<FJsonObject>& HierarchyData,
 		const TSharedPtr<FJsonObject>& Params = nullptr
@@ -51,6 +52,7 @@ public:
 
 private:
 	friend class FCortexReflectProjectPluginBlueprintClassificationTest;
+	friend class FCortexReflectInterfaceOps;
 	static UClass* FindClassByName(const FString& ClassName, FCortexCommandResult& OutError);
 	static bool IsProjectClass(const UClass* Class);
 	static FString GetCppClassName(const UClass* Class);

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from typing import Annotated, Any, Callable
 
 from mcp.server.fastmcp.utilities.func_metadata import ArgModelBase
@@ -12,6 +13,7 @@ from pydantic import ConfigDict, WithJsonSchema, create_model
 from cortex_mcp.capabilities import CORE_DOMAINS
 from cortex_mcp.graph_patch_boundary import dispatch_graph_apply_patch
 from cortex_mcp.pagination import PaginationCache, decode_cursor, encode_cursor
+from cortex_mcp.replay_boundary import _finalize, dispatch_replay_command
 from cortex_mcp.response import (
     ANIMATION_AUTHORING_COMMANDS,
     MAX_RESPONSE_CHARS,
@@ -33,7 +35,57 @@ logger = logging.getLogger(__name__)
 _TTL_CATALOG = 600
 _CACHED_READ_TTL = 300
 
-_pagination_cache = PaginationCache(max_entries=5, ttl_seconds=60.0)
+# Deferred editor commands answer after the native work completes, which can outlast the 60 s default
+# socket window: wait_ready waits up to its own `timeout` (default 120 s); live_coding_compile blocks the
+# editor until the patch is built (native transport bound 1800 s). compile_all and export_class_instances
+# are synchronous natively and scale with the project (a 829-Blueprint compile_all measured 177 s), so
+# they get a long fixed window; the whole-project reads export_migration_analysis, export_dependency_graph,
+# find_duplicate_graphs and find_name_lookups load every Blueprint of their prefixes and share it;
+# find_interface_implementers and find_type_usages load every Blueprint that implements or references the type;
+# data.plan_type_replacement classifies the referencers of a user type and exports a baseline of every affected
+# DataTable/DataAsset, and data.verify_type_replacement loads, compiles, diffs and optionally resaves all of them.
+# statetree.replace_node and anim.rebind_function compile (and on failure recompile) the tree or AnimBP they migrate,
+# which scales with the asset; statetree.get_runtime_state reads the running PIE world, so it gets the same window.
+_WAIT_READY_DEFAULT_SECONDS = 120.0
+_DEFERRED_TIMEOUT_MARGIN = 30.0
+_LIVE_CODING_COMPILE_WINDOW = 1830.0
+_LONG_SYNCHRONOUS_WINDOW = 1800.0
+_LONG_SYNCHRONOUS_COMMANDS = frozenset({
+    "anim.rebind_function",
+    "data.plan_type_replacement",
+    "data.verify_type_replacement",
+    "blueprint.compile_all",
+    "blueprint.export_migration_analysis",
+    "level.export_class_instances",
+    "reflect.export_dependency_graph",
+    "reflect.find_duplicate_graphs",
+    "reflect.find_interface_implementers",
+    "reflect.find_name_lookups",
+    "reflect.find_type_usages",
+    "statetree.get_runtime_state",
+    "statetree.replace_node",
+})
+
+
+def _dispatch_timeout(qualified: str, params: dict) -> float | None:
+    """Per-command receive window in seconds, or None to keep the connection default."""
+    if qualified == "editor.live_coding_compile":
+        return _LIVE_CODING_COMPILE_WINDOW
+    if qualified in _LONG_SYNCHRONOUS_COMMANDS:
+        return _LONG_SYNCHRONOUS_WINDOW
+    if qualified == "editor.wait_ready":
+        requested = params.get("timeout")
+        if (
+            isinstance(requested, bool)
+            or not isinstance(requested, (int, float))
+            or not math.isfinite(requested)
+        ):
+            requested = _WAIT_READY_DEFAULT_SECONDS
+        return float(requested) + _DEFERRED_TIMEOUT_MARGIN
+    return None
+
+
+_pagination_cache = PaginationCache(max_entries=16, ttl_seconds=600.0)
 _CACHED_READ_COMMANDS = {
     ("blueprint", "list_scs_components"),
     ("blueprint", "list_inherited_properties"),
@@ -57,6 +109,9 @@ NATIVE_LIMIT_COMMANDS = frozenset({
     ("reflect", "get_referencers"),
     ("reflect", "search"),
     ("statetree", "list_assets"),
+    # get_node_bindings pages its own `nodes` (total/offset/limit/returned_count/has_more) and refuses a limit above 200 with
+    # LIMIT_EXCEEDED; a shortened page would keep those native fields while omitting rows.
+    ("statetree", "get_node_bindings"),
     ("editor", "list_cvars"),
     ("editor", "get_recent_logs"),
     ("anim", "list_assets"),
@@ -90,6 +145,8 @@ CACHED_PAGE_ARRAYS = {
     "material.list_instances": "instances",
     "material.list_collections": "collections",
     "material.list_nodes": "nodes",
+    # core.batch_query executes once; its step results are the paged array.
+    "core.batch_query": "results",
 }
 
 _MAX_LIMIT = 200
@@ -107,11 +164,20 @@ def _validate_limit(limit) -> tuple[int | None, str | None]:
     return limit, None
 
 
-def _cursor_expired() -> str:
-    return json.dumps({
-        "_error": "CURSOR_EXPIRED",
-        "_message": "Cached results have expired. Re-send the original command with 'limit' to start a new pagination sequence.",
-    })
+_BATCH_QUERY_COMMAND = "core.batch_query"
+
+
+def _cursor_expired(qualified: str | None = None) -> str:
+    if qualified == _BATCH_QUERY_COMMAND:
+        # A batch is not a re-runnable read: its steps already executed (and may have changed state).
+        message = (
+            "This batch already executed and its stored results are no longer available "
+            "(the snapshot expired or was evicted). Do NOT re-send the batch: that would execute its "
+            "steps again. Check the editor state or run read-only queries to observe the outcome."
+        )
+    else:
+        message = "Cached results have expired. Re-send the original command with 'limit' to start a new pagination sequence."
+    return json.dumps({"_error": "CURSOR_EXPIRED", "_message": message})
 
 
 def _invalid_cursor(message: str) -> str:
@@ -127,6 +193,57 @@ def _cached_refusal(array_key: str) -> str:
         ),
         "reader_complete": False,
         "_suggestion": "Reduce the per-entry fields, or query with a smaller scope.",
+    })
+
+
+def _batch_oversized_step_refusal(
+    qualified: str,
+    array_key: str,
+    cache_key: str,
+    offset: int,
+    limit: int,
+    total: int,
+) -> str:
+    """Refusal for one executed batch step that alone exceeds the budget.
+
+    The batch already ran (its steps may have mutated state), so the refusal says so, names the
+    snapshot and the oversized step, and carries a cursor positioned after that step so the
+    remaining step results stay retrievable without re-executing anything.
+    """
+    snapshot_id = _pagination_cache.snapshot_id(cache_key)
+    next_offset = offset + 1
+    has_more = next_offset < total
+    next_cursor = (
+        encode_cursor(
+            cache_key, next_offset, limit,
+            command=qualified, array=array_key, snapshot_id=snapshot_id,
+        )
+        if has_more
+        else None
+    )
+    return compact_json({
+        "_error": "RESPONSE_TOO_LARGE",
+        "_message": (
+            f"Batch step at index {offset} alone exceeds the {MAX_RESPONSE_CHARS}-character "
+            "response budget and was not returned. The batch already executed (its steps may have "
+            "changed state); do not re-run it."
+        ),
+        "reader_complete": False,
+        "snapshot_id": snapshot_id,
+        "oversized_step_index": offset,
+        "_pagination": {
+            "returned": 0,
+            "total": total,
+            "has_more": has_more,
+            "snapshot_id": snapshot_id,
+            "next_cursor": next_cursor,
+        },
+        "_suggestion": (
+            "Call core.batch_query with cursor=_pagination.next_cursor to read the remaining step "
+            "results from the stored snapshot; this never re-executes the batch."
+            if has_more
+            else "No further step results remain in the snapshot; do not re-run the batch."
+        ),
     })
 
 
@@ -148,9 +265,16 @@ def _format_cached_page(
     (only reachable from a malformed cursor) refuses instead of claiming the read is complete, and
     if not even one row of a non-empty page fits it refuses likewise.
     """
+    snapshot_id = _pagination_cache.snapshot_id(cache_key)
     if not page:
         if offset >= total:
-            meta = {"returned": 0, "total": total, "has_more": False, "next_cursor": None}
+            meta = {
+                "returned": 0,
+                "total": total,
+                "has_more": False,
+                "snapshot_id": snapshot_id,
+                "next_cursor": None,
+            }
             text = compact_json(_pagination_cache.rebuild_response(cache_key, [], meta))
             return text if len(text) <= MAX_RESPONSE_CHARS else _cached_refusal(array_key)
         return _cached_refusal(array_key)
@@ -162,8 +286,12 @@ def _format_cached_page(
             "returned": count,
             "total": total,
             "has_more": has_more,
+            "snapshot_id": snapshot_id,
             "next_cursor": (
-                encode_cursor(cache_key, next_offset, limit, command=qualified, array=array_key)
+                encode_cursor(
+                    cache_key, next_offset, limit,
+                    command=qualified, array=array_key, snapshot_id=snapshot_id,
+                )
                 if has_more
                 else None
             ),
@@ -171,6 +299,8 @@ def _format_cached_page(
         text = compact_json(_pagination_cache.rebuild_response(cache_key, page[:count], meta))
         if len(text) <= MAX_RESPONSE_CHARS:
             return text
+    if qualified == "core.batch_query":
+        return _batch_oversized_step_refusal(qualified, array_key, cache_key, offset, limit, total)
     return _cached_refusal(array_key)
 
 
@@ -196,11 +326,21 @@ def _handle_cursor_request(cursor_token: str, qualified: str) -> str:
     array_key = CACHED_PAGE_ARRAYS[qualified]
     key = decoded["key"]
 
+    if decoded.get("snapshot_id") is None:
+        return _invalid_cursor(
+            "Cursor is malformed. Pass a cursor value returned from a previous response."
+        )
+
     provenance = _pagination_cache.entry_provenance(key)
     if provenance is None:
-        return _cursor_expired()
-    stored_command, stored_array = provenance
-    if decoded.get("array") != array_key or stored_command != qualified or stored_array != array_key:
+        return _cursor_expired(qualified)
+    stored_command, stored_array, stored_snapshot_id = provenance
+    if (
+        decoded.get("array") != array_key
+        or stored_command != qualified
+        or stored_array != array_key
+        or decoded["snapshot_id"] != stored_snapshot_id
+    ):
         return _invalid_cursor(
             "Cursor does not belong to this read command. Start a new pagination sequence with 'limit'."
         )
@@ -216,7 +356,7 @@ def _handle_cursor_request(cursor_token: str, qualified: str) -> str:
         page, meta = _pagination_cache.get_page(key, offset, limit)
         return _format_cached_page(qualified, array_key, key, offset, limit, page, meta["total"])
     except KeyError:
-        return _cursor_expired()
+        return _cursor_expired(qualified)
 
 
 def _handle_limit_request(qualified: str, params: dict, limit: int, connection) -> str:
@@ -245,7 +385,93 @@ def _handle_limit_request(qualified: str, params: dict, limit: int, connection) 
         page, meta = _pagination_cache.get_page(cache_key, offset=0, limit=limit)
         return _format_cached_page(qualified, array_key, cache_key, 0, limit, page, meta["total"])
     except KeyError:
-        return _cursor_expired()
+        return _cursor_expired(qualified)
+
+
+_EXECUTED_BATCH_NOTE = (
+    "This batch already executed once (its steps may have changed state); do not re-run it. "
+    "The page below holds the first step results; the remaining step results are available by "
+    "calling core.batch_query with cursor=_pagination.next_cursor, which is served from the stored "
+    "snapshot and never re-executes the batch."
+)
+
+
+def _is_too_large_refusal(text: str) -> bool:
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and payload.get("_error") == "RESPONSE_TOO_LARGE"
+
+
+def _batch_query(connection, route_params: dict) -> str:
+    """core.batch_query: one native execution, optionally served as cached pages.
+
+    With ``limit`` the single native ``batch`` result is snapshotted and its step results are paged
+    from the cache; a ``cursor`` is served from that snapshot and never re-executes the batch (the
+    steps may mutate). Without ``limit`` a response that fits is returned whole; an oversized one is
+    never discarded or shortened: the executed results are snapshotted and the first page that fits
+    is returned with a cursor and a note that the batch already ran.
+    """
+    qualified = _BATCH_QUERY_COMMAND
+    cursor_token = route_params.get("cursor")
+    if cursor_token is not None:
+        return _handle_cursor_request(cursor_token, qualified)
+
+    limit = None
+    if route_params.get("limit") is not None:
+        limit, error = _validate_limit(route_params["limit"])
+        if error:
+            return error
+
+    commands = route_params.get("commands")
+    if commands is None:
+        commands = route_params.get("steps")
+    if isinstance(commands, str):
+        commands = json.loads(commands)
+    batch_params = {"commands": commands}
+    for key in ("stop_on_error", "rollback_on_error", "verify_rollback"):
+        if key in route_params:
+            batch_params[key] = route_params[key]
+    if isinstance(commands, list) and any(
+        isinstance(step, dict) and step.get("command") == "graph.apply_patch"
+        for step in commands
+    ):
+        return json.dumps({
+            "_error": "INVALID_OPERATION",
+            "_message": (
+                "graph.apply_patch is a standalone mutation and cannot run inside "
+                "core_cmd(batch_query); call graph_cmd or blueprint_compose so the "
+                "MCP prune response boundary can run before mutation."
+            ),
+        })
+
+    response = connection.send_command("batch", batch_params)
+    data = response.get("data", {})
+    array_key = CACHED_PAGE_ARRAYS[qualified]
+    note = None
+    if limit is None:
+        text = format_response(data, "batch_query")
+        results = data.get(array_key)
+        if not _is_too_large_refusal(text) or not isinstance(results, list) or not results:
+            return text
+        # The batch has already executed, so its results are never discarded and the caller is never
+        # asked to run it again: the executed results are snapshotted and served from the cache.
+        limit = min(len(results), _MAX_LIMIT)
+        note = _EXECUTED_BATCH_NOTE
+
+    results = data.get(array_key)
+    if not isinstance(results, list):
+        return format_response(data, "batch_query")
+    template = {k: v for k, v in data.items() if k != array_key}
+    if note is not None:
+        template["_note"] = note
+    cache_key = _pagination_cache.store(qualified, batch_params, array_key, results, template)
+    try:
+        page, meta = _pagination_cache.get_page(cache_key, offset=0, limit=limit)
+        return _format_cached_page(qualified, array_key, cache_key, 0, limit, page, meta["total"])
+    except KeyError:
+        return _cursor_expired(qualified)
 
 
 def _error_payload(code: str, message: str, details) -> dict:
@@ -310,17 +536,24 @@ class _StrictRouterArguments(ArgModelBase):
         return arguments
 
 
-def _invalid_invocation_shape(message: str) -> str:
-    return json.dumps({
+def _invalid_invocation_shape(
+    message: str, *, finalize: Callable[[Any], str] | None = None
+) -> str:
+    payload = {
         "_error": "INVALID_INVOCATION_SHAPE",
         "_message": message,
         "canonical_shape": _CANONICAL_ROUTER_SHAPE,
-    })
+    }
+    if finalize is not None:
+        return finalize(payload)
+    return json.dumps(payload)
 
 
 def _batch_has_zero_commands(params) -> bool:
     if not isinstance(params, dict):
         return True
+    if params.get("cursor") is not None:
+        return False  # a cursor page is served from its snapshot and carries no commands
     commands = params.get("commands")
     if commands is None:
         commands = params.get("steps")
@@ -329,21 +562,51 @@ def _batch_has_zero_commands(params) -> bool:
     return not isinstance(commands, list) or len(commands) == 0
 
 
+def _batch_contains_replay_start(route_params: dict) -> bool:
+    """True when a core batch carries a one-shot replay start step.
+
+    Replay start must be dispatched directly; a generic batch may retry, so the
+    start is refused before any run/request is allocated (matching the native
+    ``FCortexCommandRouter::IsInBatch`` denial).
+    """
+    commands = route_params.get("commands")
+    if commands is None:
+        commands = route_params.get("steps")
+    if isinstance(commands, str):
+        try:
+            commands = json.loads(commands)
+        except (TypeError, ValueError):
+            return False
+    if not isinstance(commands, list):
+        return False
+    return any(
+        isinstance(step, dict) and step.get("command") == "replay.start_replay"
+        for step in commands
+    )
+
+
 def strict_router_tool(router, domain: str) -> Callable[[str, dict | None], str]:
     """Wrap a domain router with the strict {command, params} envelope contract."""
 
+    # Replay owns a 39,000-byte encoded-UTF-8 budget for every reply path, including
+    # pre-dispatch envelope rejections that never reach dispatch_replay_command.
+    envelope_finalize = _finalize if domain == "replay" else None
+
+    def reject(message: str) -> str:
+        return _invalid_invocation_shape(message, finalize=envelope_finalize)
+
     def wrapped(command: str, params: dict | None = None, **_extra) -> str:
         if _extra:
-            return _invalid_invocation_shape(
+            return reject(
                 f"Malformed {domain}_cmd envelope: unexpected top-level operation fields "
                 f"{sorted(_extra)}. Pass all operation fields inside the params object."
             )
         if params is not None and not isinstance(params, dict):
-            return _invalid_invocation_shape(
+            return reject(
                 f"Malformed {domain}_cmd envelope: params must be an object, got {type(params).__name__}."
             )
         if domain == "core" and command in {"batch_query", "batch"} and _batch_has_zero_commands(params):
-            return _invalid_invocation_shape(
+            return reject(
                 "batch_query requires at least one command; zero-command batches are never successful."
             )
         return router(command, params)
@@ -368,6 +631,21 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
             )
 
         try:
+            # Replay start must be dispatched directly; refuse it inside a core batch before sending.
+            if (
+                domain == "core"
+                and command in {"batch", "batch_query"}
+                and _batch_contains_replay_start(route_params)
+            ):
+                return json.dumps({
+                    "_error": "INVALID_OPERATION",
+                    "_message": (
+                        "replay.start_replay is a one-shot operation and cannot run inside "
+                        "core_cmd(batch/batch_query); call replay_cmd directly so the MCP "
+                        "one-shot boundary runs before dispatch."
+                    ),
+                })
+
             # Handle core special commands first (no pagination for these)
             if domain == "core":
                 if command == "switch_editor":
@@ -391,30 +669,7 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
                 if command == "get_capabilities":
                     return _get_capabilities(connection, route_params)
                 if command == "batch_query":
-                    import json as _json
-                    commands = route_params.get("commands")
-                    if commands is None:
-                        commands = route_params.get("steps")
-                    if isinstance(commands, str):
-                        commands = _json.loads(commands)
-                    batch_params = {"commands": commands}
-                    for key in ("stop_on_error", "rollback_on_error", "verify_rollback"):
-                        if key in route_params:
-                            batch_params[key] = route_params[key]
-                    if isinstance(commands, list) and any(
-                        isinstance(step, dict) and step.get("command") == "graph.apply_patch"
-                        for step in commands
-                    ):
-                        return json.dumps({
-                            "_error": "INVALID_OPERATION",
-                            "_message": (
-                                "graph.apply_patch is a standalone mutation and cannot run inside "
-                                "core_cmd(batch_query); call graph_cmd or blueprint_compose so the "
-                                "MCP prune response boundary can run before mutation."
-                            ),
-                        })
-                    response = connection.send_command("batch", batch_params)
-                    return format_response(response.get("data", {}), "batch_query")
+                    return _batch_query(connection, route_params)
 
             if domain == "graph" and command == "apply_patch":
                 return dispatch_graph_apply_patch(
@@ -422,6 +677,10 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
                     route_params,
                     tool_name="graph_cmd",
                 )
+
+            # Replay: validate and dispatch before the generic cursor/cache shortcuts.
+            if domain == "replay":
+                return dispatch_replay_command(connection, command, route_params)
 
             # Property-binding reads/writes must never be interpreted as cached pagination.
             property_binding_write = domain == "umg" and command == "set_property_binding"
@@ -556,7 +815,11 @@ def make_router(domain: str, connection, docstring: str) -> Callable[[str, dict 
                     request_params=route_params,
                 )
 
-            response = connection.send_command(qualified, route_params)
+            dispatch_timeout = _dispatch_timeout(qualified, route_params)
+            if dispatch_timeout is None:
+                response = connection.send_command(qualified, route_params)
+            else:
+                response = connection.send_command(qualified, route_params, timeout=dispatch_timeout)
             return format_response(
                 response.get("data", {}),
                 f"{domain}_cmd",
@@ -601,7 +864,15 @@ def _register_strict_router(mcp, domain: str, strict_router) -> None:
 
     registered.__name__ = f"{domain}_cmd"
     registered.__doc__ = docstring
-    mcp.tool(name=f"{domain}_cmd", description=docstring)(registered)
+    # Replay replies are budgeted as one encoded envelope. The SDK's default auto-detection wraps a
+    # string-returning router into both text and structuredContent.result, which would count the
+    # same payload twice against that budget, so Replay opts out and every other domain keeps the
+    # existing behaviour.
+    mcp.tool(
+        name=f"{domain}_cmd",
+        description=docstring,
+        structured_output=False if domain == "replay" else None,
+    )(registered)
 
     tool_manager = getattr(mcp, "_tool_manager", None)
     tool = tool_manager.get_tool(f"{domain}_cmd") if tool_manager is not None else None

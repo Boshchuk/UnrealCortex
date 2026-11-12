@@ -43,7 +43,8 @@
     "analyze_blueprint_for_migration": {
       "file": "tools/blueprint/analysis.py",
       "params": [
-        "asset_path"
+        "asset_path",
+        "sections"
       ]
     },
     "blueprint_search": {
@@ -195,7 +196,11 @@
       "params": [
         "asset_path",
         "interface_path",
-        "compile"
+        "preserve_implementations",
+        "dry_run",
+        "compile",
+        "expected_fingerprint",
+        "expected_validation_hash"
       ]
     },
     "remove_blueprint_variable": {
@@ -1654,7 +1659,8 @@
       "params": [
         "asset_path",
         "category",
-        "limit"
+        "limit",
+        "include_config"
       ]
     },
     "impact_analysis": {
@@ -1698,7 +1704,8 @@
       "params": [
         "class_name",
         "depth",
-        "limit"
+        "limit",
+        "path_prefixes"
       ]
     },
     "query_usages": {

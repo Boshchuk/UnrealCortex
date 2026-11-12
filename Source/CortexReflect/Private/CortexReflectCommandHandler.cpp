@@ -1,6 +1,17 @@
 #include "CortexReflectCommandHandler.h"
+#include "CortexCommandContract.h"
 #include "CortexCommandRouter.h"
 #include "Operations/CortexReflectOps.h"
+#include "Operations/CortexReflectDependencyGraphOps.h"
+#include "Operations/CortexReflectNameLookupOps.h"
+#include "Operations/CortexReflectDuplicateGraphOps.h"
+#include "Operations/CortexReflectInterfaceOps.h"
+#include "Operations/CortexReflectTypeUsageOps.h"
+
+namespace
+{
+TArray<FCortexCommandInfo> ReflectCommandInfos();
+}
 
 FCortexCommandResult FCortexReflectCommandHandler::Execute(
 	const FString& Command,
@@ -8,6 +19,13 @@ FCortexCommandResult FCortexReflectCommandHandler::Execute(
 	FDeferredResponseCallback DeferredCallback)
 {
 	(void)DeferredCallback;
+
+	static const TArray<FCortexCommandInfo> Infos = ReflectCommandInfos();
+	FCortexCommandResult ContractError;
+	if (!FCortexCommandContract::ValidateDeclaredParams(Infos, Command, Params, ContractError))
+	{
+		return ContractError;
+	}
 
 	if (Command == TEXT("find_usages"))
 	{
@@ -49,6 +67,36 @@ FCortexCommandResult FCortexReflectCommandHandler::Execute(
 		return FCortexReflectOps::GetReferencers(Params);
 	}
 
+	if (Command == TEXT("find_broken_config_paths"))
+	{
+		return FCortexReflectOps::FindBrokenConfigPaths(Params);
+	}
+
+	if (Command == TEXT("export_dependency_graph"))
+	{
+		return FCortexReflectDependencyGraphOps::ExportDependencyGraph(Params);
+	}
+
+	if (Command == TEXT("find_name_lookups"))
+	{
+		return FCortexReflectNameLookupOps::FindNameLookups(Params);
+	}
+
+	if (Command == TEXT("find_duplicate_graphs"))
+	{
+		return FCortexReflectDuplicateGraphOps::FindDuplicateGraphs(Params);
+	}
+
+	if (Command == TEXT("find_type_usages"))
+	{
+		return FCortexReflectTypeUsageOps::FindTypeUsages(Params);
+	}
+
+	if (Command == TEXT("find_interface_implementers"))
+	{
+		return FCortexReflectInterfaceOps::FindInterfaceImplementers(Params);
+	}
+
 	return FCortexCommandRouter::Error(
 		CortexErrorCodes::UnknownCommand,
 		FString::Printf(TEXT("Unknown reflect command: %s"), *Command)
@@ -56,6 +104,13 @@ FCortexCommandResult FCortexReflectCommandHandler::Execute(
 }
 
 TArray<FCortexCommandInfo> FCortexReflectCommandHandler::GetSupportedCommands() const
+{
+	return ReflectCommandInfos();
+}
+
+namespace
+{
+TArray<FCortexCommandInfo> ReflectCommandInfos()
 {
 	return {
 		FCortexCommandInfo{ TEXT("class_hierarchy"), TEXT("Get class inheritance tree") }
@@ -74,7 +129,8 @@ TArray<FCortexCommandInfo> FCortexReflectCommandHandler::GetSupportedCommands() 
 		FCortexCommandInfo{ TEXT("find_overrides"), TEXT("Find Blueprint overrides of a class") }
 			.Required(TEXT("class_name"), TEXT("string"), TEXT("Base class to inspect for overrides"))
 			.Optional(TEXT("depth"), TEXT("number"), TEXT("Inheritance depth to search"))
-			.Optional(TEXT("limit"), TEXT("number"), TEXT("Maximum overrides to return")),
+			.Optional(TEXT("limit"), TEXT("number"), TEXT("Maximum overrides to return"))
+			.Optional(TEXT("path_prefixes"), TEXT("array"), TEXT("Interface classes only: mounted content folders searched for implementing Blueprints (default /Game)")),
 		FCortexCommandInfo{ TEXT("find_usages"), TEXT("Find cross-references to a symbol") }
 			.Required(TEXT("symbol"), TEXT("string"), TEXT("Symbol name to search for"))
 			.Optional(TEXT("class_name"), TEXT("string"), TEXT("Restrict search to a class context"))
@@ -94,6 +150,39 @@ TArray<FCortexCommandInfo> FCortexReflectCommandHandler::GetSupportedCommands() 
 		FCortexCommandInfo{ TEXT("get_referencers"), TEXT("Get asset referencers from Asset Registry") }
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path to inspect"))
 			.Optional(TEXT("category"), TEXT("string"), TEXT("Referencer category filter"))
-			.Optional(TEXT("limit"), TEXT("number"), TEXT("Maximum referencers to return")),
+			.Optional(TEXT("limit"), TEXT("number"), TEXT("Maximum referencers to return; config rows are listed first and count toward the limit, so asset rows fill what remains"))
+			.Optional(TEXT("include_config"), TEXT("boolean"), TEXT("Include config/INI references as type 'config' rows (default true)")),
+		FCortexCommandInfo{ TEXT("find_broken_config_paths"), TEXT("Report content package and directory paths in project and project-plugin INI files that do not exist. Wildcard patterns (a path containing * or ?) and the Old* attributes of CoreRedirects entries are not references and are skipped. scanned_files counts the INI files actually read; unreadable_files lists the ones that could not be read") }
+			.StrictParams(),
+		FCortexCommandInfo{ TEXT("export_dependency_graph"), TEXT("Write a typed dependency graph (inherits, implements, calls_message, casts, spawns, creates_widget, widget_tree_child, listview_entry, level_placement, struct_use, enum_use, config) to a report file. Scheduled nodes are Blueprints, Worlds, user-defined structs and enums under the prefixes; targets outside the prefixes are external nodes. calls_message covers interface message nodes and typed calls whose function belongs to an interface class. level_placement means a World asset hard-depends on the Blueprint package, or an external actor package (One-File-Per-Actor / World Partition, /<Root>/__ExternalActors__/<map path>/...) of that World references the Blueprint. Self-referencing edges are dropped. Waves order strongly connected components by longest path using hard kinds by default; cycles lists components of more than one node. matched_assets reports the assets found under each path prefix and warnings names prefixes that matched nothing") }
+			.Required(TEXT("path_prefixes"), TEXT("array"), TEXT("Mounted content folders whose assets form the graph (e.g. /Game/MyFeature)"))
+			.Required(TEXT("out_path"), TEXT("string"), TEXT("Report file under the project Saved, Content or Config directory"))
+			.Optional(TEXT("edge_kinds"), TEXT("array"), TEXT("Edge kinds to derive (default all): inherits, implements, calls_message, casts, spawns, creates_widget, widget_tree_child, listview_entry, level_placement, struct_use, enum_use, config"))
+			.Optional(TEXT("ordering_kinds"), TEXT("array"), TEXT("Edge kinds that order waves (default: inherits, implements, struct_use, enum_use, widget_tree_child, listview_entry); other kinds are emitted as edges only"))
+			.StrictParams(),
+		FCortexCommandInfo{ TEXT("find_name_lookups"), TEXT("Find by-name access to Blueprint members. C++ (project and project-plugin .h/.inl/.cpp sources, fixed roots; the UnrealCortex plugin is excluded): string-literal names passed to FindFunction, FindFunctionByName, FindFunctionChecked, FindPropertyByName, FindFProperty, FindUField, FindField, FindFieldChecked, CreateUFunction, BindUFunction, AddUFunction, RemoveUFunction, K2_SetTimer, K2_ClearTimer, K2_PauseTimer, K2_UnPauseTimer, K2_IsTimerActive, K2_IsTimerPaused, K2_TimerExists, K2_GetTimerElapsedTime, K2_GetTimerRemainingTime, and the first token of a literal CallFunctionByNameWithArguments command. Blueprint: K2_SetTimer, K2_SetTimerForNextTick and the K2_Clear/Pause/UnPause/IsActive/IsPaused/Exists/Elapsed/Remaining timer nodes with an unlinked literal FunctionName pin. Only literal names are detected: names held in variables or constants are not. Each hit lists the Blueprint functions, events, custom events, variables and component variables of that name under the prefixes; matched_names/unmatched_names split the looked-up names by whether any Blueprint member matched. scanned_files counts the source files actually read and unreadable_files lists the ones that could not be read; matched_assets reports the Blueprints found under each prefix and warnings names prefixes that matched nothing. With out_path the full result is written to that file and the response is a compact summary (counts plus the first 10 cpp, blueprint, matched and unmatched entries)") }
+			.Required(TEXT("path_prefixes"), TEXT("array"), TEXT("Mounted content folders whose Blueprints are matched against (e.g. /Game/MyFeature)"))
+			.Optional(TEXT("symbols"), TEXT("array"), TEXT("Only report looked-up names in this list (case-insensitive)"))
+			.Optional(TEXT("out_path"), TEXT("string"), TEXT("Write the full result to this file (under Project Saved, Content or Config) and return only a compact summary; use it when the inline result would be too large"))
+			.StrictParams(),
+		FCortexCommandInfo{ TEXT("find_duplicate_graphs"), TEXT("Find duplicated logic across Blueprints. Graph units are function graphs, macro graphs and ubergraph event chains (an event node plus everything reachable from it). Units are normalised ignoring GUIDs, node names, positions, comments, reroute knots and disabled nodes; references to the owning Blueprint's own class read as 'self'. A node is described by class, member reference, typed pins of entry/result/event nodes, reflected scalar properties (object, enum, name, number) and non-default unlinked pin values; collapsed-graph contents are not expanded and function local variables (their types and defaults) are not compared. exact_groups share an identical normalised hash across two or more Blueprints (hash by iterative neighbourhood refinement, not a full isomorphism test, so rare regular structures may collide). similar_groups are same-named units of different Blueprints whose LOOSE node-descriptor multiset Jaccard ratio reaches similarity (loose: every reference to a Blueprint-generated class other than the Blueprint itself - member parents, cast targets, pin types, class pin defaults, widget classes - is replaced by its nearest native ancestor class name, and BP member references keep the member name only, so parallel sibling Blueprint classes compare equal; marked loose:true; exact groups stay strict), grouped as star clusters around a representative; members identical to each other collapse to one, and min_similarity/max_similarity are true over all member pairs (members linked only through the representative may be below the threshold). Widget trees: exact groups compare strict class+name multisets; similarity and widget_tree_similarity use (widget name, native ancestor class, parent widget name) tuples (kind widget_tree). blueprint_pairs counts each unit pair once and lists Blueprint pairs sharing exact or similar graphs, sorted by shared_graphs descending, with widget_tree_similarity. matched_assets reports the Blueprints found under each prefix and warnings names prefixes that matched nothing. Pairwise work is O(n^2) per same-name bucket, pruned by a size-ratio bound. With out_path the full result is written to that file and the response is a compact summary (counts plus the first 10 exact groups, similar groups and Blueprint pairs)") }
+			.Required(TEXT("path_prefixes"), TEXT("array"), TEXT("Mounted content folders whose Blueprints are compared (e.g. /Game/MyFeature)"))
+			.Optional(TEXT("min_nodes"), TEXT("number"), TEXT("Smallest graph (or widget tree) size considered, integer greater than 0 (default 5)"))
+			.Optional(TEXT("similarity"), TEXT("number"), TEXT("Jaccard threshold for similar groups, greater than 0 and at most 1 (default 0.9)"))
+			.Optional(TEXT("out_path"), TEXT("string"), TEXT("Write the full result to this file (under Project Saved, Content or Config) and return only a compact summary; use it when the inline result would be too large"))
+			.StrictParams(),
+		FCortexCommandInfo{ TEXT("find_interface_implementers"), TEXT("List the Blueprints that implement an interface (a Blueprint Interface asset, a /Script/ class path, or a U/I class name). Implementers come from the Asset Registry ImplementedInterfaces tag, so only candidates are loaded; a Blueprint that inherits the interface from a parent Blueprint is listed with direct=false and via naming the declaring ancestor. Per interface function the implementation is function_graph (a graph of the interface description: graph_name, graph_guid, entry_node_guid, node_count), event (an event node: graph_guid, entry_node_guid, has_body) or none. With include_callers (default true) it also lists the call sites: callers are matched by the resolved owner of the member, never by name: UK2Node_Message (kind message), a UK2Node_CallFunction whose member parent is the interface (typed_call) and a UK2Node_DynamicCast to the interface (interface_cast); each site carries asset_path, graph_name, graph_guid, subgraph_path (dot-separated composite subgraphs), node_guid, node_class and function. Sites whose owner cannot be resolved but whose member name is an interface function are listed under unresolved_callers. A content interface narrows callers to the hard referencers of its package; a native interface has no content package, so every Blueprint under path_prefixes is loaded") }
+			.Required(TEXT("interface"), TEXT("string"), TEXT("Blueprint Interface asset path, /Script/Module.Name, or interface class name (URipX or RipX; the C++ spelling IRipX is accepted)"))
+			.Required(TEXT("path_prefixes"), TEXT("array"), TEXT("Mounted content folders whose Blueprints are searched (e.g. /Game/MyFeature)"))
+			.Optional(TEXT("include_callers"), TEXT("boolean"), TEXT("Also list the call and cast sites of the interface (default true)"))
+			.Optional(TEXT("function"), TEXT("string"), TEXT("Restrict the reported functions, and the message and typed-call sites, to one interface function (cast sites are not function-specific and stay)"))
+			.Optional(TEXT("out_path"), TEXT("string"), TEXT("Write the full result to this file (under Project Saved, Content or Config) and return only a compact summary; use it when the inline result would be too large"))
+			.StrictParams(),
+		FCortexCommandInfo{ TEXT("find_type_usages"), TEXT("Inventory where a user-defined struct (UDS) or enum (UDE) is used, classified, for a replacement by a native type; run against the native type afterwards it proves no residual use. The hard referencers of the type's package under path_prefixes are loaded (Blueprints, user-defined structs) or classified from the Asset Registry. Each usage has a category: variable (Blueprint member variable incl. array/set/map, with role type/map_key/map_value), local_variable and function_parameter (function entry/result and custom event user pins), pin (any other node pin of the type, incl. enum equality, for-each-enum and enumerator-name nodes; node_class, graph_guid, node_guid, pin), make_struct, break_struct, set_fields, struct_member (UK2Node_MakeStruct, BreakStruct, SetFieldsInStruct, StructMemberGet/Set), switch_enum, enum_literal, datatable_row_struct (from the RowStructure registry tag, the table is not loaded), data_asset (a UDataAsset instance that hard-references the type, or an instance of a Blueprint DataAsset class whose variables use it, with via_class), save_game (a Blueprint deriving from USaveGame that declares the type; .sav slot files are not scanned) and nested_struct (another user-defined struct with a member of the type). Assets that cannot be loaded are listed under load_failures and assets beyond the node budget under skipped_assets, never counted as free of the type; referencing assets of other classes are listed under other_referencers") }
+			.Required(TEXT("user_type"), TEXT("string"), TEXT("User-defined struct or enum asset path, a /Script/Module.Name path, or a struct or enum name (F/E prefix optional)"))
+			.Required(TEXT("path_prefixes"), TEXT("array"), TEXT("Mounted content folders whose assets are inventoried (e.g. /Game/MyFeature)"))
+			.Optional(TEXT("out_path"), TEXT("string"), TEXT("Write the full result to this file (under Project Saved, Content or Config) and return only a compact summary; use it when the inline result would be too large"))
+			.StrictParams(),
 	};
+}
 }

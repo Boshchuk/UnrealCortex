@@ -48,6 +48,15 @@ _REFLECT_DETAIL_SELECTOR = "Request detail=summary, or narrow the class you insp
 _REFLECT_CONTEXT_SELECTOR = (
     "Request detail=summary, or read the parent properties only instead of the whole context."
 )
+# Both extended material reads can also refuse; the supported narrowing is their own caller-side
+# selectors, never a limit the read does not consume.
+_MATERIAL_INPUT_STATE_SELECTOR = (
+    "Select fewer 'properties', omit include_input_state, or read the root state separately "
+    "through material.get_material."
+)
+_MATERIAL_CONNECTIONS_SELECTOR = (
+    "Omit include_input_state, or read the root state separately through material.get_material."
+)
 _COMPLETE_OR_REFUSE_POLICIES: dict[str, str] = {
     "data.get_data_asset": (
         "Select the needed members with 'fields' instead of reading the whole DataAsset."
@@ -55,6 +64,8 @@ _COMPLETE_OR_REFUSE_POLICIES: dict[str, str] = {
     "material.get_node": (
         "Request only the needed 'properties' of the node, or read the node identity alone."
     ),
+    "material.get_material": _MATERIAL_INPUT_STATE_SELECTOR,
+    "material.list_connections": _MATERIAL_CONNECTIONS_SELECTOR,
     "umg.get_tree": (
         "Bound the traversal with 'depth' or 'max_nodes', use names_only=true for a lean "
         "hierarchy, or inspect one widget with umg.get_widget."
@@ -66,6 +77,14 @@ _COMPLETE_OR_REFUSE_POLICIES: dict[str, str] = {
     "blueprint.get_class_defaults": _PROPERTIES_DISCOVERY_SELECTOR,
     "blueprint.list_settable_defaults": _PROPERTIES_DISCOVERY_SELECTOR,
     "blueprint.list_inherited_properties": _PROPERTIES_DISCOVERY_SELECTOR,
+    "blueprint.analyze_for_migration": (
+        "Request only the needed 'sections' (e.g. variables, functions, graphs, complexity_metrics) "
+        "instead of the whole migration analysis."
+    ),
+    "blueprint.graph_metrics": (
+        "graph_metrics has no row selector: use analyze_for_migration with "
+        "sections=['complexity_metrics'] for a bounded summary, or split the oversized Blueprint."
+    ),
     "get_capabilities": (
         "Request detail=names for the per-operation schema index, or inspect one operation schema."
     ),
@@ -75,6 +94,34 @@ _COMPLETE_OR_REFUSE_POLICIES: dict[str, str] = {
     "reflect.class_detail": _REFLECT_DETAIL_SELECTOR,
     "query_class_context": _REFLECT_CONTEXT_SELECTOR,
     "reflect.class_context": _REFLECT_CONTEXT_SELECTOR,
+    "batch_query": (
+        "The batch has already executed and must not be re-run; its response could not be "
+        "snapshotted for paging, so narrow the steps of a new, read-only query instead."
+    ),
+    "reflect.find_duplicate_graphs": (
+        "Pass 'out_path' to write the full result to a file and get a compact summary, or narrow "
+        "'path_prefixes' to fewer content folders, raise 'min_nodes', or raise 'similarity' so fewer "
+        "groups are reported."
+    ),
+    "reflect.find_interface_implementers": (
+        "Pass 'out_path' to write the full result to a file and get a compact summary, or narrow "
+        "'path_prefixes' to fewer content folders, pass 'function' for one interface function, or "
+        "pass include_callers=false to list only the implementers."
+    ),
+    "reflect.find_type_usages": (
+        "Pass 'out_path' to write the full result to a file and get a compact summary, or narrow "
+        "'path_prefixes' to fewer content folders."
+    ),
+    "reflect.find_name_lookups": (
+        "Pass 'out_path' to write the full result to a file and get a compact summary, or narrow "
+        "'path_prefixes' to fewer content folders, or pass 'symbols' to report only the names you "
+        "are checking."
+    ),
+    "reflect.find_broken_config_paths": (
+        "find_broken_config_paths has no row selector: fix the broken config paths reported so far "
+        "and re-run, or use reflect.find_usages / reflect.get_referencers (include_config) on the "
+        "specific assets in question."
+    ),
 }
 
 
@@ -135,6 +182,89 @@ def _bound_authoring_response(data: dict) -> str:
         bounded["authored_track_omitted"] = True
     bounded["_authored_track_instructions"] = _AUTHORED_TRACK_REFERRAL
     return compact_json(bounded)
+
+
+# statetree.replace_node: the applied result embeds the full preview plan. Detail is dropped in this order, each step only
+# when the outcome still does not fit; the compact outcome (replaced, saved, compile status, fingerprint, binding counts)
+# is never dropped.
+_REPLACE_NODE_PLAN_KEYS = (
+    "property_plan",
+    "nodes",
+    "blueprint_only_members",
+    "required_acknowledgment",
+    "type_mismatches",
+    "unresolved_bindings",
+)
+_REPLACE_NODE_REFERRAL = (
+    "The replacement was applied; this is the authoritative outcome. Oversized plan detail was omitted. "
+    "Use statetree.get_node_bindings (paged) to read the resulting bindings."
+)
+
+
+def _bound_replace_node_outcome(data: dict) -> str:
+    """Bound an applied statetree.replace_node result without ever replacing it by an error.
+
+    A dry run is a plan, not an outcome, so it stays on the generic path.
+    """
+    text = compact_json(data)
+    if len(text) <= MAX_RESPONSE_CHARS:
+        return text
+
+    bounded = dict(data)
+    omitted: list[str] = []
+
+    def finalized(extra_omitted: tuple[str, ...] = ()) -> dict:
+        """The exact object that would be returned: the omission metadata counts against the budget."""
+        result = dict(bounded)
+        result["reader_complete"] = False
+        result["_outcome_detail_omitted"] = omitted + list(extra_omitted)
+        result["_suggestion"] = _REPLACE_NODE_REFERRAL
+        return result
+
+    def fits() -> bool:
+        return len(compact_json(finalized())) <= MAX_RESPONSE_CHARS
+
+    bindings = bounded.get("bindings")
+    if isinstance(bindings, dict) and isinstance(bindings.get("remapped"), list):
+        trimmed = dict(bindings)
+        trimmed["remapped_count"] = len(trimmed.pop("remapped"))
+        trimmed["_remapped_omitted"] = True
+        bounded["bindings"] = trimmed
+        omitted.append("bindings.remapped")
+    for key in _REPLACE_NODE_PLAN_KEYS:
+        if fits():
+            break
+        value = bounded.get(key)
+        if isinstance(value, list):
+            del bounded[key]
+            bounded[f"{key}_count"] = len(value)
+            omitted.append(key)
+    if not fits() and isinstance(bounded.get("compile"), dict):
+        del bounded["compile"]
+        bounded["_compile_omitted"] = True
+        omitted.append("compile")
+
+    replaced = bounded.get("replaced")
+    if not fits() and isinstance(replaced, list):
+        total = len(replaced)
+        lo, hi, best = 0, total, 0
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            trial = finalized(("replaced",))
+            trial["replaced"] = replaced[:mid]
+            trial["replaced_count"] = total
+            trial["replaced_truncated"] = True
+            if len(compact_json(trial)) <= MAX_RESPONSE_CHARS:
+                best = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        bounded["replaced"] = replaced[:best]
+        bounded["replaced_count"] = total
+        bounded["replaced_truncated"] = True
+        omitted.append("replaced")
+
+    return compact_json(finalized())
 
 
 # Names a refusal field owns: context from the request or the native echo can never overwrite them.
@@ -349,6 +479,8 @@ def format_response(
     Returns:
         JSON string, guaranteed under MAX_RESPONSE_CHARS.
     """
+    if qualified_command == "statetree.replace_node" and data.get("dry_run") is False and "replaced" in data:
+        return _bound_replace_node_outcome(data)
     if command in ANIMATION_AUTHORING_COMMANDS:
         return _bound_authoring_response(data)
     if detail:

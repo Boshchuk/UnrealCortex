@@ -89,6 +89,14 @@ namespace CortexErrorCodes
 	// Blueprint SCS migration safety
 	static const FString PotentialDataLoss = TEXT("POTENTIAL_DATA_LOSS");
 	static const FString AmbiguousComponentReference = TEXT("AMBIGUOUS_COMPONENT_REFERENCE");
+	// Native member adoption and safe reparent
+	static const FString AmbiguousClass = TEXT("AMBIGUOUS_CLASS");
+	static const FString NameCollision = TEXT("NAME_COLLISION");
+	static const FString MemberReferenced = TEXT("MEMBER_REFERENCED");
+	static const FString MissingPropertyRedirect = TEXT("MISSING_PROPERTY_REDIRECT");
+	static const FString ReadbackMismatch = TEXT("READBACK_MISMATCH");
+	// Native type replacement
+	static const FString RedirectsNotActive = TEXT("REDIRECTS_NOT_ACTIVE");
 	// Level errors
 	static const FString ActorNotFound = TEXT("ACTOR_NOT_FOUND");
 	static const FString AmbiguousActor = TEXT("AMBIGUOUS_ACTOR");
@@ -120,6 +128,8 @@ namespace CortexErrorCodes
 	static const FString ConsoleCommandFailed = TEXT("CONSOLE_COMMAND_FAILED");
 	static const FString InvalidTimeScale = TEXT("INVALID_TIME_SCALE");
 	static const FString GameModeNotFound = TEXT("GAME_MODE_NOT_FOUND");
+	static const FString Timeout = TEXT("TIMEOUT");
+	static const FString NotAvailable = TEXT("NOT_AVAILABLE");
 	// QA errors
 	static const FString NavigationFailed = TEXT("NAVIGATION_FAILED");
 	static const FString InteractionFailed = TEXT("INTERACTION_FAILED");
@@ -128,11 +138,6 @@ namespace CortexErrorCodes
 	static const FString InvalidCondition = TEXT("INVALID_CONDITION");
 	static const FString UnsupportedType = TEXT("UNSUPPORTED_TYPE");
 	static const FString MovementMethodUnavailable = TEXT("MOVEMENT_METHOD_UNAVAILABLE");
-	// QA recording/replay errors
-	static const FString SessionBusy = TEXT("SESSION_BUSY");
-	static const FString MapMismatch = TEXT("MAP_MISMATCH");
-	static const FString SessionNotFound = TEXT("SESSION_NOT_FOUND");
-	static const FString ReplayCancelled = TEXT("REPLAY_CANCELLED");
 	// Reflect errors
 	static const FString SymbolNotFound = TEXT("SYMBOL_NOT_FOUND");
 	// StateTree errors
@@ -159,6 +164,8 @@ struct CORTEXCORE_API FCortexCommandResult
 {
 	bool bSuccess = false;
 	bool bIsDeferred = false;
+	/** Only meaningful with bIsDeferred: how long the server waits for the deferred callback. 0 = server default (30 s). */
+	double DeferredTimeoutSeconds = 0.0;
 	TSharedPtr<FJsonObject> Data;
 	FString ErrorCode;
 	FString ErrorMessage;

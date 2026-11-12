@@ -1,4 +1,7 @@
 #include "Operations/CortexReflectOps.h"
+#include "Operations/CortexReflectConfigScan.h"
+#include "Operations/CortexReflectNodeRefs.h"
+#include "HAL/FileManager.h"
 #include "CortexReflectModule.h"
 #include "UObject/UObjectIterator.h"
 #include "Engine/Blueprint.h"
@@ -12,14 +15,15 @@
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
 #include "K2Node_CallFunction.h"
-#include "K2Node_DynamicCast.h"
-#include "K2Node_SpawnActorFromClass.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
 #include "Blueprint/BlueprintSupport.h"
 #include "UObject/SoftObjectPath.h"
 #include "UObject/CoreRedirects.h"
 #include "Modules/ModuleManager.h"
+#include "K2Node_Message.h"
+#include "Engine/LevelScriptBlueprint.h"
+#include "Operations/CortexReflectInterfaceOps.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -115,6 +119,20 @@ UClass* FCortexReflectOps::FindClassByName(const FString& ClassName, FCortexComm
 		return nullptr;
 	}
 
+	// A /Script/Module.Class path names a native class directly.
+	if (ClassName.StartsWith(TEXT("/Script/")))
+	{
+		if (UClass* NativeClass = FindObject<UClass>(nullptr, *ClassName))
+		{
+			return NativeClass;
+		}
+		OutError = FCortexCommandRouter::Error(
+			CortexErrorCodes::ClassNotFound,
+			FString::Printf(TEXT("Native class not found: %s"), *ClassName)
+		);
+		return nullptr;
+	}
+
 	// 1. Try asset path (starts with /)
 	if (ClassName.StartsWith(TEXT("/")))
 	{
@@ -203,6 +221,20 @@ UClass* FCortexReflectOps::FindClassByName(const FString& ClassName, FCortexComm
 		if (UClass** Result = Found.Find(Name))
 		{
 			return *Result;
+		}
+	}
+
+	// The C++ spelling of an interface (IRipX) names the native interface class URipX; only an interface class matches it.
+	if (ClassName.Len() > 1 && ClassName.StartsWith(TEXT("I")))
+	{
+		const FString InterfaceName = ClassName.Mid(1);
+		for (TObjectIterator<UClass> It; It; ++It)
+		{
+			UClass* Candidate = *It;
+			if (IsValid(Candidate) && Candidate->HasAnyClassFlags(CLASS_Interface) && Candidate->GetName() == InterfaceName)
+			{
+				return Candidate;
+			}
 		}
 	}
 
@@ -1322,6 +1354,12 @@ FCortexCommandResult FCortexReflectOps::FindOverrides(const TSharedPtr<FJsonObje
 		return FindError;
 	}
 
+	// An interface has no derived classes; its implementing Blueprints are what a caller means by overrides.
+	if (ParentClass->HasAnyClassFlags(CLASS_Interface))
+	{
+		return FCortexReflectInterfaceOps::FindOverridesOfInterface(Params, ParentClass);
+	}
+
 	int32 Depth = 2;
 	Params->TryGetNumberField(TEXT("depth"), Depth);
 
@@ -1499,6 +1537,7 @@ FCortexCommandResult FCortexReflectOps::FindUsages(const TSharedPtr<FJsonObject>
 
 	// Verify symbol exists on the class
 	FName SymbolFName(*SymbolName);
+	const UClass* AuthoritativeOwner = OwnerClass->GetAuthoritativeClass();
 	bool bIsProperty = OwnerClass->FindPropertyByName(SymbolFName) != nullptr;
 	bool bIsFunction = OwnerClass->FindFunctionByName(SymbolFName) != nullptr;
 
@@ -1556,10 +1595,18 @@ FCortexCommandResult FCortexReflectOps::FindUsages(const TSharedPtr<FJsonObject>
 		LoadedBlueprintsByPath.FindOrAdd(AssetPath, Blueprint);
 	};
 
+	// Widget, Anim and every other Blueprint subclass carry the same graphs; an exact UBlueprint class match silently
+	// dropped them (they were not even counted as not scanned). Level script Blueprints stay out of scope.
+	TSet<FTopLevelAssetPath> BlueprintClassPaths;
+	AssetRegistry.GetDerivedClassNames({UBlueprint::StaticClass()->GetClassPathName()}, {}, BlueprintClassPaths);
+	BlueprintClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
+	BlueprintClassPaths.Remove(ULevelScriptBlueprint::StaticClass()->GetClassPathName());
+
 	auto AddBlueprintAsset = [
 		&LoadedBlueprintsByPath,
 		&UnloadedBlueprintObjectPaths,
-		&PathFilter
+		&PathFilter,
+		&BlueprintClassPaths
 	](const FAssetData& Asset)
 	{
 		if (!Asset.IsValid())
@@ -1567,7 +1614,7 @@ FCortexCommandResult FCortexReflectOps::FindUsages(const TSharedPtr<FJsonObject>
 			return;
 		}
 
-		if (Asset.AssetClassPath != UBlueprint::StaticClass()->GetClassPathName())
+		if (!BlueprintClassPaths.Contains(Asset.AssetClassPath))
 		{
 			return;
 		}
@@ -1588,6 +1635,8 @@ FCortexCommandResult FCortexReflectOps::FindUsages(const TSharedPtr<FJsonObject>
 
 		UnloadedBlueprintObjectPaths.FindOrAdd(PackagePath, ObjectPath);
 	};
+
+	const bool bOwnerIsInterface = OwnerClass->HasAnyClassFlags(CLASS_Interface);
 
 	if (Scope == TEXT("derived"))
 	{
@@ -1615,6 +1664,13 @@ FCortexCommandResult FCortexReflectOps::FindUsages(const TSharedPtr<FJsonObject>
 		AssetRegistry.GetAssets(Filter, Assets);
 		for (const FAssetData& Asset : Assets)
 		{
+			// An interface has no Blueprint subclasses: its "derived" Blueprints are the ones that implement it.
+			if (bOwnerIsInterface && FCortexReflectInterfaceOps::TagImplementsInterface(Asset, OwnerClass))
+			{
+				AddBlueprintAsset(Asset);
+				continue;
+			}
+
 			const FAssetTagValueRef ParentTag = Asset.TagsAndValues.FindTag("NativeParentClass");
 			if (!ParentTag.IsSet())
 			{
@@ -1683,6 +1739,7 @@ FCortexCommandResult FCortexReflectOps::FindUsages(const TSharedPtr<FJsonObject>
 
 	auto ScanBlueprintForUsages = [
 		OwnerClass,
+		AuthoritativeOwner,
 		bIsProperty,
 		bIsFunction,
 		SymbolFName
@@ -1736,19 +1793,23 @@ FCortexCommandResult FCortexReflectOps::FindUsages(const TSharedPtr<FJsonObject>
 
 				if (bIsFunction)
 				{
-					UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(Node);
-					if (CallNode && CallNode->FunctionReference.GetMemberName() == SymbolFName)
+					const UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(Node);
+					// Matched by the member's resolved owner, never by name alone: a same-named function on an unrelated class is not a usage.
+					const UClass* MemberOwner = (CallNode && CallNode->FunctionReference.GetMemberName() == SymbolFName)
+						? CortexReflectNodeRefs::GetCallMemberOwner(CallNode, Blueprint->GeneratedClass ? Blueprint->GeneratedClass : Blueprint->SkeletonGeneratedClass)
+						: nullptr;
+					if (MemberOwner && (MemberOwner->IsChildOf(AuthoritativeOwner) || AuthoritativeOwner->IsChildOf(MemberOwner)))
 					{
 						TSharedPtr<FJsonObject> RefObj = MakeShared<FJsonObject>();
 						RefObj->SetStringField(TEXT("context"), Graph->GetName());
-						RefObj->SetStringField(TEXT("type"), TEXT("call"));
-						RefObj->SetStringField(TEXT("node_class"), TEXT("UK2Node_CallFunction"));
+						RefObj->SetStringField(TEXT("type"), CallNode->IsA<UK2Node_Message>() ? TEXT("message") : TEXT("call"));
+						RefObj->SetStringField(TEXT("node_class"), CortexReflectNodeRefs::GetNodeClassLabel(CallNode));
 						ReferenceResults.Add(MakeShared<FJsonValueObject>(RefObj));
 					}
 				}
 
-				UK2Node_DynamicCast* CastNode = Cast<UK2Node_DynamicCast>(Node);
-				if (CastNode && CastNode->TargetType && CastNode->TargetType->IsChildOf(OwnerClass))
+				const UClass* CastTarget = CortexReflectNodeRefs::GetCastTargetClass(Node);
+				if (CastTarget && CastTarget->IsChildOf(OwnerClass))
 				{
 					TSharedPtr<FJsonObject> RefObj = MakeShared<FJsonObject>();
 					RefObj->SetStringField(TEXT("context"), Graph->GetName());
@@ -1757,22 +1818,14 @@ FCortexCommandResult FCortexReflectOps::FindUsages(const TSharedPtr<FJsonObject>
 					ReferenceResults.Add(MakeShared<FJsonValueObject>(RefObj));
 				}
 
-				UK2Node_SpawnActorFromClass* SpawnNode = Cast<UK2Node_SpawnActorFromClass>(Node);
-				if (SpawnNode)
+				const UClass* SpawnClass = CortexReflectNodeRefs::GetSpawnedClass(Node);
+				if (SpawnClass && SpawnClass->IsChildOf(OwnerClass))
 				{
-					UEdGraphPin* ClassPin = SpawnNode->GetClassPin();
-					if (ClassPin && ClassPin->DefaultObject)
-					{
-						UClass* SpawnClass = Cast<UClass>(ClassPin->DefaultObject);
-						if (SpawnClass && SpawnClass->IsChildOf(OwnerClass))
-						{
-							TSharedPtr<FJsonObject> RefObj = MakeShared<FJsonObject>();
-							RefObj->SetStringField(TEXT("context"), Graph->GetName());
-							RefObj->SetStringField(TEXT("type"), TEXT("spawn"));
-							RefObj->SetStringField(TEXT("node_class"), TEXT("UK2Node_SpawnActorFromClass"));
-							ReferenceResults.Add(MakeShared<FJsonValueObject>(RefObj));
-						}
-					}
+					TSharedPtr<FJsonObject> RefObj = MakeShared<FJsonObject>();
+					RefObj->SetStringField(TEXT("context"), Graph->GetName());
+					RefObj->SetStringField(TEXT("type"), TEXT("spawn"));
+					RefObj->SetStringField(TEXT("node_class"), TEXT("UK2Node_SpawnActorFromClass"));
+					ReferenceResults.Add(MakeShared<FJsonValueObject>(RefObj));
 				}
 			}
 		}
@@ -1916,6 +1969,11 @@ FCortexCommandResult FCortexReflectOps::FindUsages(const TSharedPtr<FJsonObject>
 	Result->SetArrayField(TEXT("usages"), UsagesArray);
 	Result->SetNumberField(TEXT("total_usages"), TotalUsages);
 	Result->SetNumberField(TEXT("total_classes"), UsagesArray.Num());
+	if (bOwnerIsInterface)
+	{
+		Result->SetStringField(TEXT("interface_hint"),
+			TEXT("An interface has no Blueprint subclasses; reflect.find_interface_implementers lists its implementing Blueprints and the callers of its functions by resolved owner."));
+	}
 
 	return FCortexCommandRouter::Success(Result);
 }
@@ -2034,6 +2092,9 @@ FCortexCommandResult FCortexReflectOps::GetReferencers(const TSharedPtr<FJsonObj
 		Limit = 100;
 	}
 
+	bool bIncludeConfig = true;
+	Params->TryGetBoolField(TEXT("include_config"), bIncludeConfig);
+
 	UE::AssetRegistry::EDependencyCategory Category = UE::AssetRegistry::EDependencyCategory::All;
 	if (CategoryStr == TEXT("package"))
 	{
@@ -2046,7 +2107,36 @@ FCortexCommandResult FCortexReflectOps::GetReferencers(const TSharedPtr<FJsonObj
 	TArray<FAssetDependency> Referencers;
 	AssetRegistry.GetReferencers(FAssetIdentifier(FName(*AssetPath)), Referencers, Category);
 
+	// Config rows come first so `limit` keeps them; asset rows fill what remains.
 	TArray<TSharedPtr<FJsonValue>> ReferencerArray;
+	int32 ConfigRowCount = 0;
+	if (bIncludeConfig)
+	{
+		for (const CortexReflectConfigScan::FConfigReference& Ref : CortexReflectConfigScan::Scan())
+		{
+			if (Ref.bDirectory || Ref.PackageName != AssetPath)
+			{
+				continue;
+			}
+
+			++ConfigRowCount;
+			if (ReferencerArray.Num() >= Limit)
+			{
+				continue;
+			}
+
+			TSharedPtr<FJsonObject> ConfigObj = MakeShared<FJsonObject>();
+			ConfigObj->SetStringField(TEXT("package"), Ref.File);
+			ConfigObj->SetBoolField(TEXT("is_code"), false);
+			ConfigObj->SetStringField(TEXT("type"), TEXT("config"));
+			ConfigObj->SetStringField(TEXT("file"), Ref.File);
+			ConfigObj->SetNumberField(TEXT("line"), Ref.Line);
+			ConfigObj->SetStringField(TEXT("section"), Ref.Section);
+			ConfigObj->SetStringField(TEXT("key"), Ref.Key);
+			ReferencerArray.Add(MakeShared<FJsonValueObject>(ConfigObj));
+		}
+	}
+
 	for (const FAssetDependency& Referencer : Referencers)
 	{
 		if (ReferencerArray.Num() >= Limit)
@@ -2093,11 +2183,79 @@ FCortexCommandResult FCortexReflectOps::GetReferencers(const TSharedPtr<FJsonObj
 		ReferencerArray.Add(MakeShared<FJsonValueObject>(ReferencerObj));
 	}
 
+
 	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("asset_path"), AssetPath);
 	Result->SetArrayField(TEXT("referencers"), ReferencerArray);
 	Result->SetNumberField(TEXT("total"), ReferencerArray.Num());
-	Result->SetNumberField(TEXT("total_unfiltered"), Referencers.Num());
+	Result->SetNumberField(TEXT("total_unfiltered"), Referencers.Num() + ConfigRowCount);
+
+	return FCortexCommandRouter::Success(Result);
+}
+
+FCortexCommandResult FCortexReflectOps::FindBrokenConfigPaths(const TSharedPtr<FJsonObject>& Params)
+{
+	(void)Params;
+
+	CortexReflectConfigScan::FScanSummary ScanSummary;
+	const TArray<CortexReflectConfigScan::FConfigReference> Refs = CortexReflectConfigScan::Scan(&ScanSummary);
+
+	IAssetRegistry& AssetRegistry =
+		FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
+
+	// Existence is a property of the package/directory, not of the config line; cache per name.
+	TMap<FString, bool> BrokenByName;
+	TArray<TSharedPtr<FJsonValue>> BrokenArray;
+	for (const CortexReflectConfigScan::FConfigReference& Ref : Refs)
+	{
+		const FString CacheKey = FString::Printf(TEXT("%d|%s"), Ref.bDirectory ? 1 : 0, *Ref.PackageName);
+		bool bBroken = false;
+		if (const bool* Cached = BrokenByName.Find(CacheKey))
+		{
+			bBroken = *Cached;
+		}
+		else
+		{
+			if (Ref.bDirectory)
+			{
+				FString DiskPath;
+				const bool bOnDisk = FPackageName::TryConvertLongPackageNameToFilename(Ref.PackageName, DiskPath)
+					&& IFileManager::Get().DirectoryExists(*DiskPath);
+				bBroken = !AssetRegistry.PathExists(FName(*Ref.PackageName)) && !bOnDisk;
+			}
+			else
+			{
+				bBroken = !FindPackage(nullptr, *Ref.PackageName) && !FPackageName::DoesPackageExist(Ref.PackageName);
+			}
+			BrokenByName.Add(CacheKey, bBroken);
+		}
+
+		if (!bBroken)
+		{
+			continue;
+		}
+
+		TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+		Row->SetStringField(TEXT("file"), Ref.File);
+		Row->SetNumberField(TEXT("line"), Ref.Line);
+		Row->SetStringField(TEXT("section"), Ref.Section);
+		Row->SetStringField(TEXT("key"), Ref.Key);
+		Row->SetStringField(TEXT("value"), Ref.Value);
+		Row->SetStringField(TEXT("path"), Ref.Path);
+		Row->SetStringField(TEXT("kind"), Ref.bDirectory ? TEXT("directory") : TEXT("package"));
+		BrokenArray.Add(MakeShared<FJsonValueObject>(Row));
+	}
+
+	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetNumberField(TEXT("scanned_files"), ScanSummary.ScannedFiles);
+	TArray<TSharedPtr<FJsonValue>> UnreadableValues;
+	for (const FString& Unreadable : ScanSummary.UnreadableFiles)
+	{
+		UnreadableValues.Add(MakeShared<FJsonValueString>(Unreadable));
+	}
+	Result->SetArrayField(TEXT("unreadable_files"), UnreadableValues);
+	Result->SetNumberField(TEXT("checked"), Refs.Num());
+	Result->SetArrayField(TEXT("broken"), BrokenArray);
 
 	return FCortexCommandRouter::Success(Result);
 }

@@ -20,9 +20,13 @@ class MockMCP:
     def __init__(self):
         self.tools = {}
 
-    def tool(self, name=None, description=None, **_kwargs):
+    def tool(self, name=None, description=None, **kwargs):
         def decorator(fn):
-            self.tools[name or fn.__name__] = {"fn": fn, "description": description}
+            self.tools[name or fn.__name__] = {
+                "fn": fn,
+                "description": description,
+                "options": kwargs,
+            }
             return fn
 
         return decorator
@@ -754,6 +758,87 @@ def test_core_router_dispatches_normal_commands_via_tcp():
     )
 
 
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_wait_ready_non_finite_timeout_falls_back_to_default_window(bad):
+    from cortex_mcp.tools.routers import _dispatch_timeout
+
+    assert _dispatch_timeout("editor.wait_ready", {"timeout": bad}) == 150.0
+
+
+@pytest.mark.parametrize(
+    ("command", "params", "expected_timeout"),
+    [
+        ("wait_ready", {}, 150.0),
+        ("wait_ready", {"timeout": 300}, 330.0),
+        ("live_coding_compile", {}, 1830.0),
+    ],
+)
+def test_editor_router_widens_receive_window_for_deferred_turnaround_commands(command, params, expected_timeout):
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {"ready": True}}
+
+    router = make_router("editor", connection, "editor docs")
+    payload = json.loads(router(command, params))
+
+    assert payload["ready"] is True
+    connection.send_command.assert_called_once_with(
+        f"editor.{command}",
+        params,
+        timeout=expected_timeout,
+    )
+
+
+@pytest.mark.parametrize(
+    ("domain", "command", "params"),
+    [
+        ("data", "plan_type_replacement", {"user_type": "/Game/Ripper/UDS_A", "native_type": "/Script/Ripper.RipA"}),
+        ("data", "verify_type_replacement", {"plan_path": "Saved/CortexTypeReplacement/UDS_A.plan.json", "save": False}),
+        ("blueprint", "compile_all", {"path_prefix": "/Game/Ripper", "out_path": "x.json"}),
+        ("blueprint", "export_migration_analysis", {"path_prefix": "/Game/Ripper", "out_path": "x.jsonl"}),
+        ("level", "export_class_instances", {"class": "A", "maps": ["/Game/M"], "out_path": "x.json"}),
+        ("reflect", "export_dependency_graph", {"path_prefixes": ["/Game/Ripper"], "out_path": "x.json"}),
+        ("reflect", "find_duplicate_graphs", {"path_prefixes": ["/Game/Ripper"]}),
+        ("reflect", "find_interface_implementers", {"interface": "/Game/Ripper/BPI_A", "path_prefixes": ["/Game/Ripper"]}),
+        ("reflect", "find_name_lookups", {"path_prefixes": ["/Game/Ripper"]}),
+        ("reflect", "find_type_usages", {"user_type": "/Game/Ripper/UDS_A", "path_prefixes": ["/Game/Ripper"]}),
+        ("statetree", "replace_node", {"asset_path": "/Game/ST_A", "node_id": "N", "expected_fingerprint": {"hash": "h"}}),
+        ("statetree", "get_runtime_state", {"asset_path": "/Game/ST_A"}),
+        ("anim", "rebind_function", {"asset_path": "/Game/ABP_A", "from": "F", "to": "G", "expected_fingerprint": {"hash": "h"}}),
+    ],
+)
+def test_router_widens_receive_window_for_long_synchronous_commands(domain, command, params):
+    connection = MagicMock()
+    connection.send_command.return_value = {"success": True, "data": {"ok": True}}
+
+    router = make_router(domain, connection, f"{domain} docs")
+    payload = json.loads(router(command, params))
+
+    assert payload["ok"] is True
+    connection.send_command.assert_called_once_with(f"{domain}.{command}", params, timeout=1800.0)
+
+
+@pytest.mark.parametrize(
+    "qualified",
+    [
+        "data.plan_type_replacement",
+        "data.verify_type_replacement",
+        "blueprint.export_migration_analysis",
+        "reflect.export_dependency_graph",
+        "reflect.find_duplicate_graphs",
+        "reflect.find_interface_implementers",
+        "reflect.find_name_lookups",
+        "reflect.find_type_usages",
+        "statetree.replace_node",
+        "statetree.get_runtime_state",
+        "anim.rebind_function",
+    ],
+)
+def test_dispatch_timeout_is_the_long_window_for_whole_project_scans(qualified):
+    from cortex_mcp.tools.routers import _dispatch_timeout
+
+    assert _dispatch_timeout(qualified, {}) == 1800.0
+
+
 def test_blueprint_router_uses_cached_send_for_discovery_reads():
     connection = MagicMock()
     connection.send_command_cached.return_value = {
@@ -1269,3 +1354,18 @@ def test_batch_query_forwards_rollback_params():
             "verify_rollback": True,
         },
     )
+
+
+def test_register_router_tools_disables_structured_output_for_replay_only():
+    """A Replay reply is budgeted as one encoded envelope, so its tool opts out of the SDK's
+    duplicate text plus structuredContent wrapping while every other domain keeps auto-detection."""
+    mcp = MockMCP()
+    connection = MagicMock()
+    domains = tuple(CORE_DOMAINS) + ("replay",)
+    docstrings = {domain: f"{domain} docs" for domain in domains}
+
+    register_router_tools(mcp, connection, docstrings, domains)
+
+    assert mcp.tools["replay_cmd"]["options"]["structured_output"] is False
+    for domain in CORE_DOMAINS:
+        assert mcp.tools[f"{domain}_cmd"]["options"]["structured_output"] is None
